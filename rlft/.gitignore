@@ -2,3 +2,7 @@
 /checkpoints/
 /toy_diffusion_rl/results/
 /toy_diffusion_rl/data/
+/runs/
+/wandb/
+/dsrl/checkpoints/
+/dsrl_offpolicy/checkpoints/

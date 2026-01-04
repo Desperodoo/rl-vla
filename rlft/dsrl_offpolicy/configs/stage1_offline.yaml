@@ -1,0 +1,75 @@
+# Stage 1: Offline AW-MLE Training Configuration
+# Same as on-policy DSRL Stage 1 (AW-MLE is off-policy by nature)
+
+# Experiment settings
+exp_name: null
+seed: 1
+track: false
+wandb_project_name: "ManiSkill_DSRL_OffPolicy"
+
+# Environment settings
+env_id: "LiftPegUpright-v1"
+demo_path: "~/.maniskill/demos/LiftPegUpright-v1/rl/trajectory.rgb.pd_ee_delta_pose.physx_cuda.h5"
+num_demos: 745
+max_episode_steps: 100
+control_mode: "pd_ee_delta_pose"
+obs_mode: "rgb"
+sim_backend: "physx_cuda"
+
+# Pretrained checkpoint (from AW-ShortCut Flow)
+awsc_checkpoint: "/home/lizh/rl-vla/rlft/dsrl/checkpoints/best_eval_success_once.pt"
+use_ema: true
+
+# Training settings
+total_iters: 100000
+batch_size: 256
+lr: 1e-4
+
+# Observation/Action horizons (must match pretrained model)
+obs_horizon: 2
+act_horizon: 8
+pred_horizon: 16
+
+# Visual encoder settings
+visual_feature_dim: 256
+diffusion_step_embed_dim: 64
+unet_dims: [64, 128, 256]
+n_groups: 8
+
+# Latent policy architecture
+latent_hidden_dims: [256, 256, 256]
+steer_mode: "full"  # "full" or "act_horizon"
+state_dependent_std: true
+
+# Q-network settings (must match pretrained)
+use_double_q: true
+num_qs: 10
+num_min_qs: 2
+q_hidden_dims: [512, 512, 512]
+
+# Stage 1 AW-MLE hyperparameters
+num_candidates: 32  # M: number of latent candidates
+tau: 5.0            # Soft baseline temperature
+beta_latent: 1.0    # Advantage weighting temperature
+advantage_clip: 20.0
+kl_coef: 1e-3
+
+# Flow inference
+num_inference_steps: 8
+gamma: 0.99
+
+# Noise Aliasing (NA) settings
+use_na: true                # Use Noise Aliasing to utilize dataset actions
+na_ratio: 0.5               # Ratio of NA candidates (0.5 = half NA, half prior)
+num_na_inverse_steps: 8     # Steps for inverse ODE
+use_rk4_inverse: false      # Use RK4 for inversion (more accurate, slower)
+
+# Q^W distillation settings (recommended for Stage 2 preparation)
+distill_qw: true            # Distill Q^W from Q^A during offline training
+qw_distill_coef: 1.0        # Coefficient for Q^W distillation loss
+# Logging
+log_freq: 1
+eval_freq: 5000
+save_freq: null
+num_eval_episodes: 100
+num_eval_envs: 50

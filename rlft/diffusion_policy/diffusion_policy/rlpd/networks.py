@@ -237,6 +237,36 @@ class EnsembleQNetwork(nn.Module):
         """
         q_all = self.forward(action_seq, obs_cond)
         return q_all[0], q_all[1]
+    
+    def get_ucb_q(
+        self,
+        action_seq: torch.Tensor,
+        obs_cond: torch.Tensor,
+        kappa: float = 1.0,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Get Q-value estimate using UCB-style aggregation: μ - κσ.
+        
+        This provides a pessimistic Q estimate that accounts for epistemic
+        uncertainty in the ensemble. Useful for offline RL and safe exploration.
+        
+        Reference: Used in DSRL for latent steering advantage computation.
+        
+        Args:
+            action_seq: (B, action_horizon, action_dim) action sequence
+            obs_cond: (B, obs_dim) observation features
+            kappa: UCB coefficient (higher = more conservative)
+            
+        Returns:
+            q_ucb: (B, 1) UCB Q-value estimate (μ - κσ)
+            q_mean: (B, 1) Mean Q-value across ensemble
+            q_std: (B, 1) Std of Q-values across ensemble
+        """
+        q_all = self.forward(action_seq, obs_cond)  # (num_qs, B, 1)
+        q_mean = q_all.mean(dim=0)  # (B, 1)
+        q_std = q_all.std(dim=0)  # (B, 1)
+        q_ucb = q_mean - kappa * q_std  # (B, 1)
+        return q_ucb, q_mean, q_std
 
 
 class DiagGaussianActor(nn.Module):

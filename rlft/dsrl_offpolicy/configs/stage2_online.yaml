@@ -1,0 +1,82 @@
+# Stage 2: Online SAC Training Configuration
+# Off-policy version using SAC instead of PPO
+
+# Experiment settings
+exp_name: null
+seed: 42
+track: false
+wandb_project_name: "ManiSkill_DSRL_OffPolicy"
+
+# Environment settings
+env_id: "LiftPegUpright-v1"
+num_envs: 50
+num_eval_envs: 50
+max_episode_steps: 100
+control_mode: "pd_ee_delta_pose"
+obs_mode: "rgb"
+sim_backend: "physx_cuda"
+
+# Pretrained checkpoints
+awsc_checkpoint: ""
+stage1_checkpoint: ""
+use_ema: true
+
+# Training settings
+total_timesteps: 500000
+warmup_steps: 5000  # Steps before starting updates (fill replay buffer)
+eval_freq: 50000
+save_freq: 50000
+log_freq: 1000
+num_eval_episodes: 50
+
+# Off-policy specific settings
+utd_ratio: 20              # Update-to-data ratio (gradient steps per env step)
+batch_size: 256            # Minibatch size for SAC updates
+replay_buffer_size: 100000 # Replay buffer capacity (in macro-steps)
+
+# Observation/Action horizons
+obs_horizon: 2
+act_horizon: 8
+pred_horizon: 16
+
+# Visual encoder settings
+visual_feature_dim: 256
+diffusion_step_embed_dim: 64
+unet_dims: [64, 128, 256]
+n_groups: 8
+
+# Latent policy architecture
+latent_hidden_dims: [256, 256, 256]
+steer_mode: "full"
+state_dependent_std: true
+
+# Latent Q-network architecture (Double Q + Target)
+latent_q_hidden_dims: [256, 256, 256]
+
+# Q-network settings (action-space Q, must match pretrained)
+use_double_q: true
+num_qs: 10
+num_min_qs: 2
+q_hidden_dims: [512, 512, 512]
+
+# SAC hyperparameters
+actor_lr: 1e-4
+critic_lr: 3e-4
+temp_lr: 1e-4
+gamma: 0.99
+tau: 0.005           # Target network soft update rate
+init_temperature: 0.1
+learnable_temp: true
+target_entropy: null  # null = auto (-0.5 * latent_dim)
+backup_entropy: true  # Include entropy in TD target
+
+# Exploration (prior mixing)
+prior_mix_ratio: 0.3
+prior_mix_decay: 0.995
+prior_mix_min: 0.05
+
+# Flow inference
+num_inference_steps: 8
+
+# Gradient clipping
+max_grad_norm: 1.0

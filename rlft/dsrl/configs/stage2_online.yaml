@@ -1,0 +1,87 @@
+# DSRL Stage 2: Online PPO Configuration
+# Fine-tuning latent steering policy with environment interaction
+
+# =============================================================================
+# Paths (UPDATE THESE for your setup)
+# =============================================================================
+checkpoint_dir: "checkpoints/dsrl_stage2"
+stage1_checkpoint: ""   # Path to Stage 1 latent policy checkpoint
+velocity_net_path: ""   # Path to pretrained ShortCut Flow velocity net
+q_network_path: ""      # Path to pretrained ensemble Q-network (frozen)
+
+# =============================================================================
+# Model Architecture
+# =============================================================================
+action_dim: 7
+obs_dim: 512
+obs_horizon: 2
+pred_horizon: 16
+act_horizon: 8
+num_inference_steps: 8
+
+# Latent policy architecture (must match Stage 1)
+latent_hidden_dims: [256, 256, 256]
+steer_mode: "full"
+state_dependent_std: true
+
+# Value network architecture
+value_hidden_dims: [256, 256]
+
+# Q-network architecture (must match pretrained model)
+q_hidden_dims: [256, 256, 256]
+num_qs: 10
+num_min_qs: 2
+
+# =============================================================================
+# PPO Hyperparameters
+# =============================================================================
+ppo_clip: 0.2          # PPO clipping ratio
+entropy_coef: 0.001    # Entropy bonus for exploration
+kl_prior_coef: 0.001   # KL-to-prior regularization
+gamma: 0.99            # Base discount factor
+gae_lambda: 0.95       # GAE lambda
+
+# =============================================================================
+# Exploration (Prior Mixing)
+# =============================================================================
+# With probability η, use prior N(0,I) instead of policy
+prior_mix_ratio: 0.3   # Initial mixing ratio
+prior_mix_decay: 0.995 # Decay per update
+prior_mix_min: 0.05    # Minimum mixing ratio
+
+# =============================================================================
+# Training
+# =============================================================================
+num_iterations: 1000   # Total training iterations
+rollout_steps: 512     # Macro-steps per rollout
+ppo_epochs: 10         # PPO epochs per iteration
+batch_size: 64
+learning_rate: 0.0003
+value_lr: 0.001
+weight_decay: 0.00001
+grad_clip: 0.5
+
+# Normalization
+normalize_advantage: true
+value_clip: null       # Optional value clipping
+
+# =============================================================================
+# Logging
+# =============================================================================
+log_interval: 10
+save_interval: 50
+use_wandb: false
+wandb_project: "dsrl"
+wandb_run_name: "stage2_online"
+
+# =============================================================================
+# Environment
+# =============================================================================
+env_name: ""           # Environment name (user-defined)
+num_envs: 1            # Number of parallel environments
+
+# =============================================================================
+# Device & Seed
+# =============================================================================
+device: "cuda"
+seed: 42

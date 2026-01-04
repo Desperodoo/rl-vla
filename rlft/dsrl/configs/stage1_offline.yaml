@@ -1,0 +1,75 @@
+# DSRL Stage 1: Offline AW-MLE Configuration
+# Training latent steering policy using offline data and pretrained Q-network
+
+# =============================================================================
+# Paths (UPDATE THESE for your setup)
+# =============================================================================
+checkpoint_dir: "checkpoints/dsrl_stage1"
+velocity_net_path: ""  # Path to pretrained ShortCut Flow velocity net
+q_network_path: ""     # Path to pretrained ensemble Q-network
+dataset_path: ""       # Path to offline dataset (.npz with 'obs_features')
+
+# =============================================================================
+# Model Architecture
+# =============================================================================
+action_dim: 7
+obs_dim: 512           # obs_horizon * visual_dim + obs_horizon * state_dim
+obs_horizon: 2
+pred_horizon: 16
+act_horizon: 8
+num_inference_steps: 8
+
+# Latent policy architecture
+latent_hidden_dims: [256, 256, 256]
+steer_mode: "full"     # "full" or "act_horizon"
+state_dependent_std: true
+
+# Q-network architecture (must match pretrained model)
+q_hidden_dims: [256, 256, 256]
+num_qs: 10
+num_min_qs: 2
+
+# =============================================================================
+# Stage 1 AW-MLE Hyperparameters
+# =============================================================================
+# Number of latent candidates sampled from prior
+num_candidates: 16     # M: more candidates = better coverage, higher compute
+
+# UCB aggregation: Q = μ - κσ
+kappa: 1.0             # Higher = more conservative Q estimate
+
+# Soft baseline: b = τ * log(mean(exp(q/τ)))
+tau: 5.0               # Higher = softer baseline
+
+# Advantage weighting: ω = softmax(A/β)
+beta_latent: 1.0       # Lower = sharper weighting (favor best candidates)
+
+# Advantage clipping
+advantage_clip: 20.0
+
+# KL-to-prior regularization
+kl_coef: 0.001         # Prevents policy from drifting too far from prior
+
+# =============================================================================
+# Training
+# =============================================================================
+batch_size: 256
+num_epochs: 100
+learning_rate: 0.0001
+weight_decay: 0.00001
+grad_clip: 1.0
+
+# =============================================================================
+# Logging
+# =============================================================================
+log_interval: 100      # Log every N batches
+save_interval: 10      # Save checkpoint every N epochs
+use_wandb: false
+wandb_project: "dsrl"
+wandb_run_name: "stage1_offline"
+
+# =============================================================================
+# Device & Seed
+# =============================================================================
+device: "cuda"
+seed: 42
