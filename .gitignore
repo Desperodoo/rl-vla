@@ -2,3 +2,9 @@ __pycache__/
 *.pyc
 .venv
 *.npz
+
+# 子仓库和第三方库
+rlft/dsrl_ajwagen/
+rlft/dsrl_official/
+.vscode/
+inference/.vscode/

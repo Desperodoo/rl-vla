@@ -57,7 +57,7 @@ class LatentGaussianPolicy(nn.Module):
         pred_horizon: int,
         action_dim: int,
         hidden_dims: list = [256, 256, 256],
-        log_std_range: Tuple[float, float] = (-5.0, 2.0),
+        log_std_range: Tuple[float, float] = (-5.0, -0.5),  # Upper bound tightened to -0.5 (std≈0.6) for stability
         steer_mode: Literal["full", "act_horizon"] = "full",
         act_horizon: int = 8,
         state_dependent_std: bool = True,

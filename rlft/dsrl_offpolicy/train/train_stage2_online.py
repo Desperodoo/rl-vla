@@ -74,6 +74,259 @@ from dsrl_offpolicy.models.latent_q_network import DoubleLatentQNetwork
 from dsrl_offpolicy.buffers.macro_replay_buffer import MacroReplayBuffer
 
 
+# ==================== Sanity Check: Prior vs Policy ====================
+
+def sanity_check_latent_policy(
+    agent: DSRLSACAgent,
+    eval_envs,
+    visual_encoder: Optional[nn.Module],
+    include_rgb: bool,
+    obs_horizon: int,
+    act_horizon: int,
+    device: torch.device,
+    num_candidates: int = 64,
+    num_episodes: int = 10,
+) -> Dict[str, float]:
+    """
+    Sanity check: Compare prior vs policy sampling via real environment rollouts.
+    
+    For each episode initial state:
+    1. Sample M latents from prior (TanhNormal with N(0,I) pre-tanh)
+    2. Sample M latents from current policy
+    3. Execute best-of-M for each, record episode returns
+    
+    This checks if the policy learned useful latent steering.
+    
+    Args:
+        agent: DSRL SAC agent
+        eval_envs: Evaluation environments (num_envs should be >= num_candidates)
+        visual_encoder: Optional visual encoder
+        include_rgb: Whether to include RGB observations
+        obs_horizon: Observation horizon
+        act_horizon: Action execution horizon
+        device: Torch device
+        num_candidates: M candidates to sample (default 64)
+        num_episodes: Number of episodes to evaluate
+        
+    Returns:
+        Dict with comparison metrics:
+        - prior_best_return: Best return from prior sampling
+        - prior_mean_return: Mean return from prior sampling
+        - policy_best_return: Best return from policy sampling
+        - policy_mean_return: Mean return from policy sampling
+        - policy_advantage: policy_best - prior_best
+    """
+    agent.eval()
+    if visual_encoder is not None:
+        visual_encoder.eval()
+    
+    num_envs = eval_envs.num_envs
+    # Use all available envs, up to num_candidates
+    M = min(num_candidates, num_envs)
+    
+    prior_returns_all = []
+    policy_returns_all = []
+    
+    with torch.no_grad():
+        for ep in range(num_episodes):
+            # ===== Test Prior Sampling =====
+            # Reset environments and get initial observation
+            obs, info = eval_envs.reset()
+            
+            # Build observation features directly (no ObservationStacker needed for single-step)
+            # For obs_horizon > 1, we replicate the initial obs
+            obs_features = _build_obs_features(
+                obs, visual_encoder, include_rgb, obs_horizon, M, device
+            )
+            
+            # Sample from Prior: N(0, I) in pre-tanh space, then tanh squash
+            prior_w_pre = torch.randn(M, agent.pred_horizon, agent.action_dim, device=device)
+            prior_w = torch.tanh(prior_w_pre) * agent.action_magnitude
+            
+            # Generate actions from prior latents
+            prior_actions = agent.sample_actions_from_latent(obs_features, prior_w, use_ema=True)
+            
+            # Rollout with Prior Actions
+            prior_returns = _rollout_single_chunk(
+                eval_envs, prior_actions, act_horizon, M
+            )
+            prior_returns_all.extend(prior_returns)
+            
+            # ===== Test Policy Sampling =====
+            # Reset environments again (different initial states, but that's fine for comparison)
+            obs, info = eval_envs.reset()
+            
+            # Build observation features
+            obs_features = _build_obs_features(
+                obs, visual_encoder, include_rgb, obs_horizon, M, device
+            )
+            
+            # Sample from Policy
+            policy_w, _ = agent.latent_policy.sample(obs_features, deterministic=False)
+            policy_actions = agent.sample_actions_from_latent(obs_features, policy_w, use_ema=True)
+            
+            # Rollout with Policy Actions
+            policy_returns = _rollout_single_chunk(
+                eval_envs, policy_actions, act_horizon, M
+            )
+            policy_returns_all.extend(policy_returns)
+    
+    prior_returns_all = np.array(prior_returns_all)
+    policy_returns_all = np.array(policy_returns_all)
+    
+    # Compute metrics per episode group
+    prior_best = np.max(prior_returns_all)
+    prior_mean = np.mean(prior_returns_all)
+    prior_std = np.std(prior_returns_all)
+    
+    policy_best = np.max(policy_returns_all)
+    policy_mean = np.mean(policy_returns_all)
+    policy_std = np.std(policy_returns_all)
+    
+    # Per-episode best comparison
+    M_actual = min(num_candidates, num_envs)
+    prior_returns_grouped = prior_returns_all.reshape(num_episodes, M_actual)
+    policy_returns_grouped = policy_returns_all.reshape(num_episodes, M_actual)
+    
+    prior_best_per_ep = prior_returns_grouped.max(axis=1).mean()
+    policy_best_per_ep = policy_returns_grouped.max(axis=1).mean()
+    
+    agent.train()
+    if visual_encoder is not None:
+        visual_encoder.train()
+    
+    return {
+        "prior_best_return": prior_best,
+        "prior_mean_return": prior_mean,
+        "prior_std_return": prior_std,
+        "policy_best_return": policy_best,
+        "policy_mean_return": policy_mean,
+        "policy_std_return": policy_std,
+        "prior_best_per_ep": prior_best_per_ep,
+        "policy_best_per_ep": policy_best_per_ep,
+        "policy_advantage": policy_best_per_ep - prior_best_per_ep,
+        "policy_mean_advantage": policy_mean - prior_mean,
+    }
+
+
+def _build_obs_features(
+    obs: Dict[str, torch.Tensor],
+    visual_encoder: Optional[nn.Module],
+    include_rgb: bool,
+    obs_horizon: int,
+    num_envs: int,
+    device: torch.device,
+) -> torch.Tensor:
+    """Build observation features from raw environment observation.
+    
+    For single-step observations, replicates along time dimension to fill obs_horizon.
+    
+    Args:
+        obs: Raw observation dict from env.reset() or env.step()
+        visual_encoder: Visual encoder for RGB
+        include_rgb: Whether to include RGB features
+        obs_horizon: Number of observation frames expected
+        num_envs: Number of environments to use
+        device: Torch device
+        
+    Returns:
+        obs_features: (num_envs, obs_horizon * feature_dim)
+    """
+    # Slice to num_envs
+    obs_sliced = {k: v[:num_envs] for k, v in obs.items()}
+    
+    # Convert to tensors on device
+    obs_tensor = {}
+    for k, v in obs_sliced.items():
+        if torch.is_tensor(v):
+            obs_tensor[k] = v.float().to(device)
+        else:
+            obs_tensor[k] = torch.from_numpy(v).float().to(device)
+    
+    # Handle state: add time dimension if needed and replicate
+    state = obs_tensor["state"]
+    if state.dim() == 2:  # (B, state_dim) - no time dimension
+        # Replicate to (B, T, state_dim)
+        state = state.unsqueeze(1).expand(-1, obs_horizon, -1).contiguous()
+    obs_tensor["state"] = state
+    
+    # Handle rgb: add time dimension if needed and replicate
+    if include_rgb and "rgb" in obs_tensor:
+        rgb = obs_tensor["rgb"]
+        if rgb.dim() == 4:  # (B, H, W, C) - no time dimension
+            # Replicate to (B, T, H, W, C)
+            rgb = rgb.unsqueeze(1).expand(-1, obs_horizon, -1, -1, -1).contiguous()
+        obs_tensor["rgb"] = rgb
+    
+    # Use encode_observations
+    return encode_observations(obs_tensor, visual_encoder, include_rgb, device)
+
+
+def _rollout_single_chunk(
+    envs,
+    actions: torch.Tensor,
+    act_horizon: int,
+    num_envs: int,
+) -> List[float]:
+    """Execute a single action chunk and return episode returns.
+    
+    Runs action chunk to completion or episode termination.
+    
+    Args:
+        envs: Environment
+        actions: (B, pred_horizon, action_dim) action sequence
+        act_horizon: Number of actions to execute
+        num_envs: Number of environments
+        
+    Returns:
+        List of returns for each environment
+    """
+    returns = np.zeros(num_envs)
+    action_chunk = actions[:num_envs, :act_horizon, :].cpu().numpy()
+    
+    for step_idx in range(act_horizon):
+        action = action_chunk[:, step_idx, :]
+        obs, reward, terminated, truncated, info = envs.step(action)
+        
+        reward_np = reward.cpu().numpy() if torch.is_tensor(reward) else reward
+        returns[:num_envs] += reward_np[:num_envs]
+        
+        done = terminated | truncated
+        if done.any():
+            break
+    
+    return returns.tolist()
+
+
+def _rollout_actions(
+    envs,
+    obs_stacker,
+    actions: torch.Tensor,
+    act_horizon: int,
+    num_envs: int,
+    device: torch.device,
+) -> List[float]:
+    """Execute a single action chunk and return episode returns.
+    
+    Runs action chunk to completion or episode termination.
+    """
+    returns = np.zeros(num_envs)
+    action_chunk = actions[:num_envs, :act_horizon, :].cpu().numpy()
+    
+    for step_idx in range(act_horizon):
+        action = action_chunk[:, step_idx, :]
+        obs, reward, terminated, truncated, info = envs.step(action)
+        
+        reward_np = reward.cpu().numpy() if torch.is_tensor(reward) else reward
+        returns[:num_envs] += reward_np[:num_envs]
+        
+        done = terminated | truncated
+        if done.any():
+            break
+    
+    return returns.tolist()
+
+
 @dataclass
 class Args:
     # Experiment settings
@@ -99,7 +352,7 @@ class Args:
     """the id of the environment"""
     num_envs: int = 50
     """number of parallel training environments"""
-    num_eval_envs: int = 50
+    num_eval_envs: int = 64
     """number of parallel eval environments"""
     max_episode_steps: int = 100
     """max episode steps"""
@@ -111,33 +364,36 @@ class Args:
     """simulation backend"""
     
     # Pretrained checkpoints
-    awsc_checkpoint: str = "/home/lizh/rl-vla/rlft/dsrl_offpolicy/checkpoints/best_eval_success_once.pt"
+    awsc_checkpoint: str = "/home/amax/rl-vla/rlft/dsrl_offpolicy/checkpoints/best_eval_success_once.pt"
     """path to pretrained AW-ShortCut Flow checkpoint (velocity_net and q_network)"""
-    stage1_checkpoint: str = "/home/lizh/rl-vla/rlft/runs/dsrl_offpolicy_stage1-LiftPegUpright-v1-seed1__1767516252/checkpoints/best_eval_success_once.pt"
+    stage1_checkpoint: str = "/home/amax/rl-vla/rlft/runs/dsrl_offpolicy_stage1-LiftPegUpright-v1-seed1__1767531955/checkpoints/best_eval_success_at_end.pt"
     """path to Stage 1 latent policy checkpoint"""
     use_ema: bool = True
     """use EMA weights from AWSC checkpoint (recommended for better performance)"""
     
     # Training settings
-    total_timesteps: int = 100_000
+    total_timesteps: int = 1_000_000
     """total environment steps"""
-    warmup_steps: int = 5000
-    """steps before starting updates (fill replay buffer)"""
-    eval_freq: int = 10000
+    warmup_steps: int = 20000
+    """steps before starting updates (fill replay buffer). 
+    NOTE: Must be large enough to fill buffer with batch_size samples.
+    With num_envs=50, act_horizon=8, batch_size=10240: need ~82000 steps minimum.
+    Set to 100000 for safety margin."""
+    eval_freq: int = 20000
     """evaluation frequency (env steps)"""
-    save_freq: int = 10000
+    save_freq: int = 20000
     """checkpoint save frequency (env steps)"""
     log_freq: int = 1
     """logging frequency (env steps)"""
-    num_eval_episodes: int = 50
+    num_eval_episodes: int = 64
     """number of evaluation episodes"""
     
     # Off-policy specific settings
     utd_ratio: int = 20
     """Update-to-data ratio (gradient steps per env step)"""
-    batch_size: int = 10240
+    batch_size: int = 1024
     """minibatch size for SAC updates"""
-    replay_buffer_size: int = 200000
+    replay_buffer_size: int = 500000
     """replay buffer capacity (in macro-steps)"""
     
     # Optimizer settings
@@ -149,7 +405,7 @@ class Args:
     """learning rate for temperature"""
     max_grad_norm: float = 1.0
     """maximum gradient norm for clipping"""
-    actor_update_delay: int = 10000
+    actor_update_delay: int = 100000
     """steps before starting actor updates (critic-only warmup for stability)"""
     
     # Observation/Action horizons
@@ -197,9 +453,9 @@ class Args:
     """discount factor"""
     tau: float = 0.005
     """target network soft update rate"""
-    init_temperature: float = 0.1
+    init_temperature: float = 0.0
     """initial SAC temperature"""
-    learnable_temp: bool = True
+    learnable_temp: bool = False
     """whether temperature is learnable"""
     target_entropy: Optional[float] = None
     """target entropy for auto-tuning (None = auto)"""
@@ -211,6 +467,20 @@ class Args:
     # Flow inference
     num_inference_steps: int = 8
     """number of flow integration steps"""
+    
+    # Sanity check settings
+    sanity_check: bool = True
+    """whether to run prior vs policy sanity check during evaluation"""
+    sanity_check_candidates: int = 64
+    """number of latent candidates to sample for sanity check (M)"""
+    sanity_check_episodes: int = 5
+    """number of episodes for sanity check (per prior and policy)"""
+    
+    # Q sensitivity diagnostic settings
+    q_sensitivity_freq: int = 5000
+    """frequency to run Q sensitivity diagnostic (env steps)"""
+    q_sensitivity_samples: int = 64
+    """number of latent samples per observation for Q sensitivity diagnostic"""
 
 
 def make_train_envs(
@@ -633,10 +903,19 @@ if __name__ == "__main__":
     # Metrics accumulators
     metrics_accum = defaultdict(list)
     
+    # Compute minimum steps needed to fill buffer
+    steps_per_macro = args.num_envs * args.act_horizon  # 50 * 8 = 400
+    macro_steps_for_batch = (args.batch_size + args.num_envs - 1) // args.num_envs  # ceil division
+    min_steps_for_buffer = macro_steps_for_batch * steps_per_macro
+    
     print("\n" + "=" * 50)
     print("Starting Stage 2 SAC training (Off-Policy)...")
     print(f"UTD ratio: {args.utd_ratio}")
+    print(f"Batch size: {args.batch_size}")
     print(f"Warmup steps: {args.warmup_steps}")
+    print(f"Min steps to fill buffer (batch_size samples): ~{min_steps_for_buffer}")
+    print(f"Critic updates start at: max(warmup_steps, buffer_ready) = ~{max(args.warmup_steps, min_steps_for_buffer)}")
+    print(f"Actor updates start at: warmup_steps + actor_update_delay = {args.warmup_steps + args.actor_update_delay}")
     print("=" * 50 + "\n")
     
     pbar = tqdm(total=args.total_timesteps, desc="Training")
@@ -748,6 +1027,13 @@ if __name__ == "__main__":
                     actor_metrics = {
                         "loss": torch.tensor(0.0),
                         "entropy": torch.tensor(0.0),
+                        "gaussian_entropy": torch.tensor(0.0),
+                        "kl_to_prior": torch.tensor(0.0),
+                        "q_policy": torch.tensor(0.0),
+                        "log_std_mean": torch.tensor(0.0),
+                        "std_mean": torch.tensor(0.0),
+                        "latent_std": torch.tensor(0.0),
+                        "latent_abs_mean": torch.tensor(0.0),
                     }
                 
                 # ===== Temperature Update =====
@@ -770,18 +1056,42 @@ if __name__ == "__main__":
                 metrics_accum["td_error"].append(critic_metrics["td_error"].item())
                 metrics_accum["q_mean"].append(critic_metrics["q_mean"].item())
                 metrics_accum["actor_loss"].append(actor_metrics["loss"].item())
+                # Entropy metrics
                 metrics_accum["entropy"].append(actor_metrics["entropy"].item())
+                metrics_accum["gaussian_entropy"].append(actor_metrics["gaussian_entropy"].item())
+                metrics_accum["kl_to_prior"].append(actor_metrics["kl_to_prior"].item())
+                # Policy stats
+                metrics_accum["q_policy"].append(actor_metrics["q_policy"].item())
+                metrics_accum["log_std_mean"].append(actor_metrics["log_std_mean"].item())
+                metrics_accum["std_mean"].append(actor_metrics["std_mean"].item())
+                metrics_accum["latent_std"].append(actor_metrics["latent_std"].item())
+                metrics_accum["latent_abs_mean"].append(actor_metrics["latent_abs_mean"].item())
+                # Temperature
                 metrics_accum["alpha"].append(temp_metrics["alpha"].item() if hasattr(temp_metrics["alpha"], "item") else temp_metrics["alpha"])
         
         # ===== Logging =====
         if total_steps % args.log_freq < args.num_envs * args.act_horizon and len(metrics_accum["critic_loss"]) > 0:
             train_log = {
+                # Critic metrics
                 "train/critic_loss": np.mean(metrics_accum["critic_loss"]),
-                "train/actor_loss": np.mean(metrics_accum["actor_loss"]),
                 "train/td_error": np.mean(metrics_accum["td_error"]),
                 "train/q_mean": np.mean(metrics_accum["q_mean"]),
-                "train/entropy": np.mean(metrics_accum["entropy"]),
+                # Actor metrics
+                "train/actor_loss": np.mean(metrics_accum["actor_loss"]),
+                "train/q_policy": np.mean(metrics_accum["q_policy"]),
+                # Entropy metrics
+                "train/entropy": np.mean(metrics_accum["entropy"]),  # Sample-based
+                "train/gaussian_entropy": np.mean(metrics_accum["gaussian_entropy"]),  # Analytic (pre-tanh)
+                "train/kl_to_prior": np.mean(metrics_accum["kl_to_prior"]),
+                # Policy distribution stats
+                "train/log_std_mean": np.mean(metrics_accum["log_std_mean"]),
+                "train/std_mean": np.mean(metrics_accum["std_mean"]),
+                # Latent stats
+                "train/latent_std": np.mean(metrics_accum["latent_std"]),
+                "train/latent_abs_mean": np.mean(metrics_accum["latent_abs_mean"]),
+                # Temperature
                 "train/alpha": np.mean(metrics_accum["alpha"]),
+                # Buffer stats
                 "train/buffer_size": replay_buffer.size,
                 "train/num_updates": num_updates,
             }
@@ -801,6 +1111,29 @@ if __name__ == "__main__":
             # Clear accumulators
             metrics_accum = defaultdict(list)
         
+        # ===== Q Sensitivity Diagnostic =====
+        if total_steps % args.q_sensitivity_freq < args.num_envs * args.act_horizon and replay_buffer.is_ready(args.batch_size):
+            # Use a batch from replay buffer for diagnostic
+            diag_batch = replay_buffer.sample(min(args.batch_size, 256))
+            q_sens_metrics = agent.diagnose_q_sensitivity(
+                obs_cond=diag_batch["obs_cond"],
+                num_samples=args.q_sensitivity_samples,
+            )
+            
+            print(f"\n[Step {total_steps}] Q Sensitivity Diagnostic:")
+            print(f"  Prior:  Q_std={q_sens_metrics['prior_q_std']:.4f}, Q_range={q_sens_metrics['prior_q_range']:.4f}, top1-median={q_sens_metrics['prior_q_top1_vs_median']:.4f}")
+            print(f"  Policy: Q_std={q_sens_metrics['policy_q_std']:.4f}, Q_range={q_sens_metrics['policy_q_range']:.4f}, top1-median={q_sens_metrics['policy_q_top1_vs_median']:.4f}")
+            
+            # Log to tensorboard and wandb
+            diag_log = {}
+            for k, v in q_sens_metrics.items():
+                writer.add_scalar(f"diag/{k}", v, total_steps)
+                diag_log[f"diag/{k}"] = v
+            
+            if args.track:
+                import wandb
+                wandb.log(diag_log, step=total_steps)
+        
         # ===== Evaluation =====
         if total_steps % args.eval_freq < args.num_envs * args.act_horizon:
             agent.latent_policy.eval()
@@ -816,6 +1149,33 @@ if __name__ == "__main__":
                 writer.add_scalar(f"eval/{k}", eval_metrics[k], total_steps)
                 eval_log[f"eval/{k}"] = eval_metrics[k]
                 print(f"  {k}: {eval_metrics[k]:.4f}")
+            
+            # ===== Sanity Check: Prior vs Policy =====
+            if args.sanity_check and args.num_eval_envs >= args.sanity_check_candidates:
+                print(f"\n  Running sanity check (M={args.sanity_check_candidates}, episodes={args.sanity_check_episodes})...")
+                sanity_metrics = sanity_check_latent_policy(
+                    agent=agent,
+                    eval_envs=eval_envs,
+                    visual_encoder=visual_encoder,
+                    include_rgb=include_rgb,
+                    obs_horizon=args.obs_horizon,
+                    act_horizon=args.act_horizon,
+                    device=device,
+                    num_candidates=args.sanity_check_candidates,
+                    num_episodes=args.sanity_check_episodes,
+                )
+                
+                print(f"  Sanity Check Results:")
+                print(f"    Prior:  best={sanity_metrics['prior_best_return']:.2f}, mean={sanity_metrics['prior_mean_return']:.2f} ± {sanity_metrics['prior_std_return']:.2f}")
+                print(f"    Policy: best={sanity_metrics['policy_best_return']:.2f}, mean={sanity_metrics['policy_mean_return']:.2f} ± {sanity_metrics['policy_std_return']:.2f}")
+                print(f"    Best-of-M per episode: Prior={sanity_metrics['prior_best_per_ep']:.2f}, Policy={sanity_metrics['policy_best_per_ep']:.2f}")
+                print(f"    Policy Advantage (best-of-M): {sanity_metrics['policy_advantage']:.2f}")
+                print(f"    Policy Advantage (mean): {sanity_metrics['policy_mean_advantage']:.2f}")
+                
+                # Log sanity check metrics
+                for k, v in sanity_metrics.items():
+                    writer.add_scalar(f"sanity/{k}", v, total_steps)
+                    eval_log[f"sanity/{k}"] = v
             
             if args.track:
                 import wandb

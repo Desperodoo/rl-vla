@@ -32,6 +32,9 @@ include_directories(
     $ENV{CONDA_PREFIX}/include/urdfdom_headers
 )
 
+# Add conda lib directory for kdl_parser, soem, etc.
+link_directories($ENV{CONDA_PREFIX}/lib)
+
 add_library(ArxJointController SHARED
     src/app/joint_controller.cpp
     src/utils.cpp

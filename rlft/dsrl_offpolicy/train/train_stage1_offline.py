@@ -123,7 +123,7 @@ class Args:
     """simulation backend for evaluation"""
 
     # Pretrained checkpoint (from AW-ShortCut Flow training)
-    awsc_checkpoint: str = "/home/lizh/rl-vla/rlft/dsrl_offpolicy/checkpoints/best_eval_success_once.pt"
+    awsc_checkpoint: str = "/home/amax/rl-vla/rlft/dsrl_offpolicy/checkpoints/best_eval_success_once.pt"
     """path to pretrained AW-ShortCut Flow checkpoint (contains velocity_net and q_network)"""
     use_ema: bool = True
     """use EMA weights from checkpoint (recommended for better performance)"""

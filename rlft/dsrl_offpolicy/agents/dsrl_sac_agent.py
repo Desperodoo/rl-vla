@@ -443,15 +443,20 @@ class DSRLSACAgent(nn.Module):
         self,
         obs_cond: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Compute SAC-style actor loss using Q^W."""
+        """Compute SAC-style actor loss using Q^W.
+        
+        Uses TARGET Q-network instead of online Q to prevent Q-value extrapolation
+        and reduce actor exploitation of overestimated Q-values.
+        """
         # Sample from policy with reparameterization (TanhNormal already bounded)
         w, log_prob = self.latent_policy.sample(obs_cond, deterministic=False)
         
-        # Get Q^W values (no detach to match SB3 SAC)
-        q1_w, q2_w = self.latent_q_network(obs_cond, w)
-        q_min = torch.min(q1_w, q2_w)
+        # Use TARGET Q^W to prevent exploitation of overestimated online Q-values
+        # This reduces Q-value extrapolation in high-dimensional latent space
+        q1_t, q2_t = self.latent_q_network.forward_target(obs_cond, w)
+        q_min = torch.min(q1_t, q2_t)
         
-        # SAC actor loss: α * log π(w|s) - Q^W(s, w)
+        # SAC actor loss: α * log π(w|s) - Q^W_target(s, w)
         alpha = self.temperature.alpha.detach()
         actor_loss = (alpha * log_prob.unsqueeze(-1) - q_min).mean()
         
@@ -536,7 +541,11 @@ class DSRLSACAgent(nn.Module):
         """
         Compute SAC actor loss for latent policy.
         
-        Loss: E[α log π(w|s) - min Q(s, w)]
+        Loss: E[α log π(w|s) - min Q_target(s, w)]
+        
+        Uses TARGET Q-network instead of online Q to prevent Q-value extrapolation
+        and reduce actor exploitation of overestimated Q-values in high-dimensional
+        latent space.
         
         Args:
             obs_cond: (B, obs_dim) observation conditioning
@@ -550,8 +559,9 @@ class DSRLSACAgent(nn.Module):
         # Sample latent with reparameterization (TanhNormal already bounded)
         w, log_prob = self.latent_policy.sample(obs_cond, deterministic=False)
         
-        # Q-values (use online networks)
-        q1, q2 = self.latent_q_network(obs_cond, w)
+        # Use TARGET Q-values to prevent exploitation of overestimated online Q-values
+        # This is critical for stability in high-dimensional latent space
+        q1, q2 = self.latent_q_network.forward_target(obs_cond, w)
         q_min = torch.min(q1, q2)
         
         # SAC actor loss
@@ -560,13 +570,52 @@ class DSRLSACAgent(nn.Module):
         
         # Metrics
         with torch.no_grad():
-            entropy = -log_prob.mean()
+            # Sampled entropy (Monte Carlo estimate): -E[log π(w|s)]
+            sample_entropy = -log_prob.mean()
+            
+            # Analytic entropy (pre-tanh Gaussian approximation)
+            gaussian_entropy = self.latent_policy.entropy(obs_cond).mean()
+            
+            # KL divergence to prior (regularization indicator)
+            kl_to_prior = self.latent_policy.kl_to_prior(obs_cond).mean()
+            
+            # Policy distribution statistics
+            mean, log_std = self.latent_policy.forward(obs_cond)
+            log_std_mean = log_std.mean()
+            log_std_std = log_std.std()
+            std_mean = log_std.exp().mean()
+            
+            # Mean (policy center) statistics
+            policy_mean_abs = mean.abs().mean()
+            policy_mean_std = mean.std()
+            
+            # Sampled latent statistics  
+            latent_mean = w.mean()
+            latent_std = w.std()
+            latent_abs_mean = w.abs().mean()
+            latent_max = w.abs().max()
         
         return {
             "loss": actor_loss,
-            "entropy": entropy,
-            "log_prob_mean": log_prob.mean(),
+            # Entropy metrics
+            "entropy": sample_entropy,  # For backward compatibility (sample-based)
+            "gaussian_entropy": gaussian_entropy,  # Analytic entropy (pre-tanh)
+            # Regularization
+            "kl_to_prior": kl_to_prior,
+            # Q-value
             "q_policy": q_min.mean(),
+            "log_prob_mean": log_prob.mean(),
+            # Policy distribution stats
+            "log_std_mean": log_std_mean,
+            "log_std_std": log_std_std,
+            "std_mean": std_mean,
+            "policy_mean_abs": policy_mean_abs,
+            "policy_mean_std": policy_mean_std,
+            # Sampled latent stats
+            "latent_mean": latent_mean,
+            "latent_std": latent_std,
+            "latent_abs_mean": latent_abs_mean,
+            "latent_max": latent_max,
         }
     
     def compute_temperature_loss(
@@ -602,6 +651,101 @@ class DSRLSACAgent(nn.Module):
         """Soft update target networks."""
         if self.latent_q_network is not None:
             self.latent_q_network.soft_update_target()
+    
+    # ==================== Diagnostics ====================
+    
+    @torch.no_grad()
+    def diagnose_q_sensitivity(
+        self,
+        obs_cond: torch.Tensor,
+        num_samples: int = 64,
+    ) -> Dict[str, float]:
+        """
+        Diagnose Q-network sensitivity to latent w.
+        
+        For each observation, samples N latents and evaluates Q(s, w).
+        If Q has low variance over w, the critic hasn't learned to distinguish
+        good vs bad latents, and actor gradients will be weak.
+        
+        Args:
+            obs_cond: (B, obs_dim) observation conditioning
+            num_samples: Number of latent samples per observation
+            
+        Returns:
+            Dict with sensitivity metrics:
+            - prior_q_std: Std of Q over prior samples (per obs, averaged)
+            - prior_q_range: Max - Min of Q over prior samples
+            - prior_q_top1_vs_median: Top-1 Q minus median Q
+            - policy_q_std: Same metrics for policy samples
+            - policy_q_range, policy_q_top1_vs_median
+        """
+        B = obs_cond.shape[0]
+        device = obs_cond.device
+        N = num_samples
+        
+        # Expand obs for batched Q evaluation: (B, obs_dim) -> (B*N, obs_dim)
+        obs_expand = obs_cond.unsqueeze(1).expand(-1, N, -1).reshape(B * N, -1)
+        
+        # ===== Sample from Prior (N(0,I) squashed with tanh) =====
+        prior_w_pre = torch.randn(B * N, self.pred_horizon, self.action_dim, device=device)
+        prior_w = torch.tanh(prior_w_pre) * self.action_magnitude
+        
+        # Get Q values for prior samples
+        q1_prior, q2_prior = self.latent_q_network(obs_expand, prior_w)
+        q_prior = torch.min(q1_prior, q2_prior).squeeze(-1)  # (B*N,)
+        q_prior = q_prior.view(B, N)
+        
+        # Prior statistics
+        prior_q_mean = q_prior.mean(dim=1)  # (B,)
+        prior_q_std = q_prior.std(dim=1)  # (B,)
+        prior_q_max = q_prior.max(dim=1).values
+        prior_q_min = q_prior.min(dim=1).values
+        prior_q_range = prior_q_max - prior_q_min
+        prior_q_median = q_prior.median(dim=1).values
+        prior_q_top1_vs_median = prior_q_max - prior_q_median
+        prior_q_top1_vs_mean = prior_q_max - prior_q_mean
+        
+        # ===== Sample from Policy =====
+        # Need to sample N times per obs
+        policy_w_list = []
+        for _ in range(N):
+            w, _ = self.latent_policy.sample(obs_cond, deterministic=False)
+            policy_w_list.append(w)
+        policy_w = torch.stack(policy_w_list, dim=1)  # (B, N, pred_horizon, action_dim)
+        policy_w_flat = policy_w.view(B * N, self.pred_horizon, self.action_dim)
+        
+        # Get Q values for policy samples
+        q1_policy, q2_policy = self.latent_q_network(obs_expand, policy_w_flat)
+        q_policy = torch.min(q1_policy, q2_policy).squeeze(-1)  # (B*N,)
+        q_policy = q_policy.view(B, N)
+        
+        # Policy statistics
+        policy_q_mean = q_policy.mean(dim=1)
+        policy_q_std = q_policy.std(dim=1)
+        policy_q_max = q_policy.max(dim=1).values
+        policy_q_min = q_policy.min(dim=1).values
+        policy_q_range = policy_q_max - policy_q_min
+        policy_q_median = q_policy.median(dim=1).values
+        policy_q_top1_vs_median = policy_q_max - policy_q_median
+        policy_q_top1_vs_mean = policy_q_max - policy_q_mean
+        
+        return {
+            # Prior sampling metrics
+            "prior_q_mean": prior_q_mean.mean().item(),
+            "prior_q_std": prior_q_std.mean().item(),
+            "prior_q_range": prior_q_range.mean().item(),
+            "prior_q_top1_vs_median": prior_q_top1_vs_median.mean().item(),
+            "prior_q_top1_vs_mean": prior_q_top1_vs_mean.mean().item(),
+            # Policy sampling metrics
+            "policy_q_mean": policy_q_mean.mean().item(),
+            "policy_q_std": policy_q_std.mean().item(),
+            "policy_q_range": policy_q_range.mean().item(),
+            "policy_q_top1_vs_median": policy_q_top1_vs_median.mean().item(),
+            "policy_q_top1_vs_mean": policy_q_top1_vs_mean.mean().item(),
+            # Absolute Q values for reference
+            "prior_q_abs_mean": prior_q_mean.abs().mean().item(),
+            "policy_q_abs_mean": policy_q_mean.abs().mean().item(),
+        }
     
     # ==================== Checkpoint Utils ====================
     
