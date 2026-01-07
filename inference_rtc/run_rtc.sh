@@ -132,10 +132,18 @@ fi
 
 print_info "创建 tmux 会话: $SESSION_NAME"
 
+# 环境设置命令
+ENV_SETUP="conda activate arx-py310 && \
+export PYTHONPATH=\$PYTHONPATH:$PROJECT_DIR/arx5-sdk/python:$PROJECT_DIR:$PROJECT_DIR/rlft/diffusion_policy && \
+export LD_LIBRARY_PATH=\$LD_LIBRARY_PATH:$PROJECT_DIR/arx5-sdk/lib/x86_64:\$CONDA_PREFIX/lib"
+
 # 创建新会话，第一个窗口运行 Python 推理
+HEADLESS_FLAG=""
+[[ -n "$DRY_RUN" ]] && HEADLESS_FLAG="--headless"
+
 tmux new-session -d -s "$SESSION_NAME" -n "inference" \
-    "cd $PROJECT_DIR && python -m inference_rtc.python.inference_main \
-        -c $CHECKPOINT $DRY_RUN $VERBOSE; \
+    "cd $PROJECT_DIR && $ENV_SETUP && python -m inference_rtc.python.inference_main \
+        -c $CHECKPOINT $DRY_RUN $VERBOSE $HEADLESS_FLAG; \
      echo '按任意键退出...'; read"
 
 # 等待 Python 进程创建共享内存
@@ -165,7 +173,7 @@ else
     [[ -n "$DRY_RUN" ]] && DRY_RUN_FLAG="-d"
     
     tmux new-window -t "$SESSION_NAME" -n "servo" \
-        "cd $PROJECT_DIR && python -m inference_rtc.python.servo_main \
+        "cd $PROJECT_DIR && $ENV_SETUP && python -m inference_rtc.python.servo_main \
             -m $MODEL -i $INTERFACE $DRY_RUN_FLAG $VERBOSE_FLAG; \
          echo '按任意键退出...'; read"
 fi

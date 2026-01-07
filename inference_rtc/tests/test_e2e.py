@@ -80,8 +80,12 @@ def test_single_process():
     print("\n[1] 初始化组件...")
     writer = ShmKeyframeWriter.create(H=config.H, dof=config.dof, dt_key=config.dt_key)
     reader = ShmKeyframeReader()
-    interpolator = CubicInterpolator(config.dof)
-    limiter = SafetyLimiter(config.dof)
+    interpolator = CubicInterpolator()
+    servo_cfg = ServoConfig(dof=config.dof)
+    limiter = SafetyLimiter(servo_cfg)
+    
+    # 用于跟踪当前位置
+    current_pos = np.zeros(config.dof)
     
     # 等待 reader 连接
     if not reader.connect(timeout=5.0):
@@ -130,15 +134,16 @@ def test_single_process():
             
             if data is not None:
                 # 更新插值器
-                interpolator.update(data['t_write'], data['q_key'], data['dt_key'])
+                interpolator.build(data['q_key'], data['dt_key'], data['t_write'])
             
             # 插值
-            if interpolator.is_ready():
-                q_interp = interpolator.sample(t_now)
+            if interpolator.valid:
+                q_interp = interpolator.eval(t_now)
                 
                 if q_interp is not None:
                     # 安全限制
-                    q_safe = limiter.apply(q_interp)
+                    q_safe = limiter.apply(q_interp, current_pos)
+                    current_pos = q_safe.copy()
                     
                     servo_count += 1
                     servo_outputs.append((elapsed, q_safe.copy()))
@@ -210,7 +215,7 @@ def test_interpolator_accuracy():
     print("=" * 60)
     
     dof = 7
-    interpolator = CubicInterpolator(dof)
+    interpolator = CubicInterpolator()
     
     # 生成测试数据 (完美的正弦波)
     t_write = 0.0
@@ -224,7 +229,7 @@ def test_interpolator_accuracy():
         t = i * dt_key
         q_key[i, 0] = np.sin(2 * np.pi * freq * t)
     
-    interpolator.update(t_write, q_key, dt_key)
+    interpolator.build(q_key, dt_key, t_write)
     
     # 在不同时间点采样并与真值比较
     print("\n  时间       插值值      真值        误差")
@@ -233,7 +238,7 @@ def test_interpolator_accuracy():
     errors = []
     for i in range(10):
         t = i * dt_key / 3  # 在关键帧之间采样
-        q_interp = interpolator.sample(t_write + t)
+        q_interp = interpolator.eval(t_write + t)
         q_true = np.sin(2 * np.pi * freq * t)
         error = abs(q_interp[0] - q_true)
         errors.append(error)
@@ -258,12 +263,14 @@ def test_safety_limiter():
     print("=" * 60)
     
     dof = 7
-    limiter = SafetyLimiter(dof)
+    servo_cfg = ServoConfig(dof=dof)
+    limiter = SafetyLimiter(servo_cfg)
+    current_pos = np.zeros(dof)
     
     # 测试 1: 超出关节限位
     print("\n  [测试1] 关节限位...")
     q_over = np.array([5.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.1])  # 关节1 超出 [-π, π]
-    q_safe = limiter.apply(q_over)
+    q_safe = limiter.apply(q_over, current_pos)
     if abs(q_safe[0]) <= np.pi:
         print(f"    ✓ 关节1 被限制: {q_over[0]:.2f} -> {q_safe[0]:.2f}")
     else:
@@ -271,15 +278,17 @@ def test_safety_limiter():
     
     # 测试 2: 速率限制
     print("\n  [测试2] 速率限制...")
-    limiter2 = SafetyLimiter(dof)
+    servo_cfg2 = ServoConfig(dof=dof)
+    limiter2 = SafetyLimiter(servo_cfg2)
+    current2 = np.zeros(dof)
     
     # 第一个命令
     q1 = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.04])
-    limiter2.apply(q1)
+    current2 = limiter2.apply(q1, current2)
     
     # 第二个命令 - 大跳变
     q2 = np.array([1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.04])  # 关节1 跳变 1.0 rad
-    q_safe2 = limiter2.apply(q2)
+    q_safe2 = limiter2.apply(q2, current2)
     
     # 由于 EMA 和速率限制，输出不应该直接跳到 1.0
     if q_safe2[0] < 0.5:
@@ -290,7 +299,8 @@ def test_safety_limiter():
     # 测试 3: 夹爪限位
     print("\n  [测试3] 夹爪限位...")
     q_gripper = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.1])  # 夹爪超过 0.08
-    q_safe3 = limiter.apply(q_gripper)
+    current3 = np.zeros(dof)
+    q_safe3 = limiter.apply(q_gripper, current3)
     if q_safe3[6] <= 0.08:
         print(f"    ✓ 夹爪被限制: {q_gripper[6]:.3f} -> {q_safe3[6]:.3f}")
     else:

@@ -8,3 +8,6 @@ rlft/dsrl_ajwagen/
 rlft/dsrl_official/
 .vscode/
 inference/.vscode/
+umi-arx/
+detached-umi-policy/
+eval_output/

@@ -101,17 +101,18 @@ class ShmKeyframeReader:
         
         import struct
         
-        # 读取 version1
-        version1 = struct.unpack_from('<Q', self._buf, self.OFFSET_VERSION)[0]
+        # 读取 version1 - 使用 bytes() 确保正确读取
+        version1 = struct.unpack_from('<Q', bytes(self._buf[:8]), 0)[0]
         
         if version1 == self._last_version or version1 == 0:
             return None
         
-        # 读取 header
-        t_write = struct.unpack_from('<d', self._buf, self.OFFSET_T_WRITE)[0]
-        dof = struct.unpack_from('<i', self._buf, self.OFFSET_DOF)[0]
-        H = struct.unpack_from('<i', self._buf, self.OFFSET_H)[0]
-        dt_key = struct.unpack_from('<d', self._buf, self.OFFSET_DT_KEY)[0]
+        # 读取 header - 使用 bytes() 确保正确读取
+        header_bytes = bytes(self._buf[:32])
+        t_write = struct.unpack_from('<d', header_bytes, self.OFFSET_T_WRITE)[0]
+        dof = struct.unpack_from('<i', header_bytes, self.OFFSET_DOF)[0]
+        H = struct.unpack_from('<i', header_bytes, self.OFFSET_H)[0]
+        dt_key = struct.unpack_from('<d', header_bytes, self.OFFSET_DT_KEY)[0]
         
         # 读取 payload
         payload_size = H * dof * 8
@@ -119,7 +120,7 @@ class ShmKeyframeReader:
         q_key = np.frombuffer(q_key_bytes, dtype=np.float64).reshape(H, dof).copy()
         
         # 读取 version2
-        version2 = struct.unpack_from('<Q', self._buf, self.OFFSET_VERSION)[0]
+        version2 = struct.unpack_from('<Q', bytes(self._buf[:8]), 0)[0]
         
         if version1 != version2:
             return None  # 写入过程中被读取
@@ -280,7 +281,12 @@ class PythonServo:
         self._safety = SafetyLimiter(config)
         
         self._robot = None
+        self._arx5 = None  # arx5 模块引用
         self._current_pos = np.zeros(config.dof)
+        self._current_vel = np.zeros(config.dof)
+        
+        # 控制状态共享内存 (供 inference 读取机器人状态)
+        self._control_shm = None
         
         self._running = False
     
@@ -290,8 +296,18 @@ class PythonServo:
         print("RTC 伺服控制器 (Python 版本)")
         print("=" * 60)
         
-        # 1. 连接共享内存
-        print("\n[1] 连接共享内存...")
+        # 0. 创建控制状态共享内存 (供 inference 读取机器人状态)
+        print("\n[0] 创建控制状态共享内存...")
+        try:
+            from inference.shared_state import SharedState
+            self._control_shm = SharedState.create("arx5_control")
+            print("  ✓ 控制共享内存已创建")
+        except Exception as e:
+            print(f"  ⚠ 创建控制共享内存失败: {e}")
+            self._control_shm = None
+        
+        # 1. 连接关键帧共享内存
+        print("\n[1] 连接关键帧共享内存...")
         if not self._shm_reader.connect(timeout=30.0):
             print("[错误] 无法连接共享内存")
             return False
@@ -302,23 +318,62 @@ class PythonServo:
             try:
                 setup_arx5()
                 import arx5_interface as arx5
+                self._arx5 = arx5
+                
+                # ========== 关键: 使用正确的配置工厂 ==========
+                robot_config = arx5.RobotConfigFactory.get_instance().get_config(self._config.model)
+                controller_config = arx5.ControllerConfigFactory.get_instance().get_config(
+                    "joint_controller", robot_config.joint_dof
+                )
                 
                 self._robot = arx5.Arx5JointController(
-                    self._config.model, self._config.interface
+                    robot_config, controller_config, self._config.interface
                 )
+                self._robot.set_log_level(arx5.LogLevel.INFO)
                 
                 print(f"  模型: {self._config.model}")
                 print(f"  接口: {self._config.interface}")
+                
+                # ========== 关键: 启用后台通信 ==========
+                self._robot.enable_background_send_recv()
+                print(f"  ✓ 已启用后台通信")
+                
+                # ========== 关键: 复位到 home 位置 (设置 PD 增益) ==========
+                print(f"  正在复位到 home 位置...")
+                self._robot.reset_to_home()
+                print(f"  ✓ 已复位到 home")
+                
+                # ========== 可选: 启用重力补偿 ==========
+                urdf_path = os.path.join(
+                    os.path.dirname(__file__), 
+                    "..", "..", "arx5-sdk", "models", "arx5.urdf"
+                )
+                if os.path.exists(urdf_path):
+                    self._robot.enable_gravity_compensation(urdf_path)
+                    print(f"  ✓ 已启用重力补偿")
                 
                 # 获取初始状态
                 state = self._robot.get_state()
                 self._current_pos[:6] = np.array(state.pos())
                 self._current_pos[6] = state.gripper_pos
+                self._current_vel[:6] = np.array(state.vel())
                 
-                print(f"  初始位置: {self._current_pos[:3]}...")
+                print(f"  初始位置: {self._current_pos}")
+                
+                # ========== 关键: 立即写入初始状态到共享内存 ==========
+                if self._control_shm:
+                    self._control_shm.write_robot_state(
+                        joint_pos=self._current_pos[:6],
+                        gripper_pos=float(self._current_pos[6]),
+                        joint_vel=self._current_vel[:6],
+                        gripper_vel=float(self._current_vel[6])
+                    )
+                    print(f"  ✓ 已写入初始状态到共享内存")
                 
             except Exception as e:
                 print(f"[错误] 初始化机械臂失败: {e}")
+                import traceback
+                traceback.print_exc()
                 return False
         else:
             print("  [模拟模式] 不连接真机")
@@ -397,20 +452,30 @@ class PythonServo:
         if self._config.dry_run or self._robot is None:
             return
         
-        setup_arx5()
-        import arx5_interface as arx5
-        
-        js = arx5.JointState(6)  # 6 关节
+        js = self._arx5.JointState(6)  # 6 关节
         js.pos()[:] = target[:6]
         js.gripper_pos = float(target[6])
         
         self._robot.set_joint_cmd(js)
-        self._robot.send_recv_once()
+        # 后台模式下不需要 send_recv_once()
         
         # 更新当前状态
         state = self._robot.get_state()
         self._current_pos[:6] = np.array(state.pos())
         self._current_pos[6] = state.gripper_pos
+        self._current_vel[:6] = np.array(state.vel())
+        
+        # 更新控制共享内存 (供 inference 读取)
+        if self._control_shm is not None:
+            try:
+                self._control_shm.write_robot_state(
+                    joint_pos=self._current_pos[:6],
+                    gripper_pos=float(self._current_pos[6]),
+                    joint_vel=self._current_vel[:6],
+                    gripper_vel=float(self._current_vel[6])
+                )
+            except:
+                pass  # 忽略写入错误
     
     def _hold_position(self):
         """保持当前位置"""
@@ -425,6 +490,13 @@ class PythonServo:
             self._robot.set_to_damping()
         
         self._shm_reader.disconnect()
+        
+        # 关闭控制共享内存
+        if self._control_shm is not None:
+            try:
+                self._control_shm.close()
+            except:
+                pass
 
 
 # 全局变量用于信号处理

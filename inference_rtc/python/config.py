@@ -63,6 +63,7 @@ class InferenceConfig(RTCConfig):
     # ========== 运行模式 ==========
     headless: bool = False           # 无头模式 (无 GUI)
     dry_run: bool = False            # 模拟模式 (不连接机器人)
+    auto_start: bool = False         # 自动开始推理 (不等待按键)
     verbose: bool = True
     
     # ========== 现有 SharedState 连接 (用于读取机器人状态) ==========

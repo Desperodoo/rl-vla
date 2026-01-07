@@ -167,3 +167,33 @@ arx5_interface Python 模块可正常导入。
 | blend_window | 30 ms | 混合窗口时长 (Phase B) |
 | ema_alpha | 0.3 | EMA 平滑系数 |
 | max_joint_delta | 0.1 rad | 单步最大关节变化 |
+
+---
+
+## 11. 测试结果记录
+
+### 11.1 延迟测试 ✅ (2026-01-06)
+
+**测试命令**:
+```bash
+python -m inference_rtc.tests.test_inference_latency --samples 50 --warmup 10
+```
+
+**测试结果**:
+| 阶段 | Mean | P50 | P95 | P99 |
+|------|------|-----|-----|-----|
+| 相机采集 | 3.11 ms | 2.52 ms | 6.27 ms | 6.58 ms |
+| 预处理 | 0.45 ms | 0.41 ms | 0.74 ms | 0.87 ms |
+| **策略推理** | **70.77 ms** | 65.25 ms | **90.05 ms** | 91.07 ms |
+| **端到端** | **74.34 ms** | 68.58 ms | **94.89 ms** | 97.63 ms |
+
+**结论**:
+- ✅ E2E P95 (94.89 ms) < 策略周期 (100 ms)，可实现 10Hz 实时推理
+- 推荐 `inference_delay = 3` (基于 P95)
+- `execute_horizon` 可设为 5~8
+
+### 11.2 集成测试 - Dry Run (待执行)
+
+### 11.3 真机慢速测试 (待执行)
+
+### 11.4 真机推理测试 (待执行)

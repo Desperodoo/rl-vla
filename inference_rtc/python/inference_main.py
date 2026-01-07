@@ -90,14 +90,16 @@ class RTCInferenceNode:
         )
         
         # 3. 连接控制进程 (读取机器人状态)
-        print("\n连接控制进程...")
+        print("\n连接控制进程 (等待 servo 启动)...")
         if self.config.dry_run:
             print("  [模拟模式] 创建本地共享内存")
             self.robot_state = SharedState.create(self.config.control_shm_name)
         else:
+            # 等待 servo 进程创建控制共享内存
+            print("  等待 servo 进程...")
             try:
                 self.robot_state = SharedState.connect(
-                    self.config.control_shm_name, timeout=10.0
+                    self.config.control_shm_name, timeout=30.0  # 增加超时时间
                 )
                 print(f"  已连接到控制进程")
             except TimeoutError:
@@ -128,15 +130,45 @@ class RTCInferenceNode:
         print("RTC 推理循环启动 (@10Hz)")
         print("=" * 60)
         
+        # 检查是否可以使用 GUI
+        # 可以通过设置 RTC_HEADLESS=1 环境变量强制 headless 模式
+        import os
+        if os.environ.get('RTC_HEADLESS', '').lower() in ('1', 'true', 'yes'):
+            print("  [环境变量] RTC_HEADLESS=1, 强制 headless 模式")
+            self.config.headless = True
+        
+        gui_available = False
         if not self.config.headless:
+            # 检查 DISPLAY 环境变量
+            display = os.environ.get('DISPLAY')
+            if not display:
+                print("  [警告] DISPLAY 环境变量未设置，切换到 headless 模式")
+                self.config.headless = True
+            else:
+                # 假设 GUI 可用，如果崩溃请使用 --headless 或 RTC_HEADLESS=1
+                gui_available = True
+        
+        if gui_available:
+            cv2.namedWindow("RTC Inference", cv2.WINDOW_NORMAL)
             print("  [OpenCV 窗口]")
             print("    [Space] - 开始/暂停")
             print("    [R]     - 复位")
             print("    [Q]     - 退出")
-            cv2.namedWindow("RTC Inference", cv2.WINDOW_NORMAL)
+        else:
+            self.config.headless = True
+        
+        if self.config.headless:
+            print("  [Headless 模式]")
+            print("    按 Ctrl+C 退出")
         
         self._running = True
-        self._is_inferencing = False
+        
+        # 自动开始推理 (headless 模式或 auto_start)
+        if self.config.headless or self.config.auto_start:
+            self._is_inferencing = True
+            print("  → 自动开始推理")
+        else:
+            self._is_inferencing = False
         
         policy_dt = 1.0 / self.config.policy_rate
         last_inference_time = 0.0
@@ -158,13 +190,20 @@ class RTCInferenceNode:
                 self.policy_runner.add_observation(rgb_resized, state)
                 
                 # 4. 检查是否应该推理
-                control_state = self._get_control_state()
+                # RTC 架构下，只检查 _is_inferencing 标志
+                # control_state 用于可视化显示
+                should_infer = self._is_inferencing
+                control_state = ControlFlags.RUNNING if self._is_inferencing else ControlFlags.IDLE
                 
-                if control_state == ControlFlags.RUNNING and self._is_inferencing:
+                if should_infer:
                     # 10Hz 推理
                     if time.time() - last_inference_time >= policy_dt:
                         self._do_inference()
                         last_inference_time = time.time()
+                        
+                        # 每 10 次打印一次状态
+                        if self.policy_runner.inference_count % 10 == 1:
+                            print(f"[RTC] 推理中... count={self.policy_runner.inference_count}")
                 
                 # 5. 可视化
                 if not self.config.headless:
@@ -239,12 +278,14 @@ class RTCInferenceNode:
         # 写入共享内存
         version = self.shm_writer.write_keyframes(q_key)
         
-        if self.config.verbose and self.policy_runner.inference_count % 10 == 0:
+        # 每 10 次打印一次（无论 verbose 设置）
+        if self.policy_runner.inference_count % 10 == 0:
             print(f"[RTC] 写入关键帧 v={version}, shape={q_key.shape}")
     
     def _update_preview(self, rgb: np.ndarray, control_state: int):
         """更新预览窗口"""
-        display = rgb.copy()
+        # RGB -> BGR 转换 (OpenCV 使用 BGR 格式显示)
+        display = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
         
         # 状态文本
         state_text = {
@@ -269,20 +310,20 @@ class RTCInferenceNode:
     def _handle_key(self, key: int):
         """处理按键"""
         if key == ord('q') or key == ord('Q'):
+            print("[RTC] 按键 Q - 退出")
             self._running = False
         elif key == ord(' '):  # Space - 开始/暂停
             self._is_inferencing = not self._is_inferencing
             print(f"[RTC] 推理: {'开始' if self._is_inferencing else '暂停'}")
-            if self._is_inferencing and self.robot_state:
-                self.robot_state.request_start()
-            elif not self._is_inferencing and self.robot_state:
-                self.robot_state.request_pause()
         elif key == ord('r') or key == ord('R'):  # Reset
             print("[RTC] 请求复位...")
-            if self.robot_state:
-                self.robot_state.request_reset()
             self._is_inferencing = False
             self.policy_runner.clear_buffer()
+        elif key == 255 or key == -1:
+            pass  # 无按键
+        elif key > 0:
+            # 调试：打印未知按键
+            print(f"[RTC] 未知按键: {key} ('{chr(key) if 32 <= key < 127 else '?'}')")
     
     def _cleanup(self):
         """清理资源"""
@@ -308,7 +349,8 @@ def main():
     parser = argparse.ArgumentParser(description="RTC 推理节点")
     parser.add_argument("-c", "--checkpoint", required=True, help="模型 checkpoint 路径")
     parser.add_argument("--device", default="cuda", help="设备 (cuda/cpu)")
-    parser.add_argument("--headless", action="store_true", help="无头模式")
+    parser.add_argument("--headless", action="store_true", help="无头模式 (无 GUI)")
+    parser.add_argument("--auto-start", action="store_true", help="自动开始推理 (不等待按键)")
     parser.add_argument("--dry-run", action="store_true", help="模拟模式 (不连接机器人)")
     parser.add_argument("--verbose", action="store_true", help="详细输出")
     
@@ -317,6 +359,7 @@ def main():
     config = InferenceConfig(
         device=args.device,
         headless=args.headless,
+        auto_start=args.auto_start,
         dry_run=args.dry_run,
         verbose=args.verbose,
     )
