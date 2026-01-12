@@ -1,0 +1,58 @@
+<?xml version="1.0"?>
+<!--
+  RealSense D405 相机启动文件
+  
+  使用方法:
+    roslaunch carm_ros_deploy camera.launch
+    
+  参数:
+    serial_no: 相机序列号
+    camera: 相机命名空间
+-->
+<launch>
+  <!-- 相机参数 -->
+  <arg name="serial_no" default="218622279840"/>
+  <arg name="camera" default="camera"/>
+  
+  <!-- 图像参数 -->
+  <arg name="color_width" default="640"/>
+  <arg name="color_height" default="480"/>
+  <arg name="color_fps" default="30"/>
+  
+  <arg name="depth_width" default="640"/>
+  <arg name="depth_height" default="480"/>
+  <arg name="depth_fps" default="30"/>
+  
+  <!-- 功能开关 -->
+  <arg name="enable_color" default="true"/>
+  <arg name="enable_depth" default="true"/>
+  <arg name="enable_infra1" default="false"/>
+  <arg name="enable_infra2" default="false"/>
+  <arg name="align_depth" default="true"/>
+  
+  <!-- 启动 RealSense 节点 -->
+  <include file="$(find realsense2_camera)/launch/rs_camera.launch">
+    <arg name="serial_no" value="$(arg serial_no)"/>
+    <arg name="camera" value="$(arg camera)"/>
+    
+    <!-- 颜色流 -->
+    <arg name="enable_color" value="$(arg enable_color)"/>
+    <arg name="color_width" value="$(arg color_width)"/>
+    <arg name="color_height" value="$(arg color_height)"/>
+    <arg name="color_fps" value="$(arg color_fps)"/>
+    
+    <!-- 深度流 -->
+    <arg name="enable_depth" value="$(arg enable_depth)"/>
+    <arg name="depth_width" value="$(arg depth_width)"/>
+    <arg name="depth_height" value="$(arg depth_height)"/>
+    <arg name="depth_fps" value="$(arg depth_fps)"/>
+    
+    <!-- 红外流 -->
+    <arg name="enable_infra1" value="$(arg enable_infra1)"/>
+    <arg name="enable_infra2" value="$(arg enable_infra2)"/>
+    
+    <!-- 对齐 -->
+    <arg name="align_depth" value="$(arg align_depth)"/>
+  </include>
+  
+</launch>

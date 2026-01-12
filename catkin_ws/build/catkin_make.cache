@@ -1,0 +1,2 @@
+realsense-ros/realsense2_camera:realsense-ros/realsense2_description
+-DCATKIN_ENABLE_TESTING=False -DCMAKE_BUILD_TYPE=Release -DPYTHON_EXECUTABLE=/usr/bin/python3 -DCATKIN_DEVEL_PREFIX=/home/lizh/rl-vla/catkin_ws/devel -DCMAKE_INSTALL_PREFIX=/home/lizh/rl-vla/catkin_ws/install -G Unix Makefiles

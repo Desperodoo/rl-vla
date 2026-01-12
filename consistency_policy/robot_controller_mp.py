@@ -76,6 +76,8 @@ class Command(enum.Enum):
     ADD_WAYPOINT = 4        # 添加航点到缓冲区
     UPDATE_TRAJECTORY = 5   # 使用缓冲区更新轨迹
     SET_DAMPING = 6         # 设置为阻尼模式
+    ENABLE_TEACH_MODE = 7   # 启用示教模式 (低阻尼+重力补偿)
+    DISABLE_TEACH_MODE = 8  # 禁用示教模式 (恢复正常控制)
 
 
 # ===================== 多进程控制器 =====================
@@ -353,6 +355,27 @@ class Arx5JointControllerProcess(mp.Process):
             message = {'cmd': Command.SET_DAMPING.value}
             self.input_queue.put(message)
     
+    def enable_teach_mode(self):
+        """
+        启用示教模式
+        
+        进入低阻尼模式，可以手动拖动机械臂。
+        重力补偿会让机械臂更容易保持姿态。
+        """
+        if self.is_alive():
+            message = {'cmd': Command.ENABLE_TEACH_MODE.value}
+            self.input_queue.put(message)
+    
+    def disable_teach_mode(self):
+        """
+        禁用示教模式
+        
+        恢复正常控制增益，为策略控制做准备。
+        """
+        if self.is_alive():
+            message = {'cmd': Command.DISABLE_TEACH_MODE.value}
+            self.input_queue.put(message)
+    
     # ========= 控制循环 (在子进程中运行) =========
     
     def run(self):
@@ -422,21 +445,24 @@ class Arx5JointControllerProcess(mp.Process):
         t_start = time.monotonic()
         iter_idx = 0
         keep_running = True
+        in_teach_mode = False  # 示教模式标志
         
         try:
             while keep_running:
                 t_now = time.monotonic()
                 
-                # 插值计算当前命令
-                joints_cmd = joint_interp(t_now)  # (7,)
-                joint_pos_cmd = joints_cmd[:6]
-                gripper_cmd = joints_cmd[6]
-                
-                # 发送命令到机械臂
-                cmd = self.arx5.JointState(6)
-                cmd.pos()[:] = joint_pos_cmd
-                cmd.gripper_pos = gripper_cmd
-                self.robot.set_joint_cmd(cmd)
+                # 示教模式下只读取状态，不发送位置命令
+                if not in_teach_mode:
+                    # 插值计算当前命令
+                    joints_cmd = joint_interp(t_now)  # (7,)
+                    joint_pos_cmd = joints_cmd[:6]
+                    gripper_cmd = joints_cmd[6]
+                    
+                    # 发送命令到机械臂
+                    cmd = self.arx5.JointState(6)
+                    cmd.pos()[:] = joint_pos_cmd
+                    cmd.gripper_pos = gripper_cmd
+                    self.robot.set_joint_cmd(cmd)
                 
                 # 获取状态
                 state = self.robot.get_state()
@@ -527,21 +553,26 @@ class Arx5JointControllerProcess(mp.Process):
                         ])
                         
                         # 转换为单调时间
-                        input_times_mono = input_times - input_times[0] + t_now
+                        time_offset = time.monotonic() - time.time()
+                        input_times_mono = input_times + time_offset
                         
                         # 计算时间差值用于日志
                         time_diff_ms = (t_cmd_recv - input_times[0]) * 1000
                         chunk_duration_ms = (input_times[-1] - input_times[0]) * 1000
                         
-                        # 平滑过渡: 开始部分混合当前轨迹
-                        smoothing_time = 0.3  # 300ms 平滑过渡
+                        # RTC 兼容的平滑过渡
+                        # 注意: RTC 模式下，soft masking 已经在上层完成
+                        # 这里只做简单的时间对齐和边界平滑
+                        smoothing_time = 0.1  # 100ms 快速过渡 (RTC 模式下较短)
                         smoothened_joints = input_joints.copy()
                         
                         for j in range(len(input_times_mono)):
                             t_wp = input_times_mono[j]
                             if t_wp < t_now:
+                                # 过去的时间点: 使用当前插值器的值
                                 smoothened_joints[j] = joint_interp(t_wp)
                             elif t_now <= t_wp < t_now + smoothing_time:
+                                # 平滑过渡区域
                                 alpha = (t_wp - t_now) / smoothing_time
                                 smoothened_joints[j] = (
                                     (1 - alpha) * joint_interp(t_wp) + 
@@ -596,8 +627,50 @@ class Arx5JointControllerProcess(mp.Process):
                     
                     elif cmd_type == Command.SET_DAMPING.value:
                         self.robot.set_to_damping()
+                        in_teach_mode = False
                         if self.verbose:
                             print(f"[Arx5Controller] 已设置为阻尼模式")
+                    
+                    elif cmd_type == Command.ENABLE_TEACH_MODE.value:
+                        # 进入示教模式: 设置阻尼模式 + 降低 kd 使其更容易拖动
+                        self.robot.set_to_damping()
+                        
+                        # 降低阻尼增益，使机械臂更容易拖动
+                        gain = self.robot.get_gain()
+                        gain.kd()[:] *= 0.1  # 降低到原来的 10%
+                        gain.gripper_kd *= 0.1
+                        self.robot.set_gain(gain)
+                        
+                        in_teach_mode = True
+                        print(f"[Arx5Controller] 已进入示教模式 (可拖动)")
+                    
+                    elif cmd_type == Command.DISABLE_TEACH_MODE.value:
+                        # 退出示教模式: 恢复正常增益
+                        # 获取当前状态
+                        state = self.robot.get_state()
+                        curr_joints = np.concatenate([
+                            np.array(state.pos()),
+                            [state.gripper_pos]
+                        ])
+                        
+                        # 恢复正常增益
+                        gain = self.arx5.Gain(6)
+                        gain.kp()[:] = [80.0, 80.0, 80.0, 20.0, 20.0, 5.0]
+                        gain.kd()[:] = [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+                        gain.gripper_kp = 20.0
+                        gain.gripper_kd = 1.0
+                        self.robot.set_gain(gain)
+                        
+                        # 重新初始化插值器到当前位置
+                        curr_t = time.monotonic()
+                        joint_interp = JointTrajectoryInterpolator(
+                            times=np.array([curr_t]),
+                            joints=np.array([curr_joints]),
+                        )
+                        last_waypoint_time = curr_t
+                        
+                        in_teach_mode = False
+                        print(f"[Arx5Controller] 已退出示教模式 (恢复控制)")
                     
                     else:
                         print(f"[Arx5Controller] 未知命令: {cmd_type}")

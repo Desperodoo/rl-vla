@@ -1,0 +1,103 @@
+# CARM ROS 部署默认配置
+# 复制此文件并修改参数
+
+# ===================
+# 机械臂配置
+# ===================
+robot:
+  ip: "10.42.0.101"
+  port: 8090
+  mode: 1  # 0=IDLE, 1=POSITION, 2=MIT, 3=DRAG, 4=PF
+  
+  # 夹爪参数
+  gripper:
+    tau: 10.0  # 扭矩
+    min: 0.0   # 最小开度
+    max: 0.08  # 最大开度 (m)
+  
+  # 初始位姿
+  init_pose:
+    position: [0.26, -0.02, 0.22]
+    orientation: [1.0, 0.0, 0.0, 0.0]  # qx, qy, qz, qw
+    gripper: 0.05
+
+  # 关节限位
+  joint_limits:
+    j1: [-2.60, 2.60]
+    j2: [0.00, 3.14]
+    j3: [-3.14, 0.00]
+    j4: [-2.60, 2.60]
+    j5: [-2.60, 2.60]
+    j6: [-2.60, 2.60]
+
+# ===================
+# 相机配置
+# ===================
+camera:
+  # 主相机
+  primary:
+    topic: "/camera/color/image_raw"
+    type: "raw"  # raw 或 compressed
+    
+  # 深度相机（可选）
+  depth:
+    enabled: false
+    topic: "/camera/aligned_depth_to_color/image_raw"
+    
+  # 图像参数
+  image:
+    width: 640
+    height: 480
+    
+  # 同步参数
+  sync:
+    slop: 0.1  # 同步容差 (秒)
+    queue_size: 10
+
+# ===================
+# 推理配置
+# ===================
+inference:
+  # 模型路径
+  pretrain: ""
+  
+  # 推理频率
+  desire_inference_freq: 30.0
+  
+  # 时序融合
+  temporal_factor_k: 0.05
+  
+  # 前瞻步数
+  pos_lookahead_step: 1
+  pos_lookahead_duration: 0.015
+  
+  # 控制模式
+  joint_cmd_mode: false  # true=关节控制, false=末端控制
+  
+  # 跳过初始位姿
+  not_origin: false
+
+# ===================
+# 数据记录配置
+# ===================
+recording:
+  # 输出目录
+  output_dir: "./recorded_data"
+  
+  # 记录频率
+  record_freq: 30
+  
+  # 限制
+  max_episodes: 100
+  max_steps: 1000
+  
+  # 模式
+  teleop: true  # 使用拖动示教模式
+
+# ===================
+# 可视化配置
+# ===================
+visualization:
+  enabled: true
+  show_fps: true
+  show_state: true

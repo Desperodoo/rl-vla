@@ -1,0 +1,40 @@
+<?xml version="1.0"?>
+<!--
+  完整系统启动文件
+  启动相机 + 推理节点
+  
+  使用方法:
+    roslaunch carm_ros_deploy full_system.launch pretrain:=/path/to/model.pt
+-->
+<launch>
+  <!-- 相机参数 -->
+  <arg name="camera_serial" default="218622279840"/>
+  <arg name="camera_name" default="camera"/>
+  
+  <!-- 推理参数 -->
+  <arg name="pretrain" default=""/>
+  <arg name="robot_ip" default="10.42.0.101"/>
+  <arg name="joint_cmd_mode" default="false"/>
+  <arg name="vis" default="false"/>
+  
+  <!-- 启动相机 -->
+  <include file="$(find carm_ros_deploy)/launch/camera.launch">
+    <arg name="serial_no" value="$(arg camera_serial)"/>
+    <arg name="camera" value="$(arg camera_name)"/>
+  </include>
+  
+  <!-- 等待相机启动 -->
+  <node name="wait_for_camera" pkg="rostopic" type="rostopic"
+        args="echo -n 1 /$(arg camera_name)/color/image_raw"
+        output="screen" launch-prefix="bash -c 'sleep 3; $0 $@'"/>
+  
+  <!-- 启动推理节点 -->
+  <include file="$(find carm_ros_deploy)/launch/inference.launch">
+    <arg name="pretrain" value="$(arg pretrain)"/>
+    <arg name="robot_ip" value="$(arg robot_ip)"/>
+    <arg name="camera_topics" value="/$(arg camera_name)/color/image_raw"/>
+    <arg name="joint_cmd_mode" value="$(arg joint_cmd_mode)"/>
+    <arg name="vis" value="$(arg vis)"/>
+  </include>
+  
+</launch>
