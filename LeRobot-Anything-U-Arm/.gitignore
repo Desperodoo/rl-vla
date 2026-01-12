@@ -1,9 +1,0 @@
-build/
-devel/
-install/
-log/
-.colcon/
-
-__pycache__/
-*.pyc
-.venv/
