@@ -54,7 +54,7 @@ CMAKE_BINARY_DIR = /home/lizh/rl-vla/catkin_ws/build
 include realsense-ros/realsense2_camera/CMakeFiles/_realsense2_camera_generate_messages_check_deps_DeviceInfo.dir/progress.make
 
 realsense-ros/realsense2_camera/CMakeFiles/_realsense2_camera_generate_messages_check_deps_DeviceInfo:
-	cd /home/lizh/rl-vla/catkin_ws/build/realsense-ros/realsense2_camera && ../../catkin_generated/env_cached.sh /usr/bin/python3 /opt/ros/noetic/share/genmsg/cmake/../../../lib/genmsg/genmsg_check_deps.py realsense2_camera /home/lizh/rl-vla/catkin_ws/src/realsense-ros/realsense2_camera/srv/DeviceInfo.srv 
+	cd /home/lizh/rl-vla/catkin_ws/build/realsense-ros/realsense2_camera && ../../catkin_generated/env_cached.sh /home/lizh/miniconda3/envs/carm/bin/python /opt/ros/noetic/share/genmsg/cmake/../../../lib/genmsg/genmsg_check_deps.py realsense2_camera /home/lizh/rl-vla/catkin_ws/src/realsense-ros/realsense2_camera/srv/DeviceInfo.srv 
 
 _realsense2_camera_generate_messages_check_deps_DeviceInfo: realsense-ros/realsense2_camera/CMakeFiles/_realsense2_camera_generate_messages_check_deps_DeviceInfo
 _realsense2_camera_generate_messages_check_deps_DeviceInfo: realsense-ros/realsense2_camera/CMakeFiles/_realsense2_camera_generate_messages_check_deps_DeviceInfo.dir/build.make

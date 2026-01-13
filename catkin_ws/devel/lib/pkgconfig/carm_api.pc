@@ -1,0 +1,8 @@
+prefix=/home/lizh/rl-vla/catkin_ws/devel
+
+Name: carm_api
+Description: Description of carm_api
+Version: 0.0.0
+Cflags: 
+Libs: -L${prefix}/lib 
+Requires: 

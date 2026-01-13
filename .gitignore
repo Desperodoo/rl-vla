@@ -11,3 +11,5 @@ inference/.vscode/
 umi-arx/
 detached-umi-policy/
 eval_output/
+recorded_data/
+archive/

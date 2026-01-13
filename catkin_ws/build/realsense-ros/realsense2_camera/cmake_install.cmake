@@ -70,7 +70,7 @@ if("x${CMAKE_INSTALL_COMPONENT}x" STREQUAL "xUnspecifiedx" OR NOT CMAKE_INSTALL_
 endif()
 
 if("x${CMAKE_INSTALL_COMPONENT}x" STREQUAL "xUnspecifiedx" OR NOT CMAKE_INSTALL_COMPONENT)
-  execute_process(COMMAND "/usr/bin/python3" -m compileall "/home/lizh/rl-vla/catkin_ws/devel/lib/python3/dist-packages/realsense2_camera")
+  execute_process(COMMAND "/home/lizh/miniconda3/envs/carm/bin/python" -m compileall "/home/lizh/rl-vla/catkin_ws/devel/lib/python3/dist-packages/realsense2_camera")
 endif()
 
 if("x${CMAKE_INSTALL_COMPONENT}x" STREQUAL "xUnspecifiedx" OR NOT CMAKE_INSTALL_COMPONENT)

@@ -6,6 +6,6 @@ pkg_name = "realsense2_camera"
 dependencies_str = "sensor_msgs;std_msgs"
 langs = "gencpp;geneus;genlisp;gennodejs;genpy"
 dep_include_paths_str = "realsense2_camera;/home/lizh/rl-vla/catkin_ws/src/realsense-ros/realsense2_camera/msg;sensor_msgs;/opt/ros/noetic/share/sensor_msgs/cmake/../msg;std_msgs;/opt/ros/noetic/share/std_msgs/cmake/../msg;geometry_msgs;/opt/ros/noetic/share/geometry_msgs/cmake/../msg"
-PYTHON_EXECUTABLE = "/usr/bin/python3"
+PYTHON_EXECUTABLE = "/home/lizh/miniconda3/envs/carm/bin/python"
 package_has_static_sources = '' == 'TRUE'
 genmsg_check_deps_script = "/opt/ros/noetic/share/genmsg/cmake/../../../lib/genmsg/genmsg_check_deps.py"

@@ -1,0 +1,8 @@
+prefix=/home/lizh/rl-vla/catkin_ws/install
+
+Name: carm_deploy
+Description: Description of carm_deploy
+Version: 1.0.0
+Cflags: 
+Libs: -L${prefix}/lib 
+Requires: 
