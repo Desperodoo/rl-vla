@@ -86,31 +86,36 @@ def pose_to_transform_matrix(position, quaternion):
 
 
 def apply_relative_transform(relative_pose, current_pose, gripper):
-        """
-        将相对位姿变换应用到当前位姿，得到目标绝对位姿
+    """
+    将相对位姿变换应用到当前位姿，得到目标绝对位姿
+    
+    计算公式: target_pose = current_pose @ relative_transform
+    
+    This matches the inference behavior in infer_g3_api.py:
+        - Model outputs relative transformations
+        - All actions in prediction horizon are relative to observation frame's pose
+        - target = current @ relative
+    
+    Args:
+        relative_pose: 模型输出的相对位姿 [x,y,z,qx,qy,qz,qw]
+        current_pose: 当前末端位姿 [x,y,z,qx,qy,qz,qw]
+        gripper: 夹爪开度
         
-        计算公式: target_pose = current_pose @ relative_transform
-        
-        Args:
-            relative_pose: 模型输出的相对位姿 [x,y,z,qx,qy,qz,qw]
-            current_pose: 当前末端位姿 [x,y,z,qx,qy,qz,qw]
-            gripper: 夹爪开度
-            
-        Returns:
-            目标绝对位姿 [x,y,z,qx,qy,qz,qw,gripper]
-        """
-        # relative_pose 是模型输出的相对变换
-        # current_pose 是当前末端位姿
-        T_relative = pose_to_transform_matrix(relative_pose[:3], relative_pose[3:])
-        T_current = pose_to_transform_matrix(current_pose[:3], current_pose[3:])
-        
-        # target = current @ relative
-        T_target = T_current @ T_relative
-        
-        target_position = T_target[:3, 3]
-        target_quat = R.from_matrix(T_target[:3, :3]).as_quat()
-        
-        return target_position.tolist() + target_quat.tolist() + [gripper]
+    Returns:
+        目标绝对位姿 [x,y,z,qx,qy,qz,qw,gripper]
+    """
+    # relative_pose 是模型输出的相对变换
+    # current_pose 是当前末端位姿
+    T_relative = pose_to_transform_matrix(relative_pose[:3], relative_pose[3:])
+    T_current = pose_to_transform_matrix(current_pose[:3], current_pose[3:])
+    
+    # target = current @ relative
+    T_target = T_current @ T_relative
+    
+    target_position = T_target[:3, 3]
+    target_quat = R.from_matrix(T_target[:3, :3]).as_quat()
+    
+    return target_position.tolist() + target_quat.tolist() + [gripper]
 
 
 class PolicyInterface:

@@ -223,8 +223,11 @@ def compute_relative_actions(
     """
     Convert absolute actions to relative actions for training.
     
-    This converts the recorded absolute end-effector commands to relative
-    transformations, which is what the policy should learn to output.
+    DEPRECATED: This function computes relative pose for each frame relative to
+    that frame's current pose. This is INCONSISTENT with inference time where
+    all actions are relative to the observation frame's pose.
+    
+    Use compute_relative_actions_from_obs() instead for correct behavior.
     
     Args:
         qpos_end_seq: End effector states [T, 8] (pose + gripper)
@@ -255,6 +258,104 @@ def compute_relative_actions(
         relative_actions[t, 14] = action_seq[t, 14]  # gripper
     
     return relative_actions
+
+
+def compute_relative_actions_from_obs(
+    qpos_end_seq: np.ndarray,
+    action_seq: np.ndarray,
+    gripper_seq: np.ndarray,
+    obs_frame_idx: int,
+) -> np.ndarray:
+    """
+    Convert absolute actions to relative actions, all relative to the observation frame.
+    
+    This is the CORRECT version that matches inference behavior in infer_g3_api.py:
+    - At inference time, all predicted actions are transformed relative to the
+      current observation frame's pose (qpos_end at the moment of inference).
+    - Training should match this: for a given observation at time t, all future
+      actions [t, t+1, ..., t+pred_horizon-1] should be relative to pose at time t.
+    
+    Usage in dataset __getitem__:
+        Given observation at frame `obs_idx` (last frame of obs_horizon),
+        compute actions [obs_idx, obs_idx+pred_horizon] relative to qpos_end[obs_idx].
+    
+    Args:
+        qpos_end_seq: End effector states [T, 8] (pose + gripper)
+        action_seq: Raw actions [T, 15] (joint + gripper + end_pose + gripper)
+        gripper_seq: Gripper states [T]
+        obs_frame_idx: The observation frame index to use as reference pose
+        
+    Returns:
+        relative_actions: [T, 15] with relative end pose transformations
+            All relative to qpos_end_seq[obs_frame_idx]
+    """
+    T = len(qpos_end_seq)
+    relative_actions = np.zeros((T, 15), dtype=np.float32)
+    
+    # Reference pose: the pose at observation frame
+    ref_pose = qpos_end_seq[obs_frame_idx, :7]  # [x, y, z, qx, qy, qz, qw]
+    
+    for t in range(T):
+        # Joint positions and gripper (keep as is)
+        relative_actions[t, :7] = action_seq[t, :7]  # joint(6) + gripper(1)
+        
+        # Target end effector pose (from action)
+        target_pose = action_seq[t, 7:14]  # [x, y, z, qx, qy, qz, qw]
+        
+        # Compute relative transformation from reference pose to target pose
+        relative_pose = compute_relative_pose_transform(ref_pose, target_pose)
+        
+        relative_actions[t, 7:14] = relative_pose
+        relative_actions[t, 14] = action_seq[t, 14]  # gripper
+    
+    return relative_actions
+
+
+def compute_relative_action_chunk(
+    ref_pose: np.ndarray,
+    action_chunk: np.ndarray,
+) -> np.ndarray:
+    """
+    Convert a chunk of absolute end-effector actions to relative actions.
+    
+    All actions in the chunk are computed relative to the reference pose,
+    which is typically the observation frame's end-effector pose.
+    
+    This matches the inference behavior in infer_g3_api.py where:
+        target_pose = ref_pose @ relative_transform
+    So we compute:
+        relative_transform = inv(ref_pose) @ target_pose
+    
+    Args:
+        ref_pose: Reference pose [7] (observation frame's qpos_end[:7])
+        action_chunk: Action chunk [pred_horizon, 15] or [pred_horizon, 8]
+            For 15D: [joint(6), gripper(1), end_pose(7), gripper(1)]
+            For 8D: [end_pose(7), gripper(1)]
+            
+    Returns:
+        relative_action_chunk: Same shape as input with relative end poses
+    """
+    pred_horizon = action_chunk.shape[0]
+    action_dim = action_chunk.shape[1]
+    
+    relative_action_chunk = action_chunk.copy()
+    
+    if action_dim == 15:
+        # Full mode: end_pose is at index 7:14
+        for t in range(pred_horizon):
+            target_pose = action_chunk[t, 7:14]
+            relative_pose = compute_relative_pose_transform(ref_pose, target_pose)
+            relative_action_chunk[t, 7:14] = relative_pose
+    elif action_dim == 8:
+        # EE only mode: end_pose is at index 0:7
+        for t in range(pred_horizon):
+            target_pose = action_chunk[t, :7]
+            relative_pose = compute_relative_pose_transform(ref_pose, target_pose)
+            relative_action_chunk[t, :7] = relative_pose
+    else:
+        raise ValueError(f"Unsupported action_dim: {action_dim}")
+    
+    return relative_action_chunk
 
 
 def compute_delta_actions_simple(

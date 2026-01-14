@@ -53,6 +53,7 @@ from diffusion_policy.carm_utils import (
     get_carm_data_info,
     compute_relative_actions,
     compute_delta_actions_simple,
+    compute_relative_pose_transform,
     ActionNormalizer,
     StateEncoder,
 )
@@ -274,6 +275,10 @@ class CARMDataset(Dataset):
     
     Loads demonstrations from CARM HDF5 files and processes them for training.
     
+    IMPORTANT: This implementation correctly computes relative actions in __getitem__,
+    ensuring that all actions in a prediction horizon are relative to the observation
+    frame's pose. This matches the inference behavior in infer_g3_api.py.
+    
     Action modes:
         - 'full': [joint(6), gripper(1), relative_end_pose(7), gripper(1)] = 15D
         - 'ee_only': [relative_end_pose(7), gripper(1)] = 8D
@@ -289,7 +294,7 @@ class CARMDataset(Dataset):
         obs_horizon: Observation stacking horizon
         pred_horizon: Action prediction horizon
         action_mode: 'full' or 'ee_only'
-        use_delta_actions: Whether to compute delta actions
+        use_delta_actions: Whether to compute delta actions (between consecutive frames)
         action_normalizer: Optional action normalizer
     """
     
@@ -318,12 +323,16 @@ class CARMDataset(Dataset):
         
         print("Processing trajectories...")
         
+        # Store raw data for relative action computation in __getitem__
         trajectories = {
             "observations": [],
-            "actions": [],
+            "raw_actions": [],     # Original absolute actions
+            "qpos_end": [],        # End effector poses for relative computation
+            "qpos_joint": [],      # Joint positions
+            "gripper": [],         # Gripper states
         }
         
-        all_actions = []  # For computing normalization stats
+        all_relative_actions = []  # For computing normalization stats
         
         for ep_idx in tqdm(range(len(raw_data['images'])), desc="Processing episodes"):
             images = raw_data['images'][ep_idx]
@@ -339,54 +348,50 @@ class CARMDataset(Dataset):
                 'state': torch.from_numpy(obs_dict['state']).to(device),
             }
             
-            # Process actions
+            # Get raw actions or compute from trajectory
             if self.use_delta_actions or len(raw_data['action']) == 0:
-                # Compute delta actions from trajectory
-                delta_actions = compute_delta_actions_simple(qpos_end, gripper)
-                T_actions = len(delta_actions)
-                
-                if self.action_mode == 'full':
-                    # Pad with joint positions to match full format
-                    full_actions = np.zeros((T_actions, 15), dtype=np.float32)
-                    full_actions[:, :6] = qpos_joint[:T_actions, :6]  # joints
-                    full_actions[:, 6] = gripper[:T_actions]  # gripper
-                    full_actions[:, 7:14] = delta_actions[:, :7]  # relative pose
-                    full_actions[:, 14] = delta_actions[:, 7]  # gripper
-                    actions = full_actions
-                else:  # ee_only
-                    actions = delta_actions
-                
-                # Truncate observations to match actions
-                for k in processed_obs:
-                    processed_obs[k] = processed_obs[k][:T_actions]
+                # Use qpos_end as targets (next frame's pose)
+                # For delta mode, we'll compute relative in __getitem__
+                raw_actions = np.zeros((len(qpos_end), 15), dtype=np.float32)
+                raw_actions[:, :6] = qpos_joint[:, :6]  # joints
+                raw_actions[:, 6] = gripper  # gripper
+                # Use next frame's qpos_end as target (shifted by 1)
+                raw_actions[:-1, 7:14] = qpos_end[1:, :7]  # target pose
+                raw_actions[-1, 7:14] = qpos_end[-1, :7]   # last frame: keep current
+                raw_actions[:, 14] = gripper  # gripper
             else:
-                # Use recorded actions, convert to relative
                 raw_actions = raw_data['action'][ep_idx]
-                actions = compute_relative_actions(qpos_end, raw_actions, gripper)
-                
-                if self.action_mode == 'ee_only':
-                    # Extract only end effector part
-                    actions = np.concatenate([
-                        actions[:, 7:14],  # relative pose
-                        actions[:, 14:15],  # gripper
-                    ], axis=-1)
             
-            all_actions.append(actions)
-            
+            # Store raw data
             trajectories["observations"].append(processed_obs)
-            trajectories["actions"].append(torch.from_numpy(actions).to(device))
+            trajectories["raw_actions"].append(raw_actions)
+            trajectories["qpos_end"].append(qpos_end[:, :7])  # [T, 7]
+            trajectories["qpos_joint"].append(qpos_joint)
+            trajectories["gripper"].append(gripper)
+            
+            # Compute sample relative actions for normalization stats
+            # Use frame 0 as reference for this episode's stats
+            for t in range(0, len(raw_actions) - pred_horizon, pred_horizon):
+                ref_pose = qpos_end[t, :7]
+                for k in range(pred_horizon):
+                    target_pose = raw_actions[t + k, 7:14]
+                    relative_pose = compute_relative_pose_transform(ref_pose, target_pose)
+                    
+                    if self.action_mode == 'full':
+                        rel_action = np.zeros(15, dtype=np.float32)
+                        rel_action[:7] = raw_actions[t + k, :7]
+                        rel_action[7:14] = relative_pose
+                        rel_action[14] = raw_actions[t + k, 14]
+                    else:  # ee_only
+                        rel_action = np.concatenate([relative_pose, [raw_actions[t + k, 14]]])
+                    
+                    all_relative_actions.append(rel_action)
         
         # Compute action normalization stats
-        if self.action_normalizer is not None:
-            all_actions_concat = np.concatenate(all_actions, axis=0)
-            self.action_normalizer.fit(all_actions_concat)
-            print(f"Action normalization stats computed on {len(all_actions_concat)} samples")
-            
-            # Normalize actions
-            for i in range(len(trajectories["actions"])):
-                actions_np = trajectories["actions"][i].cpu().numpy()
-                actions_norm = self.action_normalizer.transform(actions_np)
-                trajectories["actions"][i] = torch.from_numpy(actions_norm).float().to(device)
+        if self.action_normalizer is not None and len(all_relative_actions) > 0:
+            all_relative_actions = np.array(all_relative_actions)
+            self.action_normalizer.fit(all_relative_actions)
+            print(f"Action normalization stats computed on {len(all_relative_actions)} samples")
         
         self.obs_keys = list(processed_obs.keys())
         print(f"Obs keys: {self.obs_keys}")
@@ -394,11 +399,11 @@ class CARMDataset(Dataset):
         # Compute slices
         print("Computing slice indices...")
         self.slices = []
-        num_traj = len(trajectories["actions"])
+        num_traj = len(trajectories["observations"])
         total_transitions = 0
         
         for traj_idx in range(num_traj):
-            L = trajectories["actions"][traj_idx].shape[0]
+            L = trajectories["raw_actions"][traj_idx].shape[0]
             total_transitions += L
             
             pad_before = obs_horizon - 1
@@ -410,7 +415,9 @@ class CARMDataset(Dataset):
     
     def __getitem__(self, index):
         traj_idx, start, end = self.slices[index]
-        L, act_dim = self.trajectories["actions"][traj_idx].shape
+        raw_actions = self.trajectories["raw_actions"][traj_idx]
+        qpos_end = self.trajectories["qpos_end"][traj_idx]
+        L = len(raw_actions)
         
         obs_traj = self.trajectories["observations"][traj_idx]
         
@@ -422,13 +429,46 @@ class CARMDataset(Dataset):
                 pad_obs_seq = torch.stack([obs_seq[k][0]] * abs(start), dim=0)
                 obs_seq[k] = torch.cat((pad_obs_seq, obs_seq[k]), dim=0)
         
-        # Get action sequence
-        act_seq = self.trajectories["actions"][traj_idx][max(0, start):end]
+        # Determine the observation frame index (last frame of obs_horizon)
+        # This is the frame whose pose we use as reference for all actions
+        obs_frame_idx = max(0, start + self.obs_horizon - 1)
+        ref_pose = qpos_end[obs_frame_idx]  # [7]
+        
+        # Get action sequence and compute relative poses
+        act_indices = list(range(max(0, start), min(end, L)))
+        
+        # Handle padding
         if start < 0:
-            act_seq = torch.cat([act_seq[0].repeat(-start, 1), act_seq], dim=0)
+            act_indices = [0] * (-start) + act_indices
         if end > L:
-            pad_action = act_seq[-1]
-            act_seq = torch.cat([act_seq, pad_action.repeat(end - L, 1)], dim=0)
+            act_indices = act_indices + [L - 1] * (end - L)
+        
+        # Compute relative actions
+        act_seq_list = []
+        for idx in act_indices:
+            raw_action = raw_actions[idx]
+            target_pose = raw_action[7:14]  # [7] absolute target pose
+            
+            # Compute relative transformation from ref_pose to target_pose
+            relative_pose = compute_relative_pose_transform(ref_pose, target_pose)
+            
+            if self.action_mode == 'full':
+                rel_action = np.zeros(15, dtype=np.float32)
+                rel_action[:7] = raw_action[:7]  # joints + gripper
+                rel_action[7:14] = relative_pose
+                rel_action[14] = raw_action[14]  # gripper
+            else:  # ee_only
+                rel_action = np.concatenate([relative_pose, [raw_action[14]]], dtype=np.float32)
+            
+            act_seq_list.append(rel_action)
+        
+        act_seq = np.stack(act_seq_list, axis=0)  # [pred_horizon, action_dim]
+        
+        # Apply normalization if configured
+        if self.action_normalizer is not None:
+            act_seq = self.action_normalizer.transform(act_seq)
+        
+        act_seq = torch.from_numpy(act_seq).float().to(self.device)
         
         assert obs_seq["state"].shape[0] == self.obs_horizon
         assert act_seq.shape[0] == self.pred_horizon
