@@ -51,8 +51,6 @@ from diffusion_policy.carm_utils import (
     load_carm_dataset,
     create_carm_obs_process_fn,
     get_carm_data_info,
-    compute_relative_actions,
-    compute_delta_actions_simple,
     compute_relative_pose_transform,
     ActionNormalizer,
     StateEncoder,
@@ -104,8 +102,8 @@ class Args:
     # Action space settings
     action_mode: Literal["full", "ee_only"] = "full"
     """action mode: 'full' (15D) or 'ee_only' (8D: relative_pose + gripper)"""
-    use_delta_actions: bool = False
-    """compute actions as delta between frames instead of using recorded actions"""
+    precompute_actions: bool = False
+    """precompute all relative actions at init (uses more memory but faster __getitem__)"""
     normalize_actions: bool = False
     """whether to normalize actions for training"""
     action_norm_mode: Literal["standard", "minmax"] = "standard"
@@ -275,9 +273,12 @@ class CARMDataset(Dataset):
     
     Loads demonstrations from CARM HDF5 files and processes them for training.
     
-    IMPORTANT: This implementation correctly computes relative actions in __getitem__,
-    ensuring that all actions in a prediction horizon are relative to the observation
+    IMPORTANT: This implementation correctly computes relative actions ensuring
+    that all actions in a prediction horizon are relative to the observation
     frame's pose. This matches the inference behavior in infer_g3_api.py.
+    
+    Training: relative_pose = inv(obs_frame_pose) @ target_pose
+    Inference: target_pose = obs_frame_pose @ relative_pose
     
     Action modes:
         - 'full': [joint(6), gripper(1), relative_end_pose(7), gripper(1)] = 15D
@@ -294,7 +295,8 @@ class CARMDataset(Dataset):
         obs_horizon: Observation stacking horizon
         pred_horizon: Action prediction horizon
         action_mode: 'full' or 'ee_only'
-        use_delta_actions: Whether to compute delta actions (between consecutive frames)
+        precompute_actions: If True, precompute all relative actions at init
+            (uses more memory but faster __getitem__)
         action_normalizer: Optional action normalizer
     """
     
@@ -307,15 +309,18 @@ class CARMDataset(Dataset):
         obs_horizon: int,
         pred_horizon: int,
         action_mode: str = "full",
-        use_delta_actions: bool = False,
+        precompute_actions: bool = False,
         action_normalizer: Optional[ActionNormalizer] = None,
     ):
         self.obs_horizon = obs_horizon
         self.pred_horizon = pred_horizon
         self.device = device
         self.action_mode = action_mode
-        self.use_delta_actions = use_delta_actions
+        self.precompute_actions = precompute_actions
         self.action_normalizer = action_normalizer
+        
+        # Determine action dimension
+        self.action_dim = 15 if action_mode == 'full' else 8
         
         # Load dataset
         print(f"Loading CARM dataset from {data_path}...")
@@ -323,13 +328,11 @@ class CARMDataset(Dataset):
         
         print("Processing trajectories...")
         
-        # Store raw data for relative action computation in __getitem__
+        # Store trajectory data
         trajectories = {
             "observations": [],
-            "raw_actions": [],     # Original absolute actions
+            "raw_actions": [],     # Original absolute actions (for dynamic compute)
             "qpos_end": [],        # End effector poses for relative computation
-            "qpos_joint": [],      # Joint positions
-            "gripper": [],         # Gripper states
         }
         
         all_relative_actions = []  # For computing normalization stats
@@ -348,29 +351,16 @@ class CARMDataset(Dataset):
                 'state': torch.from_numpy(obs_dict['state']).to(device),
             }
             
-            # Get raw actions or compute from trajectory
-            if self.use_delta_actions or len(raw_data['action']) == 0:
-                # Use qpos_end as targets (next frame's pose)
-                # For delta mode, we'll compute relative in __getitem__
-                raw_actions = np.zeros((len(qpos_end), 15), dtype=np.float32)
-                raw_actions[:, :6] = qpos_joint[:, :6]  # joints
-                raw_actions[:, 6] = gripper  # gripper
-                # Use next frame's qpos_end as target (shifted by 1)
-                raw_actions[:-1, 7:14] = qpos_end[1:, :7]  # target pose
-                raw_actions[-1, 7:14] = qpos_end[-1, :7]   # last frame: keep current
-                raw_actions[:, 14] = gripper  # gripper
-            else:
-                raw_actions = raw_data['action'][ep_idx]
+            # Get raw actions from recorded data
+            # Action format: [joint(6), gripper(1), end_pose(7), gripper(1)] = 15D
+            raw_actions = raw_data['action'][ep_idx]
             
-            # Store raw data
+            # Store trajectory data
             trajectories["observations"].append(processed_obs)
             trajectories["raw_actions"].append(raw_actions)
             trajectories["qpos_end"].append(qpos_end[:, :7])  # [T, 7]
-            trajectories["qpos_joint"].append(qpos_joint)
-            trajectories["gripper"].append(gripper)
             
             # Compute sample relative actions for normalization stats
-            # Use frame 0 as reference for this episode's stats
             for t in range(0, len(raw_actions) - pred_horizon, pred_horizon):
                 ref_pose = qpos_end[t, :7]
                 for k in range(pred_horizon):
@@ -412,13 +402,80 @@ class CARMDataset(Dataset):
         
         print(f"Total transitions: {total_transitions}, Total sequences: {len(self.slices)}")
         self.trajectories = trajectories
+        
+        # Precompute all relative actions if requested
+        if self.precompute_actions:
+            print("Precomputing relative actions for all slices...")
+            self._precompute_all_actions()
+    
+    def _precompute_all_actions(self):
+        """Precompute relative actions for all slices.
+        
+        This trades memory for speed: stores [num_slices, pred_horizon, action_dim]
+        instead of computing on-the-fly in __getitem__.
+        """
+        num_slices = len(self.slices)
+        self.precomputed_actions = torch.zeros(
+            (num_slices, self.pred_horizon, self.action_dim),
+            dtype=torch.float32,
+            device=self.device,
+        )
+        
+        for idx in tqdm(range(num_slices), desc="Precomputing actions"):
+            traj_idx, start, end = self.slices[idx]
+            raw_actions = self.trajectories["raw_actions"][traj_idx]
+            qpos_end = self.trajectories["qpos_end"][traj_idx]
+            L = len(raw_actions)
+            
+            # Determine reference pose (observation frame = last frame of obs_horizon)
+            obs_frame_idx = max(0, start + self.obs_horizon - 1)
+            ref_pose = qpos_end[obs_frame_idx]
+            
+            # Get action indices with padding
+            act_indices = list(range(max(0, start), min(end, L)))
+            if start < 0:
+                act_indices = [0] * (-start) + act_indices
+            if end > L:
+                act_indices = act_indices + [L - 1] * (end - L)
+            
+            # Compute relative actions
+            for k, act_idx in enumerate(act_indices):
+                raw_action = raw_actions[act_idx]
+                target_pose = raw_action[7:14]
+                relative_pose = compute_relative_pose_transform(ref_pose, target_pose)
+                
+                if self.action_mode == 'full':
+                    self.precomputed_actions[idx, k, :7] = torch.from_numpy(raw_action[:7])
+                    self.precomputed_actions[idx, k, 7:14] = torch.from_numpy(relative_pose)
+                    self.precomputed_actions[idx, k, 14] = raw_action[14]
+                else:  # ee_only
+                    self.precomputed_actions[idx, k, :7] = torch.from_numpy(relative_pose)
+                    self.precomputed_actions[idx, k, 7] = raw_action[14]
+            
+            # Apply normalization if configured
+            if self.action_normalizer is not None:
+                act_np = self.precomputed_actions[idx].cpu().numpy()
+                act_np = self.action_normalizer.transform(act_np)
+                self.precomputed_actions[idx] = torch.from_numpy(act_np).to(self.device)
+        
+        # Free raw data to save memory (no longer needed)
+        del self.trajectories["raw_actions"]
+        del self.trajectories["qpos_end"]
+        
+        memory_mb = self.precomputed_actions.element_size() * self.precomputed_actions.nelement() / 1024 / 1024
+        print(f"Precomputed actions shape: {self.precomputed_actions.shape}, Memory: {memory_mb:.2f} MB")
     
     def __getitem__(self, index):
-        traj_idx, start, end = self.slices[index]
-        raw_actions = self.trajectories["raw_actions"][traj_idx]
-        qpos_end = self.trajectories["qpos_end"][traj_idx]
-        L = len(raw_actions)
+        """Get a training sample.
         
+        If precompute_actions=True, returns precomputed relative actions.
+        Otherwise, computes relative actions on-the-fly.
+        
+        Relative pose computation matches inference:
+            Training: relative_pose = inv(ref_pose) @ target_pose
+            Inference: target_pose = ref_pose @ relative_pose
+        """
+        traj_idx, start, end = self.slices[index]
         obs_traj = self.trajectories["observations"][traj_idx]
         
         # Get observation sequence
@@ -429,46 +486,51 @@ class CARMDataset(Dataset):
                 pad_obs_seq = torch.stack([obs_seq[k][0]] * abs(start), dim=0)
                 obs_seq[k] = torch.cat((pad_obs_seq, obs_seq[k]), dim=0)
         
-        # Determine the observation frame index (last frame of obs_horizon)
-        # This is the frame whose pose we use as reference for all actions
-        obs_frame_idx = max(0, start + self.obs_horizon - 1)
-        ref_pose = qpos_end[obs_frame_idx]  # [7]
-        
-        # Get action sequence and compute relative poses
-        act_indices = list(range(max(0, start), min(end, L)))
-        
-        # Handle padding
-        if start < 0:
-            act_indices = [0] * (-start) + act_indices
-        if end > L:
-            act_indices = act_indices + [L - 1] * (end - L)
-        
-        # Compute relative actions
-        act_seq_list = []
-        for idx in act_indices:
-            raw_action = raw_actions[idx]
-            target_pose = raw_action[7:14]  # [7] absolute target pose
+        # Get action sequence
+        if self.precompute_actions:
+            # Fast path: return precomputed actions
+            act_seq = self.precomputed_actions[index]
+        else:
+            # Dynamic computation path
+            raw_actions = self.trajectories["raw_actions"][traj_idx]
+            qpos_end = self.trajectories["qpos_end"][traj_idx]
+            L = len(raw_actions)
             
-            # Compute relative transformation from ref_pose to target_pose
-            relative_pose = compute_relative_pose_transform(ref_pose, target_pose)
+            # Determine reference pose (observation frame = last frame of obs_horizon)
+            obs_frame_idx = max(0, start + self.obs_horizon - 1)
+            ref_pose = qpos_end[obs_frame_idx]
             
-            if self.action_mode == 'full':
-                rel_action = np.zeros(15, dtype=np.float32)
-                rel_action[:7] = raw_action[:7]  # joints + gripper
-                rel_action[7:14] = relative_pose
-                rel_action[14] = raw_action[14]  # gripper
-            else:  # ee_only
-                rel_action = np.concatenate([relative_pose, [raw_action[14]]], dtype=np.float32)
+            # Get action indices with padding
+            act_indices = list(range(max(0, start), min(end, L)))
+            if start < 0:
+                act_indices = [0] * (-start) + act_indices
+            if end > L:
+                act_indices = act_indices + [L - 1] * (end - L)
             
-            act_seq_list.append(rel_action)
-        
-        act_seq = np.stack(act_seq_list, axis=0)  # [pred_horizon, action_dim]
-        
-        # Apply normalization if configured
-        if self.action_normalizer is not None:
-            act_seq = self.action_normalizer.transform(act_seq)
-        
-        act_seq = torch.from_numpy(act_seq).float().to(self.device)
+            # Compute relative actions: relative = inv(ref_pose) @ target_pose
+            act_seq_list = []
+            for idx in act_indices:
+                raw_action = raw_actions[idx]
+                target_pose = raw_action[7:14]
+                relative_pose = compute_relative_pose_transform(ref_pose, target_pose)
+                
+                if self.action_mode == 'full':
+                    rel_action = np.zeros(15, dtype=np.float32)
+                    rel_action[:7] = raw_action[:7]
+                    rel_action[7:14] = relative_pose
+                    rel_action[14] = raw_action[14]
+                else:  # ee_only
+                    rel_action = np.concatenate([relative_pose, [raw_action[14]]], dtype=np.float32)
+                
+                act_seq_list.append(rel_action)
+            
+            act_seq = np.stack(act_seq_list, axis=0)
+            
+            # Apply normalization if configured
+            if self.action_normalizer is not None:
+                act_seq = self.action_normalizer.transform(act_seq)
+            
+            act_seq = torch.from_numpy(act_seq).float().to(self.device)
         
         assert obs_seq["state"].shape[0] == self.obs_horizon
         assert act_seq.shape[0] == self.pred_horizon
@@ -738,7 +800,7 @@ if __name__ == "__main__":
         obs_horizon=args.obs_horizon,
         pred_horizon=args.pred_horizon,
         action_mode=args.action_mode,
-        use_delta_actions=args.use_delta_actions,
+        precompute_actions=args.precompute_actions,
         action_normalizer=action_normalizer,
     )
     
