@@ -46,13 +46,18 @@ class RealEnvironment:
         self.robot_ip = config.get('robot_ip', '10.42.0.101')
         self.robot_mode = config.get('robot_mode', 1)
         self.tau = config.get('robot_tau', 10.0)
-        self.arm_init_pose = config.get('arm_init_pose', [0.26, -0.02, 0.22, 1, 0, 0, 0])
-        self.arm_init_gripper = config.get('arm_init_gripper', 0.05)
+        # 从实际机械臂读取的初始位姿 (2026-01-13)
+        self.arm_init_pose = config.get('arm_init_pose', [0.2475, 0.0014, 0.3251, 0.9996, -0.0034, 0.0255, -0.0074])
+        self.arm_init_gripper = config.get('arm_init_gripper', 0.078)
         self.camera_topics = config.get('camera_topics', ['/camera/color/image_raw'])
         self.sync_slop = config.get('sync_slop', 0.1)
         self.not_origin = config.get('not_origin', False)
         self.vis = config.get('vis', False)
         self.passive_mode = config.get('passive_mode', False)  # 被动模式：不设置控制模式
+        self.skip_init_confirm = config.get('skip_init_confirm', False)  # 跳过初始化确认
+        self.no_return_home = config.get('no_return_home', False)  # 退出时不回原位
+        self.return_to_zero = config.get('return_to_zero', True)  # 退出时回到零位(关节角度全为0)
+        self.init_speed = config.get('init_speed', 3.0)  # 初始化移动速度 (0-10)
         
         # 初始化机械臂
         rospy.loginfo(f"Connecting to robot at {self.robot_ip}...")
@@ -71,6 +76,9 @@ class RealEnvironment:
         
         # 初始化位置（被动模式下跳过）
         if not self.not_origin and not self.passive_mode:
+            # 用户确认（除非跳过）
+            if not self.skip_init_confirm:
+                self._wait_for_init_confirmation()
             self.init_status()
         
         # 状态变量
@@ -119,13 +127,43 @@ class RealEnvironment:
         print("gripper_tau: ", self.tau)
         print('----------------------------')
     
+    def _wait_for_init_confirmation(self):
+        """
+        等待用户确认后再初始化机械臂位置
+        这是一个安全机制，防止机械臂意外移动
+        """
+        rospy.logwarn("=" * 60)
+        rospy.logwarn("ROBOT ARM WILL MOVE TO INITIAL POSITION!")
+        rospy.logwarn(f"Target pose: {self.arm_init_pose}")
+        rospy.logwarn(f"Target gripper: {self.arm_init_gripper}")
+        rospy.logwarn("=" * 60)
+        rospy.logwarn("Please ensure:")
+        rospy.logwarn("  1. The workspace is clear")
+        rospy.logwarn("  2. E-stop is ready")
+        rospy.logwarn("  3. No obstacles in the robot's path")
+        rospy.logwarn("=" * 60)
+        
+        try:
+            user_input = input("\n>>> Press ENTER to confirm and initialize, or Ctrl+C to abort: ")
+            rospy.loginfo("User confirmed, proceeding with initialization...")
+        except (KeyboardInterrupt, EOFError):
+            rospy.logwarn("\nInitialization aborted by user")
+            raise KeyboardInterrupt("User aborted initialization")
+    
     def init_status(self):
         """初始化机械臂位置"""
-        rospy.loginfo("Initializing arm position...")
+        rospy.loginfo(f"Initializing arm position (speed level: {self.init_speed})...")
+        
+        # 设置较慢的初始化速度 (0-10, 默认 3.0 较慢)
+        self.arm.set_speed_level(self.init_speed)
+        
         self.arm.set_gripper(self.arm_init_gripper, self.tau)
         self.arm.move_pose(self.arm_init_pose)
         time.sleep(0.5)
-        rospy.loginfo("Arm position initialized")
+        
+        # 恢复默认速度 (10 = 最快)
+        self.arm.set_speed_level(10.0)
+        rospy.loginfo("Arm position initialized, speed restored to normal")
     
     def _arm_status_thread(self):
         """机械臂状态更新线程"""
@@ -288,7 +326,7 @@ class RealEnvironment:
         self.arm.set_ready()
     
     def shutdown(self):
-        """关闭环境 - 回原位但不断开连接"""
+        """关闭环境 - 默认回到零位但不断开连接"""
         rospy.loginfo("Shutting down RealEnvironment...")
         self.running = False
         
@@ -298,19 +336,33 @@ class RealEnvironment:
         if self.plan_thread.is_alive():
             self.plan_thread.join(timeout=1.0)
         
-        # 被动模式下不回原位（避免干扰手柄遥操作）
+        # 被动模式或 no_return_home 模式下不回位
         if self.passive_mode:
             rospy.loginfo("Passive mode: skipping return to home")
+        elif self.no_return_home:
+            rospy.logwarn("no_return_home mode: skipping return to home (robot stays in current position)")
         else:
-            # 回原位（不断开连接，不下使能）
+            # 回位（不断开连接，不下使能）
             try:
-                rospy.loginfo("Moving to home position...")
-                self.arm.move_pose(self.arm_init_pose)
-                self.arm.set_gripper(self.arm_init_gripper, self.tau)
+                # 使用慢速回位
+                self.arm.set_speed_level(self.init_speed)
+                
+                if self.return_to_zero:
+                    # 回到零位（关节角度全为0）
+                    rospy.loginfo(f"Moving to ZERO position (all joints = 0, speed level: {self.init_speed})...")
+                    zero_joints = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+                    self.arm.move_joint(zero_joints)
+                    self.arm.set_gripper(0.0, self.tau)  # 夹爪也关闭
+                else:
+                    # 回到初始位置
+                    rospy.loginfo(f"Moving to home position (speed level: {self.init_speed})...")
+                    self.arm.move_pose(self.arm_init_pose)
+                    self.arm.set_gripper(self.arm_init_gripper, self.tau)
+                
                 time.sleep(0.5)
-                rospy.loginfo("Returned to home position")
+                rospy.loginfo("Returned to position")
             except Exception as e:
-                rospy.logwarn(f"Error returning to home: {e}")
+                rospy.logwarn(f"Error returning to position: {e}")
         
         rospy.loginfo("RealEnvironment shutdown complete")
 

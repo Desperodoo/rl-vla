@@ -290,3 +290,57 @@ class ConsistencyFlowAgent(nn.Module):
         
         self.velocity_net.train()
         return x
+
+    @torch.no_grad()
+    def get_action_deterministic(
+        self,
+        obs_features: torch.Tensor,
+        num_steps: Optional[int] = None,
+        integration_method: Literal["euler", "rk4"] = "euler",
+    ) -> torch.Tensor:
+        """
+        Generate action using single-step deterministic prediction.
+        Only valid due to consistency training.
+        
+        Args:
+            obs_features: Encoded observation [B, obs_horizon, obs_dim]
+        Returns:
+            actions: Generated action sequence [B, pred_horizon, action_dim]
+        """
+        self.velocity_net.eval()
+        batch_size = obs_features.shape[0]
+
+        # Can use fewer steps due to consistency training
+        steps = num_steps if num_steps is not None else self.num_flow_steps
+
+        # Start from zero (deterministic)
+        x = torch.zeros(
+            batch_size, self.pred_horizon, self.action_dim,
+            device=obs_features.device
+        )
+
+        dt = 1.0 / steps
+        
+        for i in range(steps):
+            t = torch.full((batch_size,), i * dt, device=obs_features.device)
+            
+            if integration_method == "euler":
+                v = self.velocity_net(x, t, obs_features)
+                x = x + v * dt
+            else:  # RK4
+                t_mid = t + 0.5 * dt
+                t_end = t + dt
+                
+                k1 = self.velocity_net(x, t, obs_features)
+                k2 = self.velocity_net(x + 0.5 * dt * k1, t_mid, obs_features)
+                k3 = self.velocity_net(x + 0.5 * dt * k2, t_mid, obs_features)
+                k4 = self.velocity_net(x + dt * k3, t_end, obs_features)
+                
+                x = x + (dt / 6.0) * (k1 + 2*k2 + 2*k3 + k4)
+        
+        # Clamp to action bounds (optional)
+        if self.action_bounds is not None:
+            x = torch.clamp(x, self.action_bounds[0], self.action_bounds[1])
+        
+        self.velocity_net.train()
+        return x

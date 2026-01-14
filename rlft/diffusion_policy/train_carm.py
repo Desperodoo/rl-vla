@@ -57,6 +57,11 @@ from diffusion_policy.carm_utils import (
     StateEncoder,
 )
 from diffusion_policy.plain_conv import PlainConv
+from diffusion_policy.resnet_encoder import (
+    ResNetEncoder,
+    create_visual_encoder,
+    get_encoder_input_size,
+)
 from diffusion_policy.conditional_unet1d import ConditionalUnet1D
 from diffusion_policy.algorithms import (
     DiffusionPolicyAgent,
@@ -80,7 +85,7 @@ class Args:
     """if toggled, `torch.backends.cudnn.deterministic=False`"""
     cuda: bool = True
     """if toggled, cuda will be enabled by default"""
-    track: bool = False
+    track: bool = True
     """if toggled, this experiment will be tracked with Weights and Biases"""
     wandb_project_name: str = "CARM"
     """the wandb's project name"""
@@ -110,7 +115,7 @@ class Args:
     """target image size (H, W) for resizing, None = no resize"""
 
     # Training settings
-    total_iters: int = 50_000
+    total_iters: int = 100_000
     """total training iterations"""
     batch_size: int = 256
     """batch size"""
@@ -132,8 +137,20 @@ class Args:
     """GroupNorm groups"""
     
     # Visual encoder settings
+    visual_encoder_type: Literal["plain_conv", "resnet18", "resnet34", "resnet50"] = "plain_conv"
+    """visual encoder type: plain_conv (lightweight), resnet18/34/50 (pretrained)"""
     visual_feature_dim: int = 256
     """visual encoder output dimension"""
+    pretrained_backbone: bool = True
+    """whether to use ImageNet pretrained weights (ResNet only)"""
+    freeze_backbone: bool = False
+    """whether to freeze backbone parameters (ResNet only, for few-shot learning)"""
+    freeze_bn: bool = True
+    """whether to freeze BatchNorm layers (ResNet only, recommended for small batch)"""
+    lr_backbone: float = 1e-5
+    """learning rate for backbone (ResNet only, typically lower than main lr)"""
+    auto_image_size: bool = True
+    """automatically adjust image size based on encoder type (128 for plain_conv, 224 for ResNet)"""
     
     # State encoder settings
     use_state_encoder: bool = True
@@ -215,6 +232,12 @@ class Args:
     """checkpoint save frequency"""
     num_dataload_workers: int = 0
     """dataloader workers"""
+    
+    # Resume training
+    resume_from: Optional[str] = None
+    """path to checkpoint to resume training from (e.g., runs/exp_name/checkpoints/latest.pt)"""
+    resume_optimizer: bool = True
+    """whether to resume optimizer state (set False to reset learning rate)"""
 
 
 class IterationBasedBatchSampler:
@@ -556,7 +579,8 @@ def create_agent(algorithm: str, action_dim: int, global_cond_dim: int, args):
 
 
 def save_ckpt(run_name, tag, agent, ema_agent, visual_encoder=None, state_encoder=None, 
-              action_normalizer=None, args=None):
+              action_normalizer=None, args=None, optimizer=None, lr_scheduler=None, 
+              ema=None, iteration=None):
     """Save checkpoint."""
     os.makedirs(f"runs/{run_name}/checkpoints", exist_ok=True)
     ckpt = {
@@ -567,6 +591,14 @@ def save_ckpt(run_name, tag, agent, ema_agent, visual_encoder=None, state_encode
         ckpt["visual_encoder"] = visual_encoder.state_dict()
     if state_encoder is not None:
         ckpt["state_encoder"] = state_encoder.state_dict()
+    if optimizer is not None:
+        ckpt["optimizer"] = optimizer.state_dict()
+    if lr_scheduler is not None:
+        ckpt["lr_scheduler"] = lr_scheduler.state_dict()
+    if ema is not None:
+        ckpt["ema"] = ema.state_dict()
+    if iteration is not None:
+        ckpt["iteration"] = iteration
     
     torch.save(ckpt, f"runs/{run_name}/checkpoints/{tag}.pt")
     
@@ -636,11 +668,20 @@ if __name__ == "__main__":
         "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
     )
     
+    # Determine image size based on encoder type
+    if args.auto_image_size:
+        target_image_size = get_encoder_input_size(args.visual_encoder_type, default_size=(128, 128))
+        print(f"Auto image size: {args.visual_encoder_type} -> {target_image_size}")
+    else:
+        target_image_size = args.target_image_size
+        print(f"Manual image size: {target_image_size}")
+    
     # Create observation processing function
+    # Note: For ResNet, images should be in [0, 1] range (normalization done inside encoder)
     obs_process_fn = create_carm_obs_process_fn(
         output_format="NCHW",
-        target_size=args.target_image_size,
-        normalize_images=True,
+        target_size=target_image_size,
+        normalize_images=True,  # Output in [0, 255] range for PlainConv or [0, 1] for ResNet
     )
     
     # Create action normalizer
@@ -663,7 +704,8 @@ if __name__ == "__main__":
     
     sampler = RandomSampler(dataset, replacement=False)
     batch_sampler = BatchSampler(sampler, batch_size=args.batch_size, drop_last=True)
-    batch_sampler = IterationBasedBatchSampler(batch_sampler, args.total_iters)
+    # Note: start_iter will be set after resume logic, use 0 here and skip in training loop
+    batch_sampler = IterationBasedBatchSampler(batch_sampler, args.total_iters, start_iter=0)
     train_dataloader = DataLoader(
         dataset,
         batch_sampler=batch_sampler,
@@ -675,12 +717,35 @@ if __name__ == "__main__":
     # Determine image channels
     in_channels = 3  # RGB
     
-    # Create visual encoder
-    visual_encoder = PlainConv(
-        in_channels=in_channels,
-        out_dim=args.visual_feature_dim,
-        pool_feature_map=True,
-    ).to(device)
+    # Create visual encoder based on encoder type
+    print(f"Creating visual encoder: {args.visual_encoder_type}")
+    if args.visual_encoder_type == "plain_conv":
+        visual_encoder = PlainConv(
+            in_channels=in_channels,
+            out_dim=args.visual_feature_dim,
+            pool_feature_map=True,
+        ).to(device)
+        use_separate_backbone_lr = False
+    else:
+        # ResNet-based encoder
+        visual_encoder = ResNetEncoder(
+            backbone_name=args.visual_encoder_type,
+            out_dim=args.visual_feature_dim,
+            pretrained=args.pretrained_backbone,
+            freeze_backbone=args.freeze_backbone,
+            freeze_bn=args.freeze_bn,
+        ).to(device)
+        use_separate_backbone_lr = not args.freeze_backbone  # Only use separate lr if not frozen
+        
+        # Print parameter statistics
+        total_params = sum(p.numel() for p in visual_encoder.parameters())
+        trainable_params = sum(p.numel() for p in visual_encoder.parameters() if p.requires_grad)
+        print(f"  Total params: {total_params/1e6:.2f}M, Trainable: {trainable_params/1e6:.2f}M")
+        if args.freeze_backbone:
+            print(f"  Backbone FROZEN - only projection layer is trainable")
+        if args.freeze_bn:
+            print(f"  BatchNorm layers FROZEN")
+    
     visual_feature_dim = args.visual_feature_dim
     
     # Create state encoder
@@ -705,14 +770,50 @@ if __name__ == "__main__":
     agent = create_agent(args.algorithm, action_dim, global_cond_dim, args).to(device)
     print(f"Agent ({args.algorithm}) parameters: {sum(p.numel() for p in agent.parameters()) / 1e6:.2f}M")
     
-    # Setup optimizer
-    all_params = list(agent.parameters()) + list(visual_encoder.parameters())
+    # Setup optimizer with optional separate learning rates for backbone
+    param_groups = []
+    
+    # Agent parameters
+    param_groups.append({
+        'params': list(agent.parameters()),
+        'lr': args.lr,
+        'name': 'agent'
+    })
+    
+    # Visual encoder parameters (with potential separate lr for backbone)
+    if use_separate_backbone_lr and hasattr(visual_encoder, 'get_param_groups'):
+        # ResNet with separate backbone/head learning rates
+        backbone_params = list(visual_encoder.get_backbone_params())
+        head_params = list(visual_encoder.get_head_params())
+        param_groups.append({
+            'params': backbone_params,
+            'lr': args.lr_backbone,
+            'name': 'visual_backbone'
+        })
+        param_groups.append({
+            'params': head_params,
+            'lr': args.lr,
+            'name': 'visual_head'
+        })
+        print(f"Using separate lr for backbone: {args.lr_backbone} (head: {args.lr})")
+    else:
+        # PlainConv or frozen backbone
+        param_groups.append({
+            'params': list(visual_encoder.parameters()),
+            'lr': args.lr,
+            'name': 'visual_encoder'
+        })
+    
+    # State encoder parameters
     if state_encoder is not None:
-        all_params += list(state_encoder.parameters())
+        param_groups.append({
+            'params': list(state_encoder.parameters()),
+            'lr': args.lr,
+            'name': 'state_encoder'
+        })
     
     optimizer = optim.AdamW(
-        params=all_params,
-        lr=args.lr,
+        params=param_groups,
         betas=(0.95, 0.999),
         weight_decay=1e-6,
     )
@@ -728,6 +829,58 @@ if __name__ == "__main__":
     # EMA setup
     ema = EMAModel(parameters=agent.parameters(), power=0.75)
     ema_agent = create_agent(args.algorithm, action_dim, global_cond_dim, args).to(device)
+    
+    # Resume from checkpoint if specified
+    start_iter = 0
+    if args.resume_from is not None:
+        resume_path = os.path.expanduser(args.resume_from)
+        if not os.path.exists(resume_path):
+            raise FileNotFoundError(f"Resume checkpoint not found: {resume_path}")
+        
+        print(f"Resuming from checkpoint: {resume_path}")
+        ckpt = torch.load(resume_path, map_location=device)
+        
+        # Load agent weights (strict=True will raise error if mismatch)
+        agent.load_state_dict(ckpt["agent"], strict=True)
+        print("  Loaded agent weights")
+        
+        # Load EMA agent weights
+        if "ema_agent" in ckpt:
+            ema_agent.load_state_dict(ckpt["ema_agent"], strict=True)
+            print("  Loaded ema_agent weights")
+        
+        # Load visual encoder weights
+        if "visual_encoder" in ckpt:
+            visual_encoder.load_state_dict(ckpt["visual_encoder"], strict=True)
+            print("  Loaded visual_encoder weights")
+        
+        # Load state encoder weights
+        if state_encoder is not None and "state_encoder" in ckpt:
+            state_encoder.load_state_dict(ckpt["state_encoder"], strict=True)
+            print("  Loaded state_encoder weights")
+        
+        # Load EMA state
+        if "ema" in ckpt:
+            ema.load_state_dict(ckpt["ema"])
+            print("  Loaded EMA state")
+        
+        # Load optimizer and scheduler state
+        if args.resume_optimizer:
+            if "optimizer" in ckpt:
+                optimizer.load_state_dict(ckpt["optimizer"])
+                print("  Loaded optimizer state")
+            if "lr_scheduler" in ckpt:
+                lr_scheduler.load_state_dict(ckpt["lr_scheduler"])
+                print("  Loaded lr_scheduler state")
+        else:
+            print("  Skipped optimizer/scheduler state (resume_optimizer=False)")
+        
+        # Get starting iteration
+        if "iteration" in ckpt:
+            start_iter = ckpt["iteration"] + 1
+            print(f"  Resuming from iteration {start_iter}")
+        
+        print(f"Resume complete!")
     
     timings = defaultdict(float)
     
@@ -775,10 +928,13 @@ if __name__ == "__main__":
     if state_encoder is not None:
         state_encoder.train()
     
-    pbar = tqdm(total=args.total_iters)
+    pbar = tqdm(total=args.total_iters, initial=start_iter)
     last_tick = time.time()
     
     for iteration, data_batch in enumerate(train_dataloader):
+        # Skip iterations if resuming
+        if iteration < start_iter:
+            continue
         timings["data_loading"] += time.time() - last_tick
         
         last_tick = time.time()
@@ -829,9 +985,11 @@ if __name__ == "__main__":
         if iteration > 0 and iteration % args.save_freq == 0:
             copy_ema_to_eval_agent()
             save_ckpt(run_name, f"iter_{iteration}", agent, ema_agent, 
-                     visual_encoder, state_encoder, action_normalizer, args)
+                     visual_encoder, state_encoder, action_normalizer, args,
+                     optimizer, lr_scheduler, ema, iteration)
             save_ckpt(run_name, "latest", agent, ema_agent,
-                     visual_encoder, state_encoder, action_normalizer, args)
+                     visual_encoder, state_encoder, action_normalizer, args,
+                     optimizer, lr_scheduler, ema, iteration)
         
         pbar.update(1)
         pbar.set_postfix({k: f"{v:.4f}" for k, v in losses.items()})
@@ -840,7 +998,8 @@ if __name__ == "__main__":
     # Final checkpoint
     copy_ema_to_eval_agent()
     save_ckpt(run_name, "final", agent, ema_agent, 
-             visual_encoder, state_encoder, action_normalizer, args)
+             visual_encoder, state_encoder, action_normalizer, args,
+             optimizer, lr_scheduler, ema, args.total_iters)
     log_metrics(args.total_iters, losses)
     
     writer.close()
