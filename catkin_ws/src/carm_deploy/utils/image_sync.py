@@ -20,7 +20,7 @@ class ImageSynchronizer:
     支持多个相机话题的时间同步订阅
     """
     
-    def __init__(self, camera_topics, sync_slop=0.1, queue_size=10, use_compressed=False,
+    def __init__(self, camera_topics, sync_slop=0.02, queue_size=10, use_compressed=False,
                  target_width=None, target_height=None):
         """
         初始化图像同步器

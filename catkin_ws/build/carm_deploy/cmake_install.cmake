@@ -61,18 +61,6 @@ if("x${CMAKE_INSTALL_COMPONENT}x" STREQUAL "xUnspecifiedx" OR NOT CMAKE_INSTALL_
 endif()
 
 if("x${CMAKE_INSTALL_COMPONENT}x" STREQUAL "xUnspecifiedx" OR NOT CMAKE_INSTALL_COMPONENT)
-  file(INSTALL DESTINATION "${CMAKE_INSTALL_PREFIX}/lib/carm_deploy" TYPE PROGRAM FILES "/home/lizh/rl-vla/catkin_ws/build/carm_deploy/catkin_generated/installspace/env_ros.py")
-endif()
-
-if("x${CMAKE_INSTALL_COMPONENT}x" STREQUAL "xUnspecifiedx" OR NOT CMAKE_INSTALL_COMPONENT)
-  file(INSTALL DESTINATION "${CMAKE_INSTALL_PREFIX}/lib/carm_deploy" TYPE PROGRAM FILES "/home/lizh/rl-vla/catkin_ws/build/carm_deploy/catkin_generated/installspace/test_realsense.py")
-endif()
-
-if("x${CMAKE_INSTALL_COMPONENT}x" STREQUAL "xUnspecifiedx" OR NOT CMAKE_INSTALL_COMPONENT)
-  file(INSTALL DESTINATION "${CMAKE_INSTALL_PREFIX}/lib/carm_deploy" TYPE PROGRAM FILES "/home/lizh/rl-vla/catkin_ws/build/carm_deploy/catkin_generated/installspace/ros_camera_subscriber.py")
-endif()
-
-if("x${CMAKE_INSTALL_COMPONENT}x" STREQUAL "xUnspecifiedx" OR NOT CMAKE_INSTALL_COMPONENT)
   file(INSTALL DESTINATION "${CMAKE_INSTALL_PREFIX}/share/carm_deploy/launch" TYPE DIRECTORY FILES "/home/lizh/rl-vla/catkin_ws/src/carm_deploy/launch/")
 endif()
 
@@ -81,6 +69,13 @@ if("x${CMAKE_INSTALL_COMPONENT}x" STREQUAL "xUnspecifiedx" OR NOT CMAKE_INSTALL_
 endif()
 
 if("x${CMAKE_INSTALL_COMPONENT}x" STREQUAL "xUnspecifiedx" OR NOT CMAKE_INSTALL_COMPONENT)
-  file(INSTALL DESTINATION "${CMAKE_INSTALL_PREFIX}/share/carm_deploy/utils" TYPE DIRECTORY FILES "/home/lizh/rl-vla/catkin_ws/src/carm_deploy/utils/")
+  file(INSTALL DESTINATION "${CMAKE_INSTALL_PREFIX}/share/carm_deploy" TYPE DIRECTORY FILES
+    "/home/lizh/rl-vla/catkin_ws/src/carm_deploy/core/"
+    "/home/lizh/rl-vla/catkin_ws/src/carm_deploy/inference/"
+    "/home/lizh/rl-vla/catkin_ws/src/carm_deploy/data/"
+    "/home/lizh/rl-vla/catkin_ws/src/carm_deploy/tools/"
+    "/home/lizh/rl-vla/catkin_ws/src/carm_deploy/utils/"
+    "/home/lizh/rl-vla/catkin_ws/src/carm_deploy/camera/"
+    FILES_MATCHING REGEX "/[^/]*\\.py$")
 endif()
 

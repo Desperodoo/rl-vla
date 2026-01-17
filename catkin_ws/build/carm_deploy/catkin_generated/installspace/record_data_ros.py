@@ -1,17 +1,22 @@
 #!/usr/bin/env python3
 """
-CARM 机械臂 ROS 数据记录程序
-基于 carm_real/record_data_surreal3576.py 重构，使用 ROS 原生通信
+CARM 机械臂 ROS 数据记录程序（被动模式）
+不干扰网页手柄遥操作，只记录数据
 
 功能:
 - 记录相机图像（ROS 话题）
 - 记录机械臂状态（关节角、末端位姿）
 - 夹爪状态
+- 动作命令
 - 时间戳同步
-- 保存为 HDF5 格式（兼容 LeRobot）
+- 保存为 HDF5 格式
 
 使用方法:
-    rosrun carm_ros_deploy record_data_ros.py --output_dir /path/to/data
+    rosrun carm_deploy record_data_ros.py --output_dir /path/to/data --vis
+
+遥操作:
+    通过网页 http://10.42.0.101 使用手柄进行遥操作
+    本脚本只记录数据，不控制机械臂
 """
 
 import argparse
@@ -30,9 +35,12 @@ from cv_bridge import CvBridge
 
 # 本地模块
 import sys
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import os
+# 添加 carm_deploy 根目录到路径
+carm_deploy_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, carm_deploy_root)
 
-from env_ros import RealEnvironment
+from core.env_ros import RealEnvironment
 from utils.image_sync import ImageSynchronizer, SingleImageSubscriber
 
 
@@ -66,6 +74,9 @@ class DataRecorder:
         # CV Bridge
         self.bridge = CvBridge()
         
+        # 启用被动模式（不干扰手柄遥操作）
+        config['passive_mode'] = True
+        
         # 初始化环境
         rospy.loginfo("Initializing environment...")
         self.env = RealEnvironment(config)
@@ -75,6 +86,8 @@ class DataRecorder:
             'images': [],
             'qpos_joint': [],
             'qpos_end': [],
+            'qpos': [],           # 兼容旧版格式
+            'action': [],         # 动作命令
             'gripper': [],
             'timestamps': [],
         }
@@ -83,6 +96,8 @@ class DataRecorder:
         self.recording = False
         self.episode_count = 0
         self.step_count = 0
+        self.pending_save = False  # 等待用户确认保存
+        self.pending_episode_data = None  # 待确认的 episode 数据
         
         # 键盘监听
         self.keyboard_thread = None
@@ -116,25 +131,57 @@ class DataRecorder:
             while not rospy.is_shutdown():
                 if sys.stdin in [sys.stdin]:
                     c = sys.stdin.read(1)
-                    if c == 's':
-                        self._toggle_recording()
-                    elif c == 'q':
-                        self._save_and_quit()
-                        break
+                    if self.pending_save:
+                        # 等待用户确认保存
+                        if c == 'y' or c == 'Y':
+                            self._confirm_save(True)
+                        elif c == 'n' or c == 'N':
+                            self._confirm_save(False)
+                        # 其他按键忽略
+                    else:
+                        if c == 's':
+                            self._toggle_recording()
+                        elif c == 'q':
+                            self._quit()
+                            break
         finally:
             termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
     
     def _toggle_recording(self):
         """切换记录状态"""
+        if self.pending_save:
+            rospy.logwarn("Please confirm save first (y/n)")
+            return
+        
         if not self.recording:
             self.start_recording()
         else:
             self.stop_recording()
     
-    def _save_and_quit(self):
-        """保存并退出"""
+    def _confirm_save(self, save):
+        """确认是否保存 episode"""
+        if not self.pending_save:
+            return
+        
+        if save:
+            rospy.loginfo(">>> Saving episode...")
+            self._do_save_episode()
+        else:
+            rospy.loginfo(">>> Episode discarded")
+        
+        self.pending_save = False
+        self.pending_episode_data = None
+        rospy.loginfo(">>> Press 's' to start next episode")
+    
+    def _quit(self):
+        """退出"""
         if self.recording:
             self.stop_recording()
+            # 如果正在等待确认，询问是否保存
+            if self.pending_save:
+                rospy.loginfo("Discarding pending episode on quit")
+                self.pending_save = False
+                self.pending_episode_data = None
         rospy.signal_shutdown("User quit")
     
     def start_recording(self):
@@ -149,6 +196,8 @@ class DataRecorder:
             'images': [],
             'qpos_joint': [],
             'qpos_end': [],
+            'qpos': [],           # 兼容旧版格式
+            'action': [],         # 动作命令
             'gripper': [],
             'timestamps': [],
         }
@@ -157,20 +206,37 @@ class DataRecorder:
         rospy.loginfo(f"Recording started - Episode {self.episode_count}")
     
     def stop_recording(self):
-        """停止记录并保存数据"""
+        """停止记录并等待确认"""
         if not self.recording:
             rospy.logwarn("Not recording")
             return
         
         self.recording = False
-        rospy.loginfo(f"Recording stopped - {self.step_count} steps collected")
+        rospy.loginfo(f">>> Recording stopped - {self.step_count} steps collected")
         
-        # 保存数据
-        self.save_episode()
-    
-    def save_episode(self):
-        """保存当前 episode 数据"""
         if len(self.episode_data['timestamps']) == 0:
+            rospy.logwarn("No data recorded, nothing to save")
+            rospy.loginfo(">>> Press 's' to start next episode")
+            return
+        
+        # 保存数据到待确认状态
+        self.pending_episode_data = self.episode_data.copy()
+        self.pending_save = True
+        
+        rospy.loginfo("="*50)
+        rospy.loginfo(f">>> Episode {self.episode_count}: {self.step_count} steps")
+        rospy.loginfo(">>> Save this episode? (y/n)")
+        rospy.loginfo("="*50)
+    
+    def _do_save_episode(self):
+        """实际执行保存 episode 数据"""
+        if self.pending_episode_data is None:
+            rospy.logwarn("No pending data to save")
+            return
+        
+        episode_data = self.pending_episode_data
+        
+        if len(episode_data['timestamps']) == 0:
             rospy.logwarn("No data to save")
             return
         
@@ -182,28 +248,37 @@ class DataRecorder:
         rospy.loginfo(f"Saving episode to {filepath}...")
         
         # 转换为 numpy 数组
-        num_steps = len(self.episode_data['timestamps'])
+        num_steps = len(episode_data['timestamps'])
         
         with h5py.File(filepath, 'w') as f:
             # 创建数据组
             obs = f.create_group('observations')
             
             # 保存图像
-            images = np.array(self.episode_data['images'])  # [T, H, W, C]
+            images = np.array(episode_data['images'])  # [T, H, W, C]
             obs.create_dataset('images', data=images, compression='gzip')
             
             # 保存状态
-            qpos_joint = np.array(self.episode_data['qpos_joint'])  # [T, 7]
+            qpos_joint = np.array(episode_data['qpos_joint'])  # [T, 7]
             obs.create_dataset('qpos_joint', data=qpos_joint)
             
-            qpos_end = np.array(self.episode_data['qpos_end'])  # [T, 8]
+            qpos_end = np.array(episode_data['qpos_end'])  # [T, 8]
             obs.create_dataset('qpos_end', data=qpos_end)
             
-            gripper = np.array(self.episode_data['gripper'])  # [T]
+            # 兼容旧版格式: qpos = [joints(7), end_pose(8)]
+            qpos = np.array(episode_data['qpos'])  # [T, 15]
+            obs.create_dataset('qpos', data=qpos)
+            
+            gripper = np.array(episode_data['gripper'])  # [T]
             obs.create_dataset('gripper', data=gripper)
             
-            timestamps = np.array(self.episode_data['timestamps'])  # [T]
+            timestamps = np.array(episode_data['timestamps'])  # [T]
             obs.create_dataset('timestamps', data=timestamps)
+            
+            # 保存动作命令 (如果有)
+            if len(episode_data['action']) > 0:
+                action = np.array(episode_data['action'])  # [T, 15]
+                f.create_dataset('action', data=action)
             
             # 元数据
             f.attrs['num_steps'] = num_steps
@@ -232,8 +307,14 @@ class DataRecorder:
         self.episode_data['images'].append(obs['images'][0])  # 第一个相机
         self.episode_data['qpos_joint'].append(obs['qpos_joint'])
         self.episode_data['qpos_end'].append(obs['qpos_end'])
+        self.episode_data['qpos'].append(obs['qpos'])  # 兼容旧版格式
         self.episode_data['gripper'].append(obs['gripper'])
         self.episode_data['timestamps'].append(obs['stamp'])
+        
+        # 记录动作命令
+        action = self.env.get_last_action()
+        if action is not None:
+            self.episode_data['action'].append(action)
         
         self.step_count += 1
         
@@ -251,8 +332,11 @@ class DataRecorder:
         rospy.loginfo("=" * 50)
         rospy.loginfo("Controls:")
         rospy.loginfo("  's' - Start/Stop recording")
-        rospy.loginfo("  'q' - Save and quit")
+        rospy.loginfo("  'y' - Confirm save episode")
+        rospy.loginfo("  'n' - Discard episode")
+        rospy.loginfo("  'q' - Quit")
         rospy.loginfo("=" * 50)
+        rospy.loginfo(">>> Press 's' to start recording")
         
         while not rospy.is_shutdown():
             # 获取观测
@@ -278,11 +362,19 @@ class DataRecorder:
         if obs is None or len(obs['images']) == 0:
             return
         
-        img = obs['images'][0].copy()
+        # image_sync 返回 RGB 格式，OpenCV 需要 BGR 格式
+        img = cv2.cvtColor(obs['images'][0], cv2.COLOR_RGB2BGR)
         
         # 添加状态文本
-        status = "RECORDING" if self.recording else "PAUSED"
-        color = (0, 0, 255) if self.recording else (255, 128, 0)
+        if self.recording:
+            status = "RECORDING"
+            color = (0, 0, 255)  # 红色
+        elif self.pending_save:
+            status = "CONFIRM? (y/n)"
+            color = (0, 165, 255)  # 橙色
+        else:
+            status = "READY"
+            color = (0, 255, 0)  # 绿色
         
         cv2.putText(img, status, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, color, 2)
         cv2.putText(img, f"Episode: {self.episode_count}", (10, 60), 
@@ -316,51 +408,6 @@ class DataRecorder:
         rospy.loginfo("DataRecorder shutdown complete")
 
 
-class TeleopRecorder(DataRecorder):
-    """
-    遥操作数据记录器（拖动示教模式）
-    """
-    
-    def __init__(self, config):
-        """初始化遥操作记录器"""
-        # 设置拖动模式
-        config['robot_mode'] = 3  # DRAG mode
-        super().__init__(config)
-        rospy.loginfo("TeleopRecorder: Using DRAG mode for data collection")
-    
-    def run(self):
-        """运行遥操作记录"""
-        rospy.loginfo("=" * 50)
-        rospy.loginfo("Teleop Data Recording Node Ready")
-        rospy.loginfo("=" * 50)
-        rospy.loginfo("Robot is in DRAG mode - manually guide the arm")
-        rospy.loginfo("Controls:")
-        rospy.loginfo("  's' - Start/Stop recording")
-        rospy.loginfo("  'q' - Save and quit")
-        rospy.loginfo("=" * 50)
-        
-        rate = rospy.Rate(self.record_freq)
-        
-        while not rospy.is_shutdown():
-            # 获取观测
-            obs = self.env.get_observation()
-            
-            if obs is not None:
-                # 显示状态
-                if self.recording:
-                    rospy.loginfo_throttle(1.0, 
-                        f"Recording: Episode {self.episode_count}, Step {self.step_count}")
-                
-                # 记录数据
-                self.record_step(obs)
-                
-                # 可视化
-                if self.config.get('vis', False):
-                    self._visualize(obs)
-            
-            rate.sleep()
-
-
 def parse_args():
     """解析命令行参数"""
     parser = argparse.ArgumentParser(description='CARM Robot Data Recording (ROS)')
@@ -372,8 +419,6 @@ def parse_args():
     # 机械臂参数
     parser.add_argument('--robot_ip', type=str, default='10.42.0.101',
                         help='Robot IP address')
-    parser.add_argument('--robot_mode', type=int, default=3,
-                        help='Control mode (0=IDLE, 1=POSITION, 2=MIT, 3=DRAG)')
     
     # 相机参数
     parser.add_argument('--camera_topics', type=str,
@@ -391,14 +436,12 @@ def parse_args():
                         help='Maximum steps per episode')
     
     # 图像参数
-    parser.add_argument('--image_width', type=int, default=640,
+    parser.add_argument('--image_width', type=int, default=320,
                         help='Image width')
-    parser.add_argument('--image_height', type=int, default=480,
+    parser.add_argument('--image_height', type=int, default=240,
                         help='Image height')
     
-    # 模式
-    parser.add_argument('--teleop', action='store_true',
-                        help='Use teleop (drag) mode')
+    # 可视化
     parser.add_argument('--vis', action='store_true',
                         help='Visualize images')
     
@@ -426,14 +469,11 @@ def main():
     rospy.loginfo(f"Robot IP: {config['robot_ip']}")
     rospy.loginfo(f"Camera topics: {config['camera_topics']}")
     rospy.loginfo(f"Output dir: {config['output_dir']}")
-    rospy.loginfo(f"Mode: {'Teleop' if config['teleop'] else 'Normal'}")
+    rospy.loginfo("Mode: Passive (does NOT control robot)")
     rospy.loginfo("=" * 50)
     
     # 创建记录器
-    if config['teleop']:
-        recorder = TeleopRecorder(config)
-    else:
-        recorder = DataRecorder(config)
+    recorder = DataRecorder(config)
     
     # 注册关闭回调
     rospy.on_shutdown(recorder.shutdown)

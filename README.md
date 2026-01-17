@@ -8,12 +8,15 @@
 rl-vla/
 ├── catkin_ws/                  # ROS1 工作空间
 │   └── src/
-│       ├── carm_deploy/       # 部署包
-│       │   ├── config/        # 配置文件
-│       │   ├── launch/        # Launch 文件
-│       │   ├── camera/        # 相机工具
+│       ├── carm_deploy/       # 部署包 (主要模块)
+│       │   ├── core/          # 核心模块 (环境、安全控制)
+│       │   ├── inference/     # 推理模块
+│       │   ├── data/          # 数据采集和分析
+│       │   ├── tools/         # 工具脚本
 │       │   ├── utils/         # 工具模块
-│       │   └── *_ros.py       # 主程序
+│       │   ├── camera/        # 相机工具
+│       │   ├── config/        # 配置文件
+│       │   └── launch/        # Launch 文件
 │       ├── realsense-ros/     # RealSense ROS 驱动
 │       └── carm_api/          # CARM ROS 消息
 │
@@ -22,16 +25,24 @@ rl-vla/
 ├── carm_demo/                  # CARM 官方 SDK (上游参考)
 │   ├── arm_control_sdk/       # SDK 源码
 │   ├── carm_ros/              # ROS1 消息包
-│   ├── cpp_test_demo/         # C++ 示例
 │   └── python/                # Python 示例
 │
-├── scripts/                    # 统一脚本
+├── scripts/                    # 全局脚本
 │   ├── build_catkin.sh        # catkin 编译脚本
-│   └── carm/                  # CARM 调试脚本
+│   └── setup_carm_env.sh      # 环境设置脚本
+│
+├── recorded_data/              # 采集的数据
+│   ├── mix/                   # 混合数据集
+│   └── random_pos/            # 随机位置数据集
+│
+├── inference_logs/             # 推理日志
 │
 ├── rlft/                       # 模仿学习训练
+│   ├── diffusion_policy/      # Diffusion Policy / Flow Matching
+│   ├── act/                   # ACT 算法
+│   └── ppo/                   # PPO 算法
 │
-└── archive/                    # 归档 (旧版参考)
+└── safety_config.json          # 安全配置文件
 ```
 
 ## 🚀 快速开始
@@ -71,7 +82,14 @@ source catkin_ws/devel/setup.bash
 python -c "import carm_py; print('carm_py OK')"
 
 # 测试机械臂连接
-python scripts/carm/test_connection.py
+python catkin_ws/src/carm_deploy/tools/arm_test/test_connection.py
+```
+
+### 4. 可选: 设置环境变量
+
+```bash
+# 添加到 ~/.bashrc
+export RL_VLA_ROOT=/path/to/rl-vla
 ```
 
 ## 🤖 机械臂操作
@@ -90,25 +108,27 @@ python scripts/carm/test_connection.py
 | 模式 | 值 | 说明 |
 |------|-----|------|
 | IDLE | 0 | 空闲 |
-| POSITION | 1 | 位置控制 |
-| MIT | 2 | MIT 控制 |
+| POSITION | 1 | **禁用** (危险) |
+| MIT | 2 | **推荐** |
 | DRAG | 3 | 拖动示教 |
 | PF | 4 | 力控 |
 
 ### 调试脚本
 
 ```bash
+cd catkin_ws/src/carm_deploy/tools/arm_test
+
 # 测试连接
-python scripts/carm/test_connection.py
+python test_connection.py
 
 # 测试关节运动
-python scripts/carm/test_motion.py
+python test_motion.py
 
 # 测试夹爪
-python scripts/carm/test_gripper.py
+python test_gripper.py
 
 # 安全关闭
-python scripts/carm/safe_shutdown.py
+python safe_shutdown.py
 ```
 
 ## 📷 相机操作
@@ -124,11 +144,11 @@ python scripts/carm/safe_shutdown.py
 ### 启动相机
 
 ```bash
-# 方式1: ROS Launch
+# ROS Launch
 roslaunch carm_deploy camera.launch
 
-# 方式2: 直接测试 (不需要 ROS)
-python carm_deploy/camera/test_realsense.py
+# 直接测试 (不需要 ROS)
+python catkin_ws/src/carm_deploy/camera/test_realsense.py
 ```
 
 ## 🎯 数据采集
@@ -140,35 +160,49 @@ python carm_deploy/camera/test_realsense.py
 roslaunch carm_deploy camera.launch
 
 # 另一个终端: 启动录制
-roslaunch carm_deploy record.launch output_dir:=~/recorded_data
+roslaunch carm_deploy record.launch output_dir:=~/rl-vla/recorded_data
 
 # 控制键:
 #   's' - 开始/停止录制
 #   'q' - 保存并退出
 ```
 
+### 数据分析
+
+```bash
+cd catkin_ws/src/carm_deploy/data
+python analyze_dataset.py --data_dir ~/rl-vla/recorded_data/mix
+```
+
 ### 数据格式
 
-录制的数据保存为 HDF5 格式:
-
 ```
-episode_0001_20240108_120000.hdf5
+episode_0001.hdf5
 ├── observations/
-│   ├── images          # [T, H, W, C] uint8
-│   ├── qpos_joint      # [T, 7] float64
-│   ├── qpos_end        # [T, 8] float64 (xyz + quat + gripper)
-│   └── timestamps      # [T] float64
+│   ├── images          # [T, H, W, 3] RGB
+│   ├── qpos_joint      # [T, 7]
+│   ├── qpos_end        # [T, 8]
+│   └── timestamps      # [T]
+├── action              # [T, 15]
 └── attrs/
-    ├── num_steps
-    └── record_freq
 ```
 
 ## 🧠 策略推理
 
-### 运行推理
+### 测试模式
 
 ```bash
-# 启动完整系统 (相机 + 推理)
+# 干运行模式（不执行动作，最安全）
+rosrun carm_deploy inference_ros.py --pretrain /path/to/model.pt --dry_run
+
+# 慢速模式（5Hz）
+rosrun carm_deploy inference_ros.py --pretrain /path/to/model.pt --slow_mode
+```
+
+### 正常推理
+
+```bash
+# 完整系统 (相机 + 推理)
 roslaunch carm_deploy full_system.launch pretrain:=/path/to/model.pt
 
 # 或分开启动
@@ -176,108 +210,91 @@ roslaunch carm_deploy camera.launch
 roslaunch carm_deploy inference.launch pretrain:=/path/to/model.pt
 ```
 
+### 离线测试
+
+```bash
+cd catkin_ws/src/carm_deploy/tools
+python offline_test.py \
+    --model_path /path/to/model.pt \
+    --data_dir ~/rl-vla/recorded_data/mix \
+    --compare_ema
+```
+
 ### 推理参数
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
-| pretrain | "" | 模型路径 |
-| desire_inference_freq | 30 | 推理频率 (Hz) |
+| num_inference_steps | 5 | 推理步数 |
+| use_ema | False | 使用 EMA 模型 |
 | temporal_factor_k | 0.05 | 时序融合系数 |
-| joint_cmd_mode | false | 关节控制模式 |
+| desire_inference_freq | 30 | 推理频率 (Hz) |
 
-### 自定义策略
+## 🔒 安全控制
 
-继承 `PolicyInterface` 实现自定义策略:
+### 工作空间记录
 
-```python
-from carm_deploy.inference_ros import PolicyInterface
+```bash
+cd catkin_ws/src/carm_deploy/tools
+# 拖动示教模式记录安全边界
+python record_workspace.py --output ~/rl-vla/safety_config.json
+```
 
-class MyPolicy(PolicyInterface):
-    def load_model(self, model_path):
-        self.model = torch.load(model_path)
-    
-    def __call__(self, inputs):
-        # inputs: {'qpos': [B,7], 'image': [B,C,H,W]}
-        return {'a_hat': self.model(inputs)}
+### 安全配置验证
+
+```bash
+python verify_safety_config.py --config ~/rl-vla/safety_config.json
 ```
 
 ## 📖 模块说明
 
-### carm_deploy/ - 部署模块
+### carm_deploy - 部署模块
 
-纯 ROS1 实现的部署框架，替代旧版 svar 方案。
-
-| 文件 | 功能 |
+| 目录 | 功能 |
 |------|------|
-| env_ros.py | 机械臂环境封装 |
-| inference_ros.py | 策略推理主程序 |
-| record_data_ros.py | 数据采集程序 |
-| utils/image_sync.py | 多相机图像同步 |
-| utils/trajectory_interpolator.py | 动作轨迹插值与融合 |
+| core/ | 环境封装、安全控制器 |
+| inference/ | 策略推理、日志记录 |
+| data/ | 数据采集、加载、分析 |
+| tools/ | 离线测试、配置验证 |
+| utils/ | 图像同步、轨迹插值、路径配置 |
 
-### rlft/ - 训练模块
-
-模仿学习算法实现。
+### rlft - 训练模块
 
 | 算法 | 目录 |
 |------|------|
+| Consistency Flow (推荐) | diffusion_policy/ |
+| Flow Matching | diffusion_policy/ |
 | Diffusion Policy | diffusion_policy/ |
 | ACT | act/ |
-| PPO | ppo/ |
-| RLPD | rlpd/ |
-
-### archive/ - 归档
-
-旧版代码参考，包含 svar 依赖的实现。
 
 ## 🔧 故障排除
 
-### 问题: carm_py 导入失败
+### carm_py 导入失败
 
 ```bash
-# 检查 wheel 文件
-ls carm_sdk/lib/amd64/*.whl
-
-# 重新安装
 pip install --force-reinstall carm_sdk/lib/amd64/carm_py-*.whl
 ```
 
-### 问题: 机械臂连接失败
+### 机械臂连接失败
 
 ```bash
-# 检查网络
 ping 10.42.0.101
-
-# 检查端口
 nc -zv 10.42.0.101 8090
 ```
 
-### 问题: catkin_make 失败
+### catkin_make 失败
 
 ```bash
-# 确保在 carm 环境
 conda activate carm
-
-# 检查依赖
 pip install empy==3.3.4 catkin_pkg rospkg
-
-# 清理重编译
-./scripts/build_catkin.sh --clean
+./scripts/build_catkin.sh
 ```
 
-### 问题: 相机无图像
+### 相机无图像
 
 ```bash
-# 检查相机连接
 rs-enumerate-devices | grep Serial
-
-# 检查话题
 rostopic hz /camera/color/image_raw
 ```
-
-### 问题: 关节超限报错
-
-J2 限位 [0, 3.14]，J3 限位 [-3.14, 0]，其他关节 [-2.6, 2.6]。确保目标位置在限位内。
 
 ## 📜 许可证
 

@@ -2,12 +2,30 @@
 # 复制此文件并修改参数
 
 # ===================
+# 路径配置
+# ===================
+# 设置环境变量 RL_VLA_ROOT 可覆盖默认路径
+# export RL_VLA_ROOT=/path/to/rl-vla
+paths:
+  # 项目根目录 (默认使用 RL_VLA_ROOT 环境变量，或自动推断)
+  root: "${RL_VLA_ROOT:auto}"
+  
+  # 数据目录
+  recorded_data: "${RL_VLA_ROOT}/recorded_data"
+  
+  # 推理日志目录
+  inference_logs: "${RL_VLA_ROOT}/inference_logs"
+  
+  # 安全配置文件
+  safety_config: "${RL_VLA_ROOT}/safety_config.json"
+
+# ===================
 # 机械臂配置
 # ===================
 robot:
   ip: "10.42.0.101"
   port: 8090
-  mode: 1  # 0=IDLE, 1=POSITION, 2=MIT, 3=DRAG, 4=PF
+  mode: 2  # 0=IDLE, 1=POSITION(禁用), 2=MIT(推荐), 3=DRAG, 4=PF
   
   # 夹爪参数
   gripper:
@@ -81,8 +99,8 @@ inference:
 # 数据记录配置
 # ===================
 recording:
-  # 输出目录
-  output_dir: "./recorded_data"
+  # 输出目录 (使用 paths.recorded_data)
+  output_dir: "${paths.recorded_data}"
   
   # 记录频率
   record_freq: 30

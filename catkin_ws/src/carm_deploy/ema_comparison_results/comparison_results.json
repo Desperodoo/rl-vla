@@ -1,14 +1,16 @@
 {
   "avg_regular": {
     "joint_mae": 0.01238288716662681,
+    "ee_mae": 0.009315730549072589,
     "total_mae": 0.010007548364720623
   },
   "avg_ema": {
     "joint_mae": 0.012695776398526041,
+    "ee_mae": 0.009364310335837728,
     "total_mae": 0.010161925662107933
   },
   "model_path": "/home/lizh/rl-vla/rlft/diffusion_policy/runs/consistency_flow_resnet_mix/checkpoints/latest.pt",
   "data_dir": "/home/lizh/rl-vla/recorded_data/mix",
   "num_episodes": 5,
-  "timestamp": "2026-01-16T22:55:33.669460"
+  "timestamp": "2026-01-17T20:21:38.283057"
 }

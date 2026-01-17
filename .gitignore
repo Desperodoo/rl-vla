@@ -13,4 +13,5 @@ detached-umi-policy/
 eval_output/
 recorded_data/
 archive/
-
+timeline_record/
+inference_logs/
