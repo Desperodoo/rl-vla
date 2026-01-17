@@ -211,6 +211,10 @@ class RealPolicy(PolicyInterface):
         self.use_state_encoder = config.get('use_state_encoder', True)
         self.algorithm = config.get('algorithm', 'consistency_flow')
         
+        # 推理参数（可配置）
+        self.num_inference_steps = config.get('num_inference_steps', 10)  # 默认10步，与训练一致
+        self.use_ema = config.get('use_ema', False)  # 默认使用 Non-EMA（学生模型）
+        
         # 模型组件
         self.visual_encoder = None
         self.state_encoder = None
@@ -284,6 +288,7 @@ class RealPolicy(PolicyInterface):
                 
             rospy.loginfo(f"Config: algorithm={self.algorithm}, action_dim={self.action_dim}, "
                          f"obs_horizon={self.obs_horizon}, pred_horizon={self.pred_horizon}")
+            rospy.loginfo(f"Inference config: num_steps={self.num_inference_steps}, use_ema={self.use_ema}")
             rospy.loginfo(f"Visual encoder: {visual_encoder_type}, image_size={self.target_image_size}")
         else:
             rospy.logwarn(f"args.json not found, using default config")
@@ -350,15 +355,30 @@ class RealPolicy(PolicyInterface):
             self.state_encoder.load_state_dict(ckpt["state_encoder"])
             rospy.loginfo("Loaded state_encoder weights")
         
-        # 加载 agent (使用 EMA 版本)
-        if "ema_agent" in ckpt:
-            self.agent.load_state_dict(ckpt["ema_agent"])
-            rospy.loginfo("Loaded ema_agent weights")
-        elif "agent" in ckpt:
-            self.agent.load_state_dict(ckpt["agent"])
-            rospy.loginfo("Loaded agent weights (non-EMA)")
+        # 加载 agent
+        # 根据离线测试结果：
+        # - 10步推理: Non-EMA MAE=0.0102, EMA MAE=0.0129 (Non-EMA更好)
+        # - 5步推理:  Non-EMA MAE=0.0118, EMA MAE=0.0150 (Non-EMA更好)
+        # - 1步推理:  Non-EMA MAE=0.0302, EMA MAE=0.0190 (EMA更好)
+        # 可通过 --use_ema 和 --num_inference_steps 参数配置
+        if self.use_ema:
+            if "ema_agent" in ckpt:
+                self.agent.load_state_dict(ckpt["ema_agent"])
+                rospy.loginfo("Loaded EMA agent weights (better for 1-step inference)")
+            elif "agent" in ckpt:
+                rospy.logwarn("EMA agent not found, falling back to regular agent")
+                self.agent.load_state_dict(ckpt["agent"])
+            else:
+                raise ValueError("No agent weights in checkpoint")
         else:
-            raise ValueError("No agent weights in checkpoint")
+            if "agent" in ckpt:
+                self.agent.load_state_dict(ckpt["agent"])
+                rospy.loginfo("Loaded Non-EMA agent weights (better for multi-step inference)")
+            elif "ema_agent" in ckpt:
+                rospy.logwarn("Regular agent not found, falling back to EMA agent")
+                self.agent.load_state_dict(ckpt["ema_agent"])
+            else:
+                raise ValueError("No agent weights in checkpoint")
         
         # 4. 设置为评估模式
         self.visual_encoder.eval()
@@ -390,7 +410,7 @@ class RealPolicy(PolicyInterface):
                 action_dim=self.action_dim,
                 obs_horizon=self.obs_horizon,
                 pred_horizon=self.pred_horizon,
-                num_flow_steps=10,  # 默认推理步数
+                num_flow_steps=self.num_inference_steps,  # 可配置的推理步数
                 device=str(self.device),
             ).to(self.device)
             
@@ -407,7 +427,7 @@ class RealPolicy(PolicyInterface):
                 action_dim=self.action_dim,
                 obs_horizon=self.obs_horizon,
                 pred_horizon=self.pred_horizon,
-                num_flow_steps=10,
+                num_flow_steps=self.num_inference_steps,  # 可配置的推理步数
                 device=str(self.device),
             ).to(self.device)
             
@@ -541,6 +561,7 @@ class RealPolicy(PolicyInterface):
             
             # 调用 agent.get_action()
             actions = self.agent.get_action_deterministic(obs_features)  # [1, pred_horizon, action_dim]
+            # actions = self.agent.get_action(obs_features)  # [1, pred_horizon, action_dim]
         
         return {'a_hat': actions}
 
@@ -574,6 +595,7 @@ class InferenceNode:
         self.pos_lookahead_step = config.get('pos_lookahead_step', 1)
         self.pos_lookahead_duration = config.get('pos_lookahead_duration', 0.015)
         self.joint_cmd_mode = config.get('joint_cmd_mode', False)
+        self.check_workspace = not config.get('no_workspace_check', False)  # 默认开启 workspace 检测
         
         # 如果是 slow_mode，降低推理频率并调整相关参数
         if self.slow_mode:
@@ -758,44 +780,102 @@ class InferenceNode:
                     
                     all_actions = ret["a_hat"].squeeze(0).cpu().numpy()  # [pred_horizon, action_dim]
                     
-                    # 取第一个动作进行安全检查
-                    first_action = all_actions[0]  # [action_dim]
-                    
-                    # 安全检查
+                    # 安全检查和裁剪
                     safety_events = []
-                    if self.joint_cmd_mode:
-                        # 关节模式：检查关节限位
-                        joint_action = first_action[:7]  # [6 joints + 1 gripper]
-                        is_safe, clipped_action, events = self.safety_controller.check_and_clip(
-                            joint_action[:6],  # 只检查关节
-                            self.last_action[:6] if self.last_action is not None else None
-                        )
-                        if events:
-                            safety_events.extend(events)
-                            for event in events:
-                                rospy.logwarn(f"Safety event: {event}")
-                    else:
-                        # 末端位姿模式：检查工作空间
-                        if first_action.shape[0] >= 15:
-                            end_pose = first_action[7:14]  # [7] 相对位姿
-                            # 检查相对位移是否过大
-                            max_trans = 0.1  # 10cm
-                            max_rot = 0.5    # ~30 degrees
-                            trans_norm = np.linalg.norm(end_pose[:3])
-                            if trans_norm > max_trans:
-                                safety_events.append(f"Large translation: {trans_norm:.3f}m > {max_trans}m")
-                                rospy.logwarn(f"Safety: Large translation {trans_norm:.3f}m")
+                    safety_clipped = False
                     
-                    # 记录当前动作
-                    self.last_action = first_action
+                    if self.joint_cmd_mode:
+                        # 关节模式：对每个动作进行安全检查
+                        current_state = qpos_joint[:6]  # 当前关节位置作为参考
+                        
+                        for i in range(len(all_actions)):
+                            joint_action = all_actions[i, :7].copy()  # [6 joints + 1 gripper]
+                            
+                            # 检查关节限位并裁剪
+                            clipped_action, warnings = self.safety_controller.check_and_clip(
+                                joint_action,
+                                current_state,
+                                apply_filter=(i == 0),  # 只对第一个动作应用滤波
+                            )
+                            
+                            if warnings:
+                                safety_clipped = True
+                                if i == 0:  # 只记录第一个动作的警告
+                                    safety_events.extend(warnings)
+                                    for w in warnings:
+                                        rospy.logwarn(f"Safety clip: {w}")
+                            
+                            # 用裁剪后的动作替换原始动作
+                            all_actions[i, :7] = clipped_action
+                            
+                            # 更新参考状态为当前裁剪后的关节位置
+                            current_state = clipped_action[:6]
+                    else:
+                        # 末端位姿模式：
+                        # 1. 检查相对位移是否过大
+                        # 2. 计算绝对位姿并检查工作空间边界
+                        for i in range(len(all_actions)):
+                            if all_actions[i].shape[0] >= 15:
+                                relative_pose = all_actions[i, 7:14]  # [7] 相对位姿
+                                grip = all_actions[i, 6]  # 夹爪
+                                
+                                # 检查相对位移是否过大
+                                max_trans = 0.1  # 10cm
+                                trans_norm = np.linalg.norm(relative_pose[:3])
+                                if trans_norm > max_trans:
+                                    # 缩放位移到安全范围
+                                    scale = max_trans / trans_norm
+                                    all_actions[i, 7:10] *= scale
+                                    relative_pose = all_actions[i, 7:14]  # 更新
+                                    if i == 0:
+                                        safety_events.append(f"Translation scaled: {trans_norm:.3f}m -> {max_trans}m")
+                                        rospy.logwarn(f"Safety: Translation scaled from {trans_norm:.3f}m to {max_trans}m")
+                                    safety_clipped = True
+                                
+                                # 计算目标绝对位姿
+                                target_pose = apply_relative_transform(relative_pose, qpos_end[:7], grip)
+                                target_pose_np = np.array(target_pose[:7])  # [x,y,z,qx,qy,qz,qw]
+                                
+                                # 检查工作空间边界 (如果启用)
+                                if self.check_workspace:
+                                    clipped_pose, ws_warnings = self.safety_controller.check_workspace(target_pose_np)
+                                    if ws_warnings:
+                                        safety_clipped = True
+                                        if i == 0:
+                                            safety_events.extend(ws_warnings)
+                                            for w in ws_warnings:
+                                                rospy.logwarn(f"Workspace clip: {w}")
+                                        
+                                        # 重新计算相对位姿：clipped_target = current @ new_relative
+                                        # => new_relative = current^-1 @ clipped_target
+                                        T_current = pose_to_transform_matrix(qpos_end[:3], qpos_end[3:7])
+                                        T_clipped = pose_to_transform_matrix(clipped_pose[:3], clipped_pose[3:7])
+                                        T_relative_new = np.linalg.inv(T_current) @ T_clipped
+                                        new_relative_pos = T_relative_new[:3, 3]
+                                        new_relative_quat = R.from_matrix(T_relative_new[:3, :3]).as_quat()
+                                        all_actions[i, 7:10] = new_relative_pos
+                                        all_actions[i, 10:14] = new_relative_quat
+                                
+                                # 检查并裁剪夹爪限位
+                                gripper_action = np.array([0, 0, 0, 0, 0, 0, grip])  # dummy joints + gripper
+                                clipped_gripper, grip_warnings = self.safety_controller.check_joint_limits(gripper_action)
+                                if grip_warnings:
+                                    all_actions[i, 6] = clipped_gripper[6]
+                                    all_actions[i, 14] = clipped_gripper[6]  # 第二个 gripper
+                                    if i == 0:
+                                        safety_events.extend(grip_warnings)
+                                        safety_clipped = True
+                    
+                    # 记录第一个动作用于下一次参考
+                    self.last_action = all_actions[0].copy()
                     
                     # 记录日志
                     self.logger.log_step(
                         timestamp=time.time(),
                         obs=self.latest_obs,  # 包含 images, qpos_joint, qpos_end
-                        raw_action=first_action,
+                        raw_action=all_actions[0],
                         inference_time=inference_time,
-                        safety_clipped=len(safety_events) > 0,
+                        safety_clipped=safety_clipped,
                         safety_warnings=safety_events if safety_events else None,
                     )
                     
@@ -922,7 +1002,7 @@ def parse_args():
     # 机械臂参数
     parser.add_argument('--robot_ip', type=str, default='10.42.0.101',
                         help='Robot IP address')
-    parser.add_argument('--robot_mode', type=int, default=1,
+    parser.add_argument('--robot_mode', type=int, default=4,
                         help='Control mode (0=IDLE, 1=POSITION, 2=MIT, 3=DRAG)')
     parser.add_argument('--robot_tau', type=float, default=10,
                         help='Gripper torque')
@@ -951,6 +1031,10 @@ def parse_args():
                         help='Desired inference frequency')
     parser.add_argument('--temporal_factor_k', type=float, default=0.05,
                         help='Temporal factor for action fusion')
+    parser.add_argument('--num_inference_steps', type=int, default=5,
+                        help='Number of flow/diffusion steps for inference (default: 10, more steps = better quality but slower)')
+    parser.add_argument('--use_ema', action='store_true',
+                        help='Use EMA model for inference (recommended only for 1-step inference, otherwise Non-EMA is better)')
     
     # 控制参数
     parser.add_argument('--pos_lookahead_step', type=int, default=1,
@@ -975,14 +1059,16 @@ def parse_args():
                         help='Do not return to any position on exit (robot stays in current position)')
     parser.add_argument('--return_to_init', action='store_true',
                         help='Return to init pose on exit instead of zero position (default: return to zero)')
-    parser.add_argument('--init_speed', type=float, default=3.0,
-                        help='Speed level for initialization movement (0-10, default: 3.0 = slow)')
+    parser.add_argument('--init_speed', type=float, default=2.0,
+                        help='Speed level for initialization movement (0-10, default: 2.0 = slow)')
     
     # 安全控制参数
     parser.add_argument('--safety_config', type=str, default='',
                         help='Path to safety config JSON file')
     parser.add_argument('--data_dir', type=str, default='',
                         help='Data directory for auto-loading safety limits from dataset_info.json')
+    parser.add_argument('--no_workspace_check', action='store_true',
+                        help='Disable workspace boundary checking (NOT recommended)')
     
     # 日志参数
     parser.add_argument('--log_dir', type=str, default='',
@@ -991,7 +1077,7 @@ def parse_args():
                         help='Save images in inference log (increases file size)')
     
     # 可视化
-    parser.add_argument('--vis', action='store_true',
+    parser.add_argument('--vis', action='store_true', default=True,
                         help='Visualize images in OpenCV window')
     
     return parser.parse_args()
@@ -1025,6 +1111,10 @@ def main():
     rospy.loginfo(f"Pretrain: {config['pretrain']}")
     rospy.loginfo(f"Joint cmd mode: {config['joint_cmd_mode']}")
     rospy.loginfo("-" * 60)
+    rospy.loginfo("Inference Configuration:")
+    rospy.loginfo(f"  num_inference_steps: {config['num_inference_steps']} (more = better quality)")
+    rospy.loginfo(f"  use_ema: {config['use_ema']} (EMA better for 1-step, Non-EMA better for multi-step)")
+    rospy.loginfo("-" * 60)
     rospy.loginfo("Test Mode Configuration:")
     rospy.loginfo(f"  dry_run: {config['dry_run']} (no action execution)")
     rospy.loginfo(f"  slow_mode: {config['slow_mode']} (5Hz inference)")
@@ -1032,6 +1122,10 @@ def main():
     rospy.loginfo(f"  no_return_home: {config['no_return_home']} (skip return on exit)")
     rospy.loginfo(f"  return_to_zero: {config['return_to_zero']} (return to zero position on exit)")
     rospy.loginfo(f"  log_dir: {config['log_dir'] or '~/rl-vla/inference_logs'}")
+    rospy.loginfo("-" * 60)
+    rospy.loginfo("Safety Configuration:")
+    rospy.loginfo(f"  workspace_check: {not config.get('no_workspace_check', False)} (check end-effector position bounds)")
+    rospy.loginfo(f"  safety_config: {config['safety_config'] or 'default'}")
     rospy.loginfo("=" * 60)
     
     # 安全警告

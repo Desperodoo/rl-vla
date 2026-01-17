@@ -24,29 +24,88 @@ from typing import Dict, List, Tuple, Optional
 from dataclasses import dataclass, field
 
 
+# 机械臂官方关节限位 (rad)
+# 来源: carm_demo SDK
+CARM_JOINT_LIMITS_UPPER = np.array([2.79, 3.14, 0.0, 2.65, 1.57, 2.88])
+CARM_JOINT_LIMITS_LOWER = np.array([-2.79, 0.0, -3.14, -2.65, -1.57, -2.88])
+CARM_JOINT_MARGIN = 0.10  # 10% 裕度
+
+# 夹爪官方限位 (m)
+# 来源: carm_demo SDK, 范围 0 ~ 0.08m
+CARM_GRIPPER_MIN = 0.0
+CARM_GRIPPER_MAX = 0.08
+CARM_GRIPPER_MARGIN = 0.10  # 10% 裕度
+
+
+def get_safe_joint_limits(margin: float = CARM_JOINT_MARGIN):
+    """
+    获取带安全裕度的关节限位
+    
+    裕度从物理极限向内收缩，但对于边界为0的关节（J2下限、J3上限），
+    不收缩该边界，以确保零位在安全范围内。
+    
+    Args:
+        margin: 裕度比例 (0.1 = 10%)
+    
+    Returns:
+        (joint_min, joint_max): 带裕度的关节限位
+    """
+    joint_range = CARM_JOINT_LIMITS_UPPER - CARM_JOINT_LIMITS_LOWER
+    
+    # 从物理极限向内收缩，但不收缩边界为0的位置
+    # 这确保零位始终在安全范围内
+    joint_min = np.zeros(6)
+    joint_max = np.zeros(6)
+    
+    for i in range(6):
+        # 下限: 如果是0就保持0，否则向内收缩
+        if abs(CARM_JOINT_LIMITS_LOWER[i]) < 0.01:
+            joint_min[i] = CARM_JOINT_LIMITS_LOWER[i]  # 保持0
+        else:
+            joint_min[i] = CARM_JOINT_LIMITS_LOWER[i] + margin * joint_range[i]
+        
+        # 上限: 如果是0就保持0，否则向内收缩
+        if abs(CARM_JOINT_LIMITS_UPPER[i]) < 0.01:
+            joint_max[i] = CARM_JOINT_LIMITS_UPPER[i]  # 保持0
+        else:
+            joint_max[i] = CARM_JOINT_LIMITS_UPPER[i] - margin * joint_range[i]
+    
+    return joint_min, joint_max
+
+
+def get_safe_gripper_limits(margin: float = CARM_GRIPPER_MARGIN):
+    """
+    获取带安全裕度的夹爪限位
+    
+    夹爪官方范围: 0 ~ 0.08m
+    与关节不同，夹爪的下限 0 不保留，因为完全关闭可能会损坏夹爪
+    
+    Args:
+        margin: 裕度比例 (0.1 = 10%)
+    
+    Returns:
+        (gripper_min, gripper_max): 带裕度的夹爪限位
+    """
+    gripper_range = CARM_GRIPPER_MAX - CARM_GRIPPER_MIN
+    gripper_min = CARM_GRIPPER_MIN + margin * gripper_range  # 0 + 0.1 * 0.08 = 0.008
+    gripper_max = CARM_GRIPPER_MAX - margin * gripper_range  # 0.08 - 0.1 * 0.08 = 0.072
+    return gripper_min, gripper_max
+
+
 @dataclass
 class JointLimits:
-    """关节限位配置"""
-    # 从数据集统计得到，扩展 10% margin
-    # 默认值基于 recorded_data 的统计
-    joint_min: np.ndarray = field(default_factory=lambda: np.array([
-        -0.065 - 0.1,  # J1
-        1.548 - 0.1,   # J2
-        -1.033 - 0.1,  # J3
-        -0.257 - 0.1,  # J4
-        0.447 - 0.1,   # J5
-        -0.190 - 0.1,  # J6
-    ]))
-    joint_max: np.ndarray = field(default_factory=lambda: np.array([
-        0.932 + 0.1,   # J1
-        1.970 + 0.1,   # J2
-        -0.619 + 0.1,  # J3
-        0.203 + 0.1,   # J4
-        0.949 + 0.1,   # J5
-        0.670 + 0.1,   # J6
-    ]))
-    gripper_min: float = 0.0
-    gripper_max: float = 0.08
+    """
+    关节限位配置
+    
+    默认使用机械臂官方限位 + 10% 安全裕度:
+        关节: upper = [2.79, 3.14, 0.0, 2.65, 1.57, 2.88] rad
+               lower = [-2.79, 0.0, -3.14, -2.65, -1.57, -2.88] rad
+        夹爪: 0 ~ 0.08m -> [0.008, 0.072]m (10% 裕度)
+    """
+    joint_min: np.ndarray = field(default_factory=lambda: get_safe_joint_limits()[0])
+    joint_max: np.ndarray = field(default_factory=lambda: get_safe_joint_limits()[1])
+    gripper_min: float = field(default_factory=lambda: get_safe_gripper_limits()[0])
+    gripper_max: float = field(default_factory=lambda: get_safe_gripper_limits()[1])
 
 
 @dataclass
@@ -113,6 +172,10 @@ class SafetyController:
         """
         从数据集统计信息创建安全控制器
         
+        注意:
+            - 关节限制: 使用机械臂官方限位 + margin (不使用数据集中的关节数据)
+            - 夹爪限制: 使用数据集中的夹爪范围 + margin
+        
         Args:
             data_dir: 数据集目录
             margin: 限位扩展比例 (0.1 = 10%)
@@ -123,39 +186,41 @@ class SafetyController:
         data_dir = os.path.expanduser(data_dir)
         info_path = os.path.join(data_dir, 'dataset_info.json')
         
+        # 使用官方关节限位 + margin
+        safe_joint_min, safe_joint_max = get_safe_joint_limits(margin)
+        
+        # 从数据集获取夹爪范围
+        gripper_min = 0.0
+        gripper_max = 0.08
+        
         if os.path.exists(info_path):
             with open(info_path, 'r') as f:
                 info = json.load(f)
             
-            joint_min = np.array([float(x) for x in info['joint_min']])
-            joint_max = np.array([float(x) for x in info['joint_max']])
-            
-            # 计算范围并扩展 margin
-            joint_range = joint_max - joint_min
-            joint_min_expanded = joint_min - margin * joint_range
-            joint_max_expanded = joint_max + margin * joint_range
-            
-            # 获取夹爪范围
+            # 只使用数据集中的夹爪范围
             gripper_min = info.get('gripper_range', [0.01, 0.08])[0]
             gripper_max = info.get('gripper_range', [0.01, 0.08])[1]
             gripper_range = gripper_max - gripper_min
+            gripper_min = max(0, gripper_min - margin * gripper_range)
+            gripper_max = min(0.08, gripper_max + margin * gripper_range)
             
-            joint_limits = JointLimits(
-                joint_min=joint_min_expanded[:6],
-                joint_max=joint_max_expanded[:6],
-                gripper_min=max(0, gripper_min - margin * gripper_range),
-                gripper_max=min(0.08, gripper_max + margin * gripper_range),
-            )
-            
-            print(f"Loaded joint limits from {info_path}")
-            print(f"  Joint min: {joint_limits.joint_min}")
-            print(f"  Joint max: {joint_limits.joint_max}")
-            print(f"  Gripper range: [{joint_limits.gripper_min:.4f}, {joint_limits.gripper_max:.4f}]")
-            
-            return cls(joint_limits=joint_limits)
+            print(f"Loaded gripper limits from {info_path}")
         else:
-            print(f"Warning: {info_path} not found, using default limits")
-            return cls()
+            print(f"Warning: {info_path} not found, using default gripper limits")
+        
+        joint_limits = JointLimits(
+            joint_min=safe_joint_min,
+            joint_max=safe_joint_max,
+            gripper_min=gripper_min,
+            gripper_max=gripper_max,
+        )
+        
+        print(f"Using official joint limits with {margin*100:.0f}% margin:")
+        print(f"  Joint min: {joint_limits.joint_min}")
+        print(f"  Joint max: {joint_limits.joint_max}")
+        print(f"  Gripper range: [{joint_limits.gripper_min:.4f}, {joint_limits.gripper_max:.4f}]")
+        
+        return cls(joint_limits=joint_limits)
     
     def check_joint_limits(self, action: np.ndarray) -> Tuple[np.ndarray, List[str]]:
         """
@@ -238,13 +303,13 @@ class SafetyController:
         
         return clipped, warnings
     
-    def clip_action_delta(self, action: np.ndarray, current_state: np.ndarray) -> Tuple[np.ndarray, List[str]]:
+    def clip_action_delta(self, action: np.ndarray, current_state: Optional[np.ndarray]) -> Tuple[np.ndarray, List[str]]:
         """
         限制动作幅度
         
         Args:
             action: 目标动作
-            current_state: 当前状态
+            current_state: 当前状态 (如果为 None，跳过幅度限制)
             
         Returns:
             clipped_action: 限制后的动作
@@ -252,6 +317,10 @@ class SafetyController:
         """
         warnings = []
         clipped = action.copy()
+        
+        # 如果没有当前状态，跳过幅度限制
+        if current_state is None:
+            return clipped, warnings
         
         # 关节幅度限制
         for i in range(min(6, len(action), len(current_state))):

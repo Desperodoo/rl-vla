@@ -35,7 +35,8 @@ from einops import rearrange
 
 # 训练代码中的模块
 from diffusion_policy.plain_conv import PlainConv
-from diffusion_policy.carm_utils import StateEncoder, load_carm_episode, compute_relative_actions
+from diffusion_policy.resnet_encoder import ResNetEncoder, create_visual_encoder, get_encoder_input_size
+from diffusion_policy.carm_utils import StateEncoder, load_carm_episode, compute_relative_pose_transform
 from diffusion_policy.algorithms.networks import VelocityUNet1D
 from diffusion_policy.algorithms import (
     ConsistencyFlowAgent,
@@ -48,11 +49,22 @@ class OfflinePolicy:
     """
     离线策略推理类
     与 RealPolicy 类似，但专门用于离线测试
+    
+    支持:
+        - EMA 和非 EMA 模型推理对比
+        - 不同推理步数对比
     """
     
-    def __init__(self, model_path: str, device: str = 'cuda'):
+    def __init__(self, model_path: str, device: str = 'cuda', use_ema: bool = False):
+        """
+        Args:
+            model_path: 模型 checkpoint 路径
+            device: 推理设备
+            use_ema: 是否使用 EMA 模型进行推理
+        """
         self.device = torch.device(device if torch.cuda.is_available() else 'cpu')
         self.model_path = model_path
+        self.use_ema = use_ema
         
         # 默认参数
         self.obs_horizon = 2
@@ -65,6 +77,7 @@ class OfflinePolicy:
         self.state_encoder_out_dim = 256
         self.use_state_encoder = True
         self.algorithm = 'consistency_flow'
+        self.visual_encoder_type = 'plain_conv'  # 支持 plain_conv, resnet18, resnet34, resnet50
         
         # 模型组件
         self.visual_encoder = None
@@ -98,23 +111,38 @@ class OfflinePolicy:
             self.state_encoder_out_dim = args.get('state_encoder_out_dim', self.state_encoder_out_dim)
             self.use_state_encoder = args.get('use_state_encoder', self.use_state_encoder)
             self.algorithm = args.get('algorithm', self.algorithm)
+            self.visual_encoder_type = args.get('visual_encoder_type', self.visual_encoder_type)
             
-            target_size = args.get('target_image_size', self.target_image_size)
-            if isinstance(target_size, str):
-                target_size = eval(target_size)
-            self.target_image_size = target_size
+            # 图像尺寸：检查 auto_image_size 配置
+            # 注意：训练时如果 auto_image_size=True，args.json 中的 target_image_size 可能不是实际值
+            auto_image_size = args.get('auto_image_size', False)
+            if auto_image_size:
+                # 根据 encoder 类型自动设置图像尺寸（与训练时保持一致）
+                self.target_image_size = get_encoder_input_size(self.visual_encoder_type)
+                print(f"Auto image size: {self.visual_encoder_type} -> {self.target_image_size}")
+            else:
+                target_size = args.get('target_image_size', self.target_image_size)
+                if isinstance(target_size, str):
+                    target_size = eval(target_size)
+                elif isinstance(target_size, list):
+                    target_size = tuple(target_size)
+                self.target_image_size = target_size
             
             action_mode = args.get('action_mode', 'full')
             self.action_dim = 15 if action_mode == 'full' else 8
             
             print(f"Config: algorithm={self.algorithm}, action_dim={self.action_dim}, "
                   f"obs_horizon={self.obs_horizon}, pred_horizon={self.pred_horizon}")
+            print(f"Visual encoder: {self.visual_encoder_type}, image_size={self.target_image_size}")
         
-        # 创建模型
-        self.visual_encoder = PlainConv(
-            in_channels=3,
+        # 创建 visual encoder (根据类型选择)
+        print(f"Creating visual encoder: {self.visual_encoder_type}")
+        self.visual_encoder = create_visual_encoder(
+            encoder_type=self.visual_encoder_type,
             out_dim=self.visual_feature_dim,
-            pool_feature_map=True,
+            pretrained=True,
+            freeze_backbone=False,
+            freeze_bn=True,
         ).to(self.device)
         
         encoded_state_dim = self.state_dim
@@ -137,10 +165,23 @@ class OfflinePolicy:
             self.visual_encoder.load_state_dict(ckpt["visual_encoder"])
         if self.state_encoder is not None and "state_encoder" in ckpt:
             self.state_encoder.load_state_dict(ckpt["state_encoder"])
-        if "ema_agent" in ckpt:
-            self.agent.load_state_dict(ckpt["ema_agent"])
-        elif "agent" in ckpt:
-            self.agent.load_state_dict(ckpt["agent"])
+        
+        # 根据 use_ema 选择加载哪个 agent 权重
+        if self.use_ema:
+            if "ema_agent" in ckpt:
+                self.agent.load_state_dict(ckpt["ema_agent"])
+                print("Loaded EMA agent weights")
+            else:
+                print("Warning: EMA agent not found, using regular agent")
+                if "agent" in ckpt:
+                    self.agent.load_state_dict(ckpt["agent"])
+        else:
+            if "agent" in ckpt:
+                self.agent.load_state_dict(ckpt["agent"])
+                print("Loaded regular agent weights")
+            elif "ema_agent" in ckpt:
+                print("Warning: Regular agent not found, using EMA agent")
+                self.agent.load_state_dict(ckpt["ema_agent"])
         
         # 评估模式
         self.visual_encoder.eval()
@@ -148,7 +189,7 @@ class OfflinePolicy:
             self.state_encoder.eval()
         self.agent.eval()
         
-        print(f"Model loaded successfully!")
+        print(f"Model loaded successfully! (use_ema={self.use_ema})")
     
     def _create_agent(self, global_cond_dim: int) -> nn.Module:
         """创建 agent"""
@@ -239,13 +280,17 @@ class OfflinePolicy:
         return obs_features
     
     @torch.no_grad()
-    def predict(self, image: np.ndarray, qpos: np.ndarray) -> np.ndarray:
+    def predict(self, image: np.ndarray, qpos: np.ndarray, 
+                num_steps: Optional[int] = None,
+                deterministic: bool = True) -> np.ndarray:
         """
         执行推理
         
         Args:
             image: RGB 图像 [H, W, C]
             qpos: 关节状态 [7]
+            num_steps: 推理步数 (None = 使用默认值)
+            deterministic: 是否使用确定性推理 (从零开始而非噪声)
             
         Returns:
             actions: 预测动作 [pred_horizon, action_dim]
@@ -256,7 +301,11 @@ class OfflinePolicy:
         
         # 推理
         obs_features = self._encode_observations()
-        actions = self.agent.get_action_deterministic(obs_features)
+        
+        if deterministic:
+            actions = self.agent.get_action_deterministic(obs_features, num_steps=num_steps)
+        else:
+            actions = self.agent.get_action(obs_features, num_steps=num_steps)
         
         return actions.squeeze(0).cpu().numpy()
 
@@ -265,18 +314,31 @@ class OfflineEvaluator:
     """
     离线评估器
     使用数据集评估模型性能
+    
+    支持:
+        - EMA vs 非 EMA 模型对比
+        - 不同推理步数对比
     """
     
-    def __init__(self, model_path: str, data_dir: str, output_dir: str = 'offline_results'):
+    def __init__(self, model_path: str, data_dir: str, output_dir: str = 'offline_results',
+                 use_ema: bool = False):
+        """
+        Args:
+            model_path: 模型 checkpoint 路径
+            data_dir: 数据集目录
+            output_dir: 输出目录
+            use_ema: 是否使用 EMA 模型
+        """
         self.model_path = model_path
         self.data_dir = os.path.expanduser(data_dir)
         self.output_dir = output_dir
+        self.use_ema = use_ema
         
         os.makedirs(output_dir, exist_ok=True)
         
         # 加载模型
-        print("Loading model...")
-        self.policy = OfflinePolicy(model_path)
+        print(f"Loading model (use_ema={use_ema})...")
+        self.policy = OfflinePolicy(model_path, use_ema=use_ema)
         
         # 获取数据集文件列表
         self.episode_files = sorted([
@@ -285,9 +347,17 @@ class OfflineEvaluator:
         ])
         print(f"Found {len(self.episode_files)} episodes in {self.data_dir}")
     
-    def evaluate_episode(self, ep_idx: int, verbose: bool = False) -> Dict:
+    def evaluate_episode(self, ep_idx: int, verbose: bool = False,
+                         num_steps: Optional[int] = None,
+                         deterministic: bool = False) -> Dict:
         """
         评估单个 episode
+        
+        Args:
+            ep_idx: episode 索引
+            verbose: 是否显示进度条
+            num_steps: 推理步数 (None = 使用默认值)
+            deterministic: 是否使用确定性推理
         
         Returns:
             Dict with predicted_actions, gt_actions, metrics
@@ -300,27 +370,44 @@ class OfflineEvaluator:
         predicted_actions = []
         gt_actions = []
         
-        num_steps = len(episode['qpos_joint'])
+        T = len(episode['qpos_joint'])
         
-        # 关键修复：将原始 action（绝对位姿）转换为相对位姿
-        # 训练时使用的是 compute_relative_actions()，这里也要同样处理
-        raw_actions = episode['action']  # [T, 15] 原始动作（末端是绝对位姿）
-        qpos_end = episode['qpos_end']   # [T, 8] 末端位姿
-        gripper = episode['gripper']     # [T] 夹爪
+        # ======== 关键修复：正确计算相对动作（对齐训练逻辑） ========
+        # 训练时，对于每个样本：
+        #   - 以观测帧的末端位姿为参考 (ref_pose)
+        #   - 所有 action horizon 内的末端位姿都相对于这个参考计算
+        # 离线测试时，我们对每一帧都做推理，每帧都以自己为参考
+        # 因此 GT action 中的相对位姿部分应该是该帧末端位姿相对于自身，即 identity
         
-        # 转换为相对动作（与训练数据一致）
-        relative_actions = compute_relative_actions(qpos_end, raw_actions, gripper)
+        raw_actions = episode['action']  # [T, 15] 原始动作
+        qpos_end = episode['qpos_end']   # [T, 8] 末端位姿 [x,y,z,qx,qy,qz,qw,gripper]
         
-        iterator = tqdm(range(num_steps), desc=f"Episode {ep_idx}") if verbose else range(num_steps)
+        # 构建相对动作 (每帧相对于自身)
+        # relative = inv(ref_pose) @ target_pose
+        # 当 ref_pose == target_pose 时，relative = identity = [0,0,0, 0,0,0,1]
+        relative_actions = np.zeros_like(raw_actions)
+        for t in range(T):
+            relative_actions[t, :6] = raw_actions[t, :6]  # 关节角度不变
+            relative_actions[t, 6] = raw_actions[t, 6]    # 夹爪状态不变
+            # 相对位姿 = identity (因为是相对于自身)
+            relative_actions[t, 7:10] = 0.0  # position offset = 0
+            relative_actions[t, 10:14] = np.array([0.0, 0.0, 0.0, 1.0])  # quat identity
+            relative_actions[t, 14] = raw_actions[t, 14]  # 末端夹爪
+        
+        iterator = tqdm(range(T), desc=f"Episode {ep_idx}") if verbose else range(T)
         
         for t in iterator:
             # 获取当前帧数据
             image = episode['images'][t]  # [H, W, C]
             qpos = episode['qpos_joint'][t]  # [7]
-            gt_action = relative_actions[t]  # [15] 相对位姿动作（与训练一致）
+            gt_action = relative_actions[t]  # [15] 相对位姿动作
             
             # 推理
-            pred_actions = self.policy.predict(image, qpos)  # [pred_horizon, action_dim]
+            pred_actions = self.policy.predict(
+                image, qpos, 
+                num_steps=num_steps,
+                deterministic=deterministic
+            )  # [pred_horizon, action_dim]
             pred_action = pred_actions[0]  # 取第一个预测动作
             
             predicted_actions.append(pred_action)
@@ -531,7 +618,8 @@ class OfflineEvaluator:
     
     def run_evaluation(self, num_episodes: Optional[int] = None, 
                        plot_individual: bool = True,
-                       verbose: bool = True):
+                       verbose: bool = True,
+                       num_inference_steps: Optional[int] = None):
         """
         运行完整评估
         
@@ -539,6 +627,7 @@ class OfflineEvaluator:
             num_episodes: 评估的 episode 数量 (None = all)
             plot_individual: 是否绘制每个 episode 的对比图
             verbose: 是否显示进度
+            num_inference_steps: 推理步数 (None = 使用默认值)
         """
         if num_episodes is None:
             num_episodes = len(self.episode_files)
@@ -546,13 +635,19 @@ class OfflineEvaluator:
         all_results = []
         all_metrics = []
         
+        ema_str = "EMA" if self.use_ema else "Non-EMA"
         print(f"\n{'='*60}")
-        print(f"Offline Evaluation: {num_episodes} episodes")
+        print(f"Offline Evaluation ({ema_str}): {num_episodes} episodes")
+        if num_inference_steps is not None:
+            print(f"Inference steps: {num_inference_steps}")
         print(f"{'='*60}\n")
         
         for ep_idx in range(num_episodes):
             print(f"\nEvaluating episode {ep_idx + 1}/{num_episodes}...")
-            result = self.evaluate_episode(ep_idx, verbose=verbose)
+            result = self.evaluate_episode(
+                ep_idx, verbose=verbose, 
+                num_steps=num_inference_steps
+            )
             all_results.append(result)
             all_metrics.append(result['metrics'])
             
@@ -633,6 +728,288 @@ class OfflineEvaluator:
                         metrics_grp.attrs[k] = float(v) if isinstance(v, (np.floating, float)) else v
 
 
+class EMAComparisonEvaluator:
+    """
+    EMA vs 非 EMA 模型对比评估器
+    """
+    
+    def __init__(self, model_path: str, data_dir: str, output_dir: str = 'ema_comparison_results'):
+        self.model_path = model_path
+        self.data_dir = os.path.expanduser(data_dir)
+        self.output_dir = output_dir
+        
+        os.makedirs(output_dir, exist_ok=True)
+        
+        # 获取数据集文件列表
+        self.episode_files = sorted([
+            f for f in os.listdir(self.data_dir) 
+            if f.startswith('episode_') and f.endswith('.hdf5')
+        ])
+        print(f"Found {len(self.episode_files)} episodes in {self.data_dir}")
+        
+        # 加载两个模型
+        print("\nLoading Non-EMA model...")
+        self.policy_regular = OfflinePolicy(model_path, use_ema=False)
+        
+        print("\nLoading EMA model...")
+        self.policy_ema = OfflinePolicy(model_path, use_ema=True)
+    
+    def compare_single_episode(self, ep_idx: int, verbose: bool = False,
+                               num_inference_steps: Optional[int] = None) -> Dict:
+        """
+        对比单个 episode
+        
+        Returns:
+            包含两个模型预测结果和对比指标的字典
+        """
+        filepath = os.path.join(self.data_dir, self.episode_files[ep_idx])
+        episode = load_carm_episode(filepath)
+        
+        self.policy_regular.reset()
+        self.policy_ema.reset()
+        
+        pred_regular = []
+        pred_ema = []
+        gt_actions = []
+        
+        T = len(episode['qpos_joint'])
+        
+        # 构建 GT actions (相对于自身 = identity)
+        raw_actions = episode['action']
+        relative_actions = np.zeros_like(raw_actions)
+        for t in range(T):
+            relative_actions[t, :6] = raw_actions[t, :6]
+            relative_actions[t, 6] = raw_actions[t, 6]
+            relative_actions[t, 7:10] = 0.0
+            relative_actions[t, 10:14] = np.array([0.0, 0.0, 0.0, 1.0])
+            relative_actions[t, 14] = raw_actions[t, 14]
+        
+        iterator = tqdm(range(T), desc=f"Episode {ep_idx}") if verbose else range(T)
+        
+        for t in iterator:
+            image = episode['images'][t]
+            qpos = episode['qpos_joint'][t]
+            gt_action = relative_actions[t]
+            
+            # 两个模型分别推理
+            pred_r = self.policy_regular.predict(
+                image, qpos, num_steps=num_inference_steps
+            )[0]
+            pred_e = self.policy_ema.predict(
+                image, qpos, num_steps=num_inference_steps
+            )[0]
+            
+            pred_regular.append(pred_r)
+            pred_ema.append(pred_e)
+            gt_actions.append(gt_action)
+        
+        pred_regular = np.array(pred_regular)
+        pred_ema = np.array(pred_ema)
+        gt_actions = np.array(gt_actions)
+        
+        # 计算指标
+        metrics_regular = self._compute_metrics(pred_regular, gt_actions)
+        metrics_ema = self._compute_metrics(pred_ema, gt_actions)
+        
+        # 计算两个模型之间的差异
+        pred_diff = np.abs(pred_regular - pred_ema)
+        diff_metrics = {
+            'mean_diff': np.mean(pred_diff),
+            'max_diff': np.max(pred_diff),
+            'joint_diff': np.mean(pred_diff[:, :6]),
+            'pose_diff': np.mean(pred_diff[:, 7:14]),
+        }
+        
+        return {
+            'pred_regular': pred_regular,
+            'pred_ema': pred_ema,
+            'gt_actions': gt_actions,
+            'metrics_regular': metrics_regular,
+            'metrics_ema': metrics_ema,
+            'diff_metrics': diff_metrics,
+        }
+    
+    def _compute_metrics(self, pred: np.ndarray, gt: np.ndarray) -> Dict:
+        """计算评估指标"""
+        joint_pred = pred[:, :6]
+        joint_gt = gt[:, :6]
+        pose_pred = pred[:, 7:14]
+        pose_gt = gt[:, 7:14]
+        
+        return {
+            'joint_mse': np.mean((joint_pred - joint_gt) ** 2),
+            'joint_mae': np.mean(np.abs(joint_pred - joint_gt)),
+            'pose_mse': np.mean((pose_pred - pose_gt) ** 2),
+            'pose_mae': np.mean(np.abs(pose_pred - pose_gt)),
+            'total_mse': np.mean((pred - gt) ** 2),
+            'total_mae': np.mean(np.abs(pred - gt)),
+        }
+    
+    def plot_comparison(self, result: Dict, ep_idx: int, save: bool = True):
+        """绘制 EMA vs 非 EMA 对比图"""
+        pred_r = result['pred_regular']
+        pred_e = result['pred_ema']
+        gt = result['gt_actions']
+        T = len(gt)
+        time_steps = np.arange(T)
+        
+        fig, axes = plt.subplots(3, 3, figsize=(18, 12))
+        fig.suptitle(f'Episode {ep_idx}: EMA vs Non-EMA Comparison', fontsize=14)
+        
+        # 关节 1-6
+        for i in range(6):
+            ax = axes[i // 3, i % 3]
+            ax.plot(time_steps, gt[:, i], 'k-', label='GT', alpha=0.5, linewidth=2)
+            ax.plot(time_steps, pred_r[:, i], 'b--', label='Non-EMA', alpha=0.7)
+            ax.plot(time_steps, pred_e[:, i], 'r--', label='EMA', alpha=0.7)
+            ax.set_xlabel('Time Step')
+            ax.set_ylabel(f'Joint {i+1} (rad)')
+            ax.legend()
+            ax.grid(True, alpha=0.3)
+            ax.set_title(f'Joint {i+1}')
+        
+        # 误差对比
+        ax = axes[2, 0]
+        error_r = np.mean(np.abs(pred_r - gt), axis=1)
+        error_e = np.mean(np.abs(pred_e - gt), axis=1)
+        ax.plot(time_steps, error_r, 'b-', label='Non-EMA', alpha=0.7)
+        ax.plot(time_steps, error_e, 'r-', label='EMA', alpha=0.7)
+        ax.set_xlabel('Time Step')
+        ax.set_ylabel('MAE')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        ax.set_title('Step-wise Error Comparison')
+        
+        # 累积误差
+        ax = axes[2, 1]
+        cum_error_r = np.cumsum(error_r)
+        cum_error_e = np.cumsum(error_e)
+        ax.plot(time_steps, cum_error_r, 'b-', label='Non-EMA', alpha=0.7)
+        ax.plot(time_steps, cum_error_e, 'r-', label='EMA', alpha=0.7)
+        ax.set_xlabel('Time Step')
+        ax.set_ylabel('Cumulative Error')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        ax.set_title('Cumulative Error Comparison')
+        
+        # 模型间差异
+        ax = axes[2, 2]
+        pred_diff = np.mean(np.abs(pred_r - pred_e), axis=1)
+        ax.plot(time_steps, pred_diff, 'g-', alpha=0.7)
+        ax.set_xlabel('Time Step')
+        ax.set_ylabel('Mean Abs Difference')
+        ax.grid(True, alpha=0.3)
+        ax.set_title('EMA vs Non-EMA Difference')
+        
+        plt.tight_layout()
+        
+        if save:
+            save_path = os.path.join(self.output_dir, f'ema_comparison_ep{ep_idx:03d}.png')
+            plt.savefig(save_path, dpi=150, bbox_inches='tight')
+            print(f"Saved: {save_path}")
+        
+        plt.close()
+    
+    def run_comparison(self, num_episodes: Optional[int] = None,
+                       num_inference_steps: Optional[int] = None,
+                       verbose: bool = True):
+        """
+        运行完整对比评估
+        """
+        if num_episodes is None:
+            num_episodes = min(5, len(self.episode_files))  # 默认测试5个
+        
+        all_results = []
+        
+        print(f"\n{'='*60}")
+        print(f"EMA vs Non-EMA Comparison: {num_episodes} episodes")
+        if num_inference_steps is not None:
+            print(f"Inference steps: {num_inference_steps}")
+        print(f"{'='*60}\n")
+        
+        for ep_idx in range(num_episodes):
+            print(f"\nComparing episode {ep_idx + 1}/{num_episodes}...")
+            result = self.compare_single_episode(
+                ep_idx, verbose=verbose,
+                num_inference_steps=num_inference_steps
+            )
+            all_results.append(result)
+            
+            # 绘制对比图
+            self.plot_comparison(result, ep_idx)
+            
+            # 打印对比结果
+            m_r = result['metrics_regular']
+            m_e = result['metrics_ema']
+            d = result['diff_metrics']
+            print(f"  Non-EMA: Joint MAE={m_r['joint_mae']:.4f}, Total MAE={m_r['total_mae']:.4f}")
+            print(f"  EMA:     Joint MAE={m_e['joint_mae']:.4f}, Total MAE={m_e['total_mae']:.4f}")
+            print(f"  Diff:    Mean={d['mean_diff']:.4f}, Max={d['max_diff']:.4f}")
+        
+        # 汇总统计
+        avg_regular = {
+            'joint_mae': np.mean([r['metrics_regular']['joint_mae'] for r in all_results]),
+            'total_mae': np.mean([r['metrics_regular']['total_mae'] for r in all_results]),
+        }
+        avg_ema = {
+            'joint_mae': np.mean([r['metrics_ema']['joint_mae'] for r in all_results]),
+            'total_mae': np.mean([r['metrics_ema']['total_mae'] for r in all_results]),
+        }
+        avg_diff = np.mean([r['diff_metrics']['mean_diff'] for r in all_results])
+        
+        # 打印总结
+        print(f"\n{'='*60}")
+        print("Comparison Summary")
+        print(f"{'='*60}")
+        print(f"Total Episodes: {num_episodes}")
+        print(f"\n[Non-EMA Model]")
+        print(f"  Average Joint MAE: {avg_regular['joint_mae']:.4f}")
+        print(f"  Average Total MAE: {avg_regular['total_mae']:.4f}")
+        print(f"\n[EMA Model]")
+        print(f"  Average Joint MAE: {avg_ema['joint_mae']:.4f}")
+        print(f"  Average Total MAE: {avg_ema['total_mae']:.4f}")
+        print(f"\n[Comparison]")
+        improvement = (avg_regular['total_mae'] - avg_ema['total_mae']) / avg_regular['total_mae'] * 100
+        print(f"  EMA Improvement: {improvement:+.2f}%")
+        print(f"  Mean Prediction Diff: {avg_diff:.4f}")
+        print(f"\nResults saved to: {self.output_dir}")
+        print(f"{'='*60}\n")
+        
+        # 保存结果
+        self._save_comparison_results(all_results, avg_regular, avg_ema)
+        
+        return {
+            'avg_regular': avg_regular,
+            'avg_ema': avg_ema,
+            'improvement': improvement,
+        }
+    
+    def _save_comparison_results(self, all_results: List[Dict], 
+                                  avg_regular: Dict, avg_ema: Dict):
+        """保存对比结果"""
+        def convert_to_native(obj):
+            if isinstance(obj, dict):
+                return {k: convert_to_native(v) for k, v in obj.items()}
+            elif isinstance(obj, (np.floating, np.float32, np.float64)):
+                return float(obj)
+            elif isinstance(obj, (np.integer, np.int32, np.int64)):
+                return int(obj)
+            elif isinstance(obj, np.ndarray):
+                return obj.tolist()
+            return obj
+        
+        results_path = os.path.join(self.output_dir, 'comparison_results.json')
+        with open(results_path, 'w') as f:
+            json.dump({
+                'avg_regular': convert_to_native(avg_regular),
+                'avg_ema': convert_to_native(avg_ema),
+                'model_path': self.model_path,
+                'data_dir': self.data_dir,
+                'num_episodes': len(all_results),
+                'timestamp': datetime.now().isoformat(),
+            }, f, indent=2)
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description='CARM Offline Evaluation')
     parser.add_argument('--model_path', type=str, required=True,
@@ -647,23 +1024,50 @@ def parse_args():
                         help='Skip individual episode plots')
     parser.add_argument('--quiet', action='store_true',
                         help='Less verbose output')
+    
+    # EMA 相关参数
+    parser.add_argument('--use_ema', action='store_true',
+                        help='Use EMA model for inference')
+    parser.add_argument('--compare_ema', action='store_true',
+                        help='Run EMA vs Non-EMA comparison test')
+    
+    # 推理步数
+    parser.add_argument('--num_inference_steps', type=int, default=None,
+                        help='Number of inference steps (default: use model default)')
+    
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
     
-    evaluator = OfflineEvaluator(
-        model_path=args.model_path,
-        data_dir=args.data_dir,
-        output_dir=args.output_dir,
-    )
-    
-    evaluator.run_evaluation(
-        num_episodes=args.num_episodes,
-        plot_individual=not args.no_individual_plots,
-        verbose=not args.quiet,
-    )
+    if args.compare_ema:
+        # 运行 EMA vs 非 EMA 对比测试
+        comparison_output = args.output_dir.replace('offline_results', 'ema_comparison_results')
+        comparator = EMAComparisonEvaluator(
+            model_path=args.model_path,
+            data_dir=args.data_dir,
+            output_dir=comparison_output,
+        )
+        comparator.run_comparison(
+            num_episodes=args.num_episodes,
+            num_inference_steps=args.num_inference_steps,
+            verbose=not args.quiet,
+        )
+    else:
+        # 运行标准评估
+        evaluator = OfflineEvaluator(
+            model_path=args.model_path,
+            data_dir=args.data_dir,
+            output_dir=args.output_dir,
+            use_ema=args.use_ema,
+        )
+        evaluator.run_evaluation(
+            num_episodes=args.num_episodes,
+            plot_individual=not args.no_individual_plots,
+            verbose=not args.quiet,
+            num_inference_steps=args.num_inference_steps,
+        )
 
 
 if __name__ == '__main__':

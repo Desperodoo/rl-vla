@@ -338,7 +338,7 @@ def parse_args():
     # 机械臂参数
     parser.add_argument('--robot_ip', type=str, default='10.42.0.101',
                         help='Robot IP address')
-    parser.add_argument('--robot_mode', type=int, default=1,
+    parser.add_argument('--robot_mode', type=int, default=4,
                         help='Control mode (0=IDLE, 1=POSITION, 2=MIT, 3=DRAG)')
     parser.add_argument('--robot_tau', type=float, default=10,
                         help='Gripper torque')

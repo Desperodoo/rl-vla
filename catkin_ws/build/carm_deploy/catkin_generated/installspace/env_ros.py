@@ -44,7 +44,7 @@ class RealEnvironment:
         
         # 默认参数
         self.robot_ip = config.get('robot_ip', '10.42.0.101')
-        self.robot_mode = config.get('robot_mode', 1)
+        self.robot_mode = config.get('robot_mode', 4)
         self.tau = config.get('robot_tau', 10.0)
         self.arm_init_pose = config.get('arm_init_pose', [0.26, -0.02, 0.22, 1, 0, 0, 0])
         self.arm_init_gripper = config.get('arm_init_gripper', 0.05)
@@ -314,7 +314,7 @@ def create_environment_from_args(args):
     """
     config = {
         'robot_ip': getattr(args, 'robot_ip', '10.42.0.101'),
-        'robot_mode': getattr(args, 'robot_mode', 1),
+        'robot_mode': getattr(args, 'robot_mode', 4),
         'robot_tau': getattr(args, 'robot_tau', 10.0),
         'arm_init_pose': getattr(args, 'arm_init_pose', [0.26, -0.02, 0.22, 1, 0, 0, 0]),
         'arm_init_gripper': getattr(args, 'arm_init_gripper', 0.05),

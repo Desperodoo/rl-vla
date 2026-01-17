@@ -274,7 +274,7 @@ class DataRecorder:
             
             # 保存动作命令 (如果有)
             if len(episode_data['action']) > 0:
-                action = np.array(episode_data['action'])  # [T, 16]
+                action = np.array(episode_data['action'])  # [T, 15]
                 f.create_dataset('action', data=action)
             
             # 元数据
@@ -359,7 +359,8 @@ class DataRecorder:
         if obs is None or len(obs['images']) == 0:
             return
         
-        img = obs['images'][0].copy()
+        # image_sync 返回 RGB 格式，OpenCV 需要 BGR 格式
+        img = cv2.cvtColor(obs['images'][0], cv2.COLOR_RGB2BGR)
         
         # 添加状态文本
         if self.recording:

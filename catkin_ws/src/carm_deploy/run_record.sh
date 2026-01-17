@@ -68,5 +68,6 @@ echo ""
 cd "$SCRIPT_DIR"
 python record_data_ros.py \
     --output_dir "$OUTPUT_DIR" \
+    --vis \
     --robot_ip "$ROBOT_IP" \
     "$@"

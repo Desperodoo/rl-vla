@@ -100,8 +100,10 @@ roslaunch carm_deploy full_system.launch pretrain:=/path/to/model.pt
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
 | robot_ip | 10.42.0.101 | 机器人 IP |
-| robot_mode | 1 | 控制模式 (0=IDLE, 1=POSITION, 2=MIT, 3=DRAG) |
+| robot_mode | 4 | 控制模式 (0=IDLE, ~~1=POSITION~~, 2=MIT, 3=DRAG, **4=PF推荐**) |
 | robot_tau | 10 | 夹爪扭矩 |
+
+> ⚠️ **安全警告**: 严禁使用 Position 模式 (mode=1)，请使用 PF 力位混合模式 (mode=4)
 
 ### 相机参数
 

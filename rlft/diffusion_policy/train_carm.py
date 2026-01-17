@@ -92,7 +92,7 @@ class Args:
     """the entity (team) of wandb's project"""
 
     # Data settings
-    demo_path: str = "~/rl-vla/recorded_data"
+    demo_path: str = "~/rl-vla/recorded_data/mix"
     """the path of demo dataset directory (CARM format)"""
     num_demos: Optional[int] = None
     """number of episodes to load from the demo dataset"""
@@ -774,6 +774,8 @@ if __name__ == "__main__":
     if args.auto_image_size:
         target_image_size = get_encoder_input_size(args.visual_encoder_type, default_size=(128, 128))
         print(f"Auto image size: {args.visual_encoder_type} -> {target_image_size}")
+        # 更新 args 以便保存实际使用的尺寸
+        args.target_image_size = target_image_size
     else:
         target_image_size = args.target_image_size
         print(f"Manual image size: {target_image_size}")

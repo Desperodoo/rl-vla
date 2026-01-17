@@ -1,0 +1,43 @@
+{
+  "joint_limits": {
+    "joint_min": [
+      -2.232,
+      0.0,
+      -2.826,
+      -2.12,
+      -1.256,
+      -2.304
+    ],
+    "joint_max": [
+      2.232,
+      2.826,
+      0.0,
+      2.12,
+      1.256,
+      2.304
+    ],
+    "gripper_min": 0.008,
+    "gripper_max": 0.07700000000000001
+  },
+  "workspace_limits": {
+    "x_min": -0.020674333721399304,
+    "x_max": 0.40064104154706,
+    "y_min": -0.2046893522143364,
+    "y_max": 0.27176433652639387,
+    "z_min": 0.17568780556321145,
+    "z_max": 0.560848205536604
+  },
+  "safety_params": {
+    "max_joint_delta": 0.1,
+    "max_gripper_delta": 0.02,
+    "max_position_delta": 0.02,
+    "max_rotation_delta": 0.1,
+    "filter_alpha": 0.3
+  },
+  "metadata": {
+    "created_at": "2026-01-16T16:05:06.761376",
+    "robot_ip": "10.42.0.101",
+    "sample_count": 6421,
+    "margin": 0.05
+  }
+}

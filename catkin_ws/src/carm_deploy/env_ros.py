@@ -31,7 +31,7 @@ class RealEnvironment:
         Args:
             config: 配置字典，包含以下字段：
                 - robot_ip: 机械臂 IP 地址
-                - robot_mode: 控制模式 (0=IDLE, 1=POSITION, 2=MIT, 3=DRAG)
+                - robot_mode: 控制模式 (0-idle 空闲模式 1-position 点位控制模式, 2-MIT 力矩模式， 3-drag 拖动模式，4-PF 力位混合模式)
                 - robot_tau: 夹爪力矩
                 - arm_init_pose: 初始末端位姿 [x, y, z, qx, qy, qz, qw]
                 - arm_init_gripper: 初始夹爪开度
@@ -44,8 +44,17 @@ class RealEnvironment:
         
         # 默认参数
         self.robot_ip = config.get('robot_ip', '10.42.0.101')
-        self.robot_mode = config.get('robot_mode', 1)
+        self.robot_mode = config.get('robot_mode', 2)  # 默认 MIT 模式
         self.tau = config.get('robot_tau', 10.0)
+        
+        # 安全检查：禁止使用 Position 模式 (mode=1)
+        if self.robot_mode == 1:
+            rospy.logwarn("=" * 60)
+            rospy.logwarn("⚠️  安全警告: Position 模式 (mode=1) 已被禁用!")
+            rospy.logwarn("   自动切换到 MIT 模式 (mode=2)")
+            rospy.logwarn("=" * 60)
+            self.robot_mode = 2  # 强制使用 MIT 模式
+        
         # 从实际机械臂读取的初始位姿 (2026-01-13)
         self.arm_init_pose = config.get('arm_init_pose', [0.2475, 0.0014, 0.3251, 0.9996, -0.0034, 0.0255, -0.0074])
         self.arm_init_gripper = config.get('arm_init_gripper', 0.078)
@@ -57,7 +66,12 @@ class RealEnvironment:
         self.skip_init_confirm = config.get('skip_init_confirm', False)  # 跳过初始化确认
         self.no_return_home = config.get('no_return_home', False)  # 退出时不回原位
         self.return_to_zero = config.get('return_to_zero', True)  # 退出时回到零位(关节角度全为0)
-        self.init_speed = config.get('init_speed', 3.0)  # 初始化移动速度 (0-10)
+        
+        # 速度限制: 最大速度不超过 3 (0-10 范围)
+        MAX_SAFE_SPEED = 3.0
+        self.init_speed = min(config.get('init_speed', 3.0), MAX_SAFE_SPEED)
+        if config.get('init_speed', 3.0) > MAX_SAFE_SPEED:
+            rospy.logwarn(f"⚠️  速度限制: init_speed 从 {config.get('init_speed')} 降至 {MAX_SAFE_SPEED}")
         
         # 初始化机械臂
         rospy.loginfo(f"Connecting to robot at {self.robot_ip}...")
@@ -161,9 +175,9 @@ class RealEnvironment:
         self.arm.move_pose(self.arm_init_pose)
         time.sleep(0.5)
         
-        # 恢复默认速度 (10 = 最快)
-        self.arm.set_speed_level(10.0)
-        rospy.loginfo("Arm position initialized, speed restored to normal")
+        # 恢复默认速度 (最大不超过 3)
+        self.arm.set_speed_level(3.0)
+        rospy.loginfo("Arm position initialized, speed set to 3.0")
     
     def _arm_status_thread(self):
         """机械臂状态更新线程"""
@@ -230,7 +244,9 @@ class RealEnvironment:
         # 可视化
         if self.vis:
             for idx, img in enumerate(images):
-                cv2.imshow(f"image_{idx}", img)
+                # image_sync 返回 RGB 格式，OpenCV 需要 BGR 格式
+                img_bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+                cv2.imshow(f"image_{idx}", img_bgr)
                 cv2.waitKey(1)
         
         return {
@@ -247,7 +263,7 @@ class RealEnvironment:
         获取最后的动作命令（用于数据采集）
         
         Returns:
-            numpy array: [joints(6), gripper, end_pose(7), gripper]
+            numpy array: [joints(6), gripper(1), end_pose(7), gripper(1)] = 15D
         """
         with self.state_lock:
             if self.joint_cmd is None or self.end_state is None:
@@ -380,7 +396,7 @@ def create_environment_from_args(args):
     """
     config = {
         'robot_ip': getattr(args, 'robot_ip', '10.42.0.101'),
-        'robot_mode': getattr(args, 'robot_mode', 1),
+        'robot_mode': getattr(args, 'robot_mode', 2),
         'robot_tau': getattr(args, 'robot_tau', 10.0),
         'arm_init_pose': getattr(args, 'arm_init_pose', [0.26, -0.02, 0.22, 1, 0, 0, 0]),
         'arm_init_gripper': getattr(args, 'arm_init_gripper', 0.05),

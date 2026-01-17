@@ -9,11 +9,15 @@
     pretrain: 模型路径
     robot_ip: 机器人 IP
     joint_cmd_mode: 是否使用关节控制模式
+    
+  安全注意:
+    - 默认使用 MIT 模式 (mode=2, 力矩模式)
+    - 严禁使用 Position 模式 (mode=1)
 -->
 <launch>
   <!-- 机械臂参数 -->
   <arg name="robot_ip" default="10.42.0.101"/>
-  <arg name="robot_mode" default="1"/>
+  <arg name="robot_mode" default="2"/>  <!-- MIT 力矩模式 (严禁使用 mode=1 Position 模式!) -->
   <arg name="robot_tau" default="10"/>
   
   <!-- 初始位姿 -->
