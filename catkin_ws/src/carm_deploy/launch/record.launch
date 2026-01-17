@@ -18,8 +18,26 @@
   <arg name="robot_mode" default="3"/>  <!-- DRAG 模式 -->
   
   <!-- 相机参数 -->
-  <arg name="camera_topics" default="/camera/color/image_raw"/>
-  <arg name="sync_slop" default="0.1"/>
+  <arg name="use_camera" default="false"/>
+  <arg name="camera_name" default="camera"/>
+  <arg name="camera_serial" default="218622279840"/>
+  <arg name="camera_topics" default="/$(arg camera_name)/color/image_raw"/>
+  <arg name="sync_slop" default="0.02"/>
+
+  <!-- 相机流参数（默认关闭红外/点云） -->
+  <arg name="color_width" default="640"/>
+  <arg name="color_height" default="480"/>
+  <arg name="color_fps" default="30"/>
+  <arg name="depth_width" default="640"/>
+  <arg name="depth_height" default="480"/>
+  <arg name="depth_fps" default="30"/>
+  <arg name="enable_color" default="true"/>
+  <arg name="enable_depth" default="true"/>
+  <arg name="enable_infra1" default="false"/>
+  <arg name="enable_infra2" default="false"/>
+  <arg name="enable_pointcloud" default="false"/>
+  <arg name="align_depth" default="true"/>
+  <arg name="filters" default=""/>
   
   <!-- 记录参数 -->
   <arg name="record_freq" default="30"/>
@@ -27,15 +45,38 @@
   <arg name="max_steps" default="1000"/>
   
   <!-- 图像参数 -->
-  <arg name="image_width" default="640"/>
-  <arg name="image_height" default="480"/>
+  <arg name="image_width" default="320"/>
+  <arg name="image_height" default="240"/>
+
+  <!-- 时间线日志 -->
+  <arg name="timeline_enabled" default="true"/>
+  <arg name="timeline_log" default=""/>
   
   <!-- 模式 -->
   <arg name="teleop" default="true"/>
   <arg name="vis" default="true"/>
   
+  <!-- 可选：启动相机 -->
+  <include if="$(arg use_camera)" file="$(find carm_deploy)/launch/camera.launch">
+    <arg name="serial_no" value="$(arg camera_serial)"/>
+    <arg name="camera" value="$(arg camera_name)"/>
+    <arg name="color_width" value="$(arg color_width)"/>
+    <arg name="color_height" value="$(arg color_height)"/>
+    <arg name="color_fps" value="$(arg color_fps)"/>
+    <arg name="depth_width" value="$(arg depth_width)"/>
+    <arg name="depth_height" value="$(arg depth_height)"/>
+    <arg name="depth_fps" value="$(arg depth_fps)"/>
+    <arg name="enable_color" value="$(arg enable_color)"/>
+    <arg name="enable_depth" value="$(arg enable_depth)"/>
+    <arg name="enable_infra1" value="$(arg enable_infra1)"/>
+    <arg name="enable_infra2" value="$(arg enable_infra2)"/>
+    <arg name="enable_pointcloud" value="$(arg enable_pointcloud)"/>
+    <arg name="align_depth" value="$(arg align_depth)"/>
+    <arg name="filters" value="$(arg filters)"/>
+  </include>
+
   <!-- 启动数据记录节点 -->
-  <node name="carm_data_recorder" pkg="carm_ros_deploy" type="record_data_ros.py" output="screen">
+  <node name="carm_data_recorder" pkg="carm_deploy" type="record_data_ros.py" output="screen">
     <param name="output_dir" value="$(arg output_dir)"/>
     
     <param name="robot_ip" value="$(arg robot_ip)"/>
@@ -50,6 +91,9 @@
     
     <param name="image_width" value="$(arg image_width)"/>
     <param name="image_height" value="$(arg image_height)"/>
+
+    <param name="timeline_enabled" value="$(arg timeline_enabled)"/>
+    <param name="timeline_log" value="$(arg timeline_log)"/>
     
     <param name="teleop" value="$(arg teleop)"/>
     <param name="vis" value="$(arg vis)"/>

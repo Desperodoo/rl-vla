@@ -26,7 +26,8 @@ import cv2
 
 # 添加训练代码路径
 script_dir = os.path.dirname(os.path.abspath(__file__))
-rl_vla_root = os.path.dirname(os.path.dirname(os.path.dirname(script_dir)))
+carm_deploy_root = os.path.dirname(script_dir)
+rl_vla_root = os.path.dirname(os.path.dirname(os.path.dirname(carm_deploy_root)))
 sys.path.insert(0, os.path.join(rl_vla_root, 'rlft', 'diffusion_policy'))
 
 import torch
@@ -349,7 +350,7 @@ class OfflineEvaluator:
     
     def evaluate_episode(self, ep_idx: int, verbose: bool = False,
                          num_steps: Optional[int] = None,
-                         deterministic: bool = False) -> Dict:
+                         deterministic: bool = True) -> Dict:
         """
         评估单个 episode
         
@@ -429,27 +430,36 @@ class OfflineEvaluator:
     
     def _compute_metrics(self, pred: np.ndarray, gt: np.ndarray) -> Dict:
         """计算评估指标"""
-        # 分解动作空间
         # full mode: [joint(6), gripper(1), relative_end_pose(7), gripper(1)]
         joint_pred = pred[:, :6]
         joint_gt = gt[:, :6]
-        gripper_pred = pred[:, 6]
-        gripper_gt = gt[:, 6]
+        gripper_joint_pred = pred[:, 6]
+        gripper_joint_gt = gt[:, 6]
         pose_pred = pred[:, 7:14]
         pose_gt = gt[:, 7:14]
-        
+        gripper_pose_pred = pred[:, 14]
+        gripper_pose_gt = gt[:, 14]
+
+        # 推理实际使用: relative_end_pose + gripper(6)
+        ee_pred = np.concatenate([pred[:, 6:7], pred[:, 7:14]], axis=1)
+        ee_gt = np.concatenate([gt[:, 6:7], gt[:, 7:14]], axis=1)
+
         # 计算 MSE
         joint_mse = np.mean((joint_pred - joint_gt) ** 2)
-        gripper_mse = np.mean((gripper_pred - gripper_gt) ** 2)
+        gripper_joint_mse = np.mean((gripper_joint_pred - gripper_joint_gt) ** 2)
+        gripper_pose_mse = np.mean((gripper_pose_pred - gripper_pose_gt) ** 2)
         pose_mse = np.mean((pose_pred - pose_gt) ** 2)
+        ee_mse = np.mean((ee_pred - ee_gt) ** 2)
         total_mse = np.mean((pred - gt) ** 2)
-        
+
         # 计算 MAE
         joint_mae = np.mean(np.abs(joint_pred - joint_gt))
-        gripper_mae = np.mean(np.abs(gripper_pred - gripper_gt))
+        gripper_joint_mae = np.mean(np.abs(gripper_joint_pred - gripper_joint_gt))
+        gripper_pose_mae = np.mean(np.abs(gripper_pose_pred - gripper_pose_gt))
         pose_mae = np.mean(np.abs(pose_pred - pose_gt))
+        ee_mae = np.mean(np.abs(ee_pred - ee_gt))
         total_mae = np.mean(np.abs(pred - gt))
-        
+
         # 计算各关节的误差
         joint_errors = []
         for i in range(6):
@@ -458,14 +468,18 @@ class OfflineEvaluator:
                 'mae': np.mean(np.abs(joint_pred[:, i] - joint_gt[:, i])),
                 'max': np.max(np.abs(joint_pred[:, i] - joint_gt[:, i])),
             })
-        
+
         return {
             'joint_mse': joint_mse,
             'joint_mae': joint_mae,
-            'gripper_mse': gripper_mse,
-            'gripper_mae': gripper_mae,
+            'gripper_joint_mse': gripper_joint_mse,
+            'gripper_joint_mae': gripper_joint_mae,
+            'gripper_pose_mse': gripper_pose_mse,
+            'gripper_pose_mae': gripper_pose_mae,
             'pose_mse': pose_mse,
             'pose_mae': pose_mae,
+            'ee_mse': ee_mse,
+            'ee_mae': ee_mae,
             'total_mse': total_mse,
             'total_mae': total_mae,
             'joint_errors': joint_errors,
@@ -479,12 +493,12 @@ class OfflineEvaluator:
         time_steps = np.arange(num_steps)
         
         # 创建图形
-        fig, axes = plt.subplots(4, 2, figsize=(16, 16))
+        fig, axes = plt.subplots(3, 4, figsize=(22, 12))
         fig.suptitle(f'Episode {ep_idx}: Predicted vs Ground Truth', fontsize=14)
         
         # 1. 关节 1-3
         for i in range(3):
-            ax = axes[i, 0]
+            ax = axes[0, i]
             ax.plot(time_steps, gt[:, i], 'b-', label='Ground Truth', alpha=0.7)
             ax.plot(time_steps, pred[:, i], 'r--', label='Predicted', alpha=0.7)
             ax.set_xlabel('Time Step')
@@ -495,7 +509,7 @@ class OfflineEvaluator:
         
         # 2. 关节 4-6
         for i in range(3):
-            ax = axes[i, 1]
+            ax = axes[1, i]
             ax.plot(time_steps, gt[:, i+3], 'b-', label='Ground Truth', alpha=0.7)
             ax.plot(time_steps, pred[:, i+3], 'r--', label='Predicted', alpha=0.7)
             ax.set_xlabel('Time Step')
@@ -503,19 +517,9 @@ class OfflineEvaluator:
             ax.legend()
             ax.grid(True, alpha=0.3)
             ax.set_title(f'Joint {i+4}')
-        
-        # 3. 夹爪
-        ax = axes[3, 0]
-        ax.plot(time_steps, gt[:, 6], 'b-', label='Ground Truth', alpha=0.7)
-        ax.plot(time_steps, pred[:, 6], 'r--', label='Predicted', alpha=0.7)
-        ax.set_xlabel('Time Step')
-        ax.set_ylabel('Gripper (m)')
-        ax.legend()
-        ax.grid(True, alpha=0.3)
-        ax.set_title('Gripper')
-        
-        # 4. 末端位置 (x, y, z) - 相对位姿
-        ax = axes[3, 1]
+
+        # 3. EE 位置 (x, y, z)
+        ax = axes[0, 3]
         colors = ['r', 'g', 'b']
         labels = ['X', 'Y', 'Z']
         for i, (c, l) in enumerate(zip(colors, labels)):
@@ -525,7 +529,59 @@ class OfflineEvaluator:
         ax.set_ylabel('Relative Position (m)')
         ax.legend(ncol=2)
         ax.grid(True, alpha=0.3)
-        ax.set_title('End Effector Relative Position (should be near 0)')
+        ax.set_title('EE Relative Position')
+
+        # 4. EE 四元数 (qx, qy, qz, qw)
+        ax = axes[1, 3]
+        q_labels = ['qx', 'qy', 'qz', 'qw']
+        for i, l in enumerate(q_labels):
+            ax.plot(time_steps, gt[:, 10+i], label=f'GT {l}', alpha=0.5)
+            ax.plot(time_steps, pred[:, 10+i], '--', label=f'Pred {l}', alpha=0.5)
+        ax.set_xlabel('Time Step')
+        ax.set_ylabel('Quat')
+        ax.legend(ncol=2)
+        ax.grid(True, alpha=0.3)
+        ax.set_title('EE Relative Rotation')
+        
+        # 5. 夹爪（joint 通道）
+        ax = axes[2, 0]
+        ax.plot(time_steps, gt[:, 6], 'b-', label='Ground Truth', alpha=0.7)
+        ax.plot(time_steps, pred[:, 6], 'r--', label='Predicted', alpha=0.7)
+        ax.set_xlabel('Time Step')
+        ax.set_ylabel('Gripper (m)')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        ax.set_title('Gripper (joint channel)')
+
+        # 6. 夹爪（ee 通道）
+        ax = axes[2, 1]
+        ax.plot(time_steps, gt[:, 14], 'b-', label='Ground Truth', alpha=0.7)
+        ax.plot(time_steps, pred[:, 14], 'r--', label='Predicted', alpha=0.7)
+        ax.set_xlabel('Time Step')
+        ax.set_ylabel('Gripper (m)')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        ax.set_title('Gripper (ee channel)')
+        
+        # 7. EE MAE
+        ax = axes[2, 2]
+        ee_pred = np.concatenate([pred[:, 6:7], pred[:, 7:14]], axis=1)
+        ee_gt = np.concatenate([gt[:, 6:7], gt[:, 7:14]], axis=1)
+        ee_err = np.mean(np.abs(ee_pred - ee_gt), axis=1)
+        ax.plot(time_steps, ee_err, 'k-', alpha=0.7)
+        ax.set_xlabel('Time Step')
+        ax.set_ylabel('MAE')
+        ax.grid(True, alpha=0.3)
+        ax.set_title('EE MAE per step')
+
+        # 8. Total MAE
+        ax = axes[2, 3]
+        total_err = np.mean(np.abs(pred - gt), axis=1)
+        ax.plot(time_steps, total_err, 'k-', alpha=0.7)
+        ax.set_xlabel('Time Step')
+        ax.set_ylabel('MAE')
+        ax.grid(True, alpha=0.3)
+        ax.set_title('Total MAE per step')
         
         plt.tight_layout()
         
@@ -554,21 +610,22 @@ class OfflineEvaluator:
             ax.set_title(f'Joint {i+1} Error')
             ax.axvline(x=0, color='r', linestyle='--', alpha=0.5)
         
-        # 夹爪误差
+        # 夹爪误差（joint 通道）
         ax = axes[1, 2]
         ax.hist(errors[:, 6], bins=50, alpha=0.7, edgecolor='black')
         ax.set_xlabel('Error (m)')
         ax.set_ylabel('Count')
-        ax.set_title('Gripper Error')
+        ax.set_title('Gripper Error (joint channel)')
         ax.axvline(x=0, color='r', linestyle='--', alpha=0.5)
         
-        # 总误差
+        # EE 通道误差分布
         ax = axes[1, 3]
-        total_error = np.mean(np.abs(errors), axis=1)
-        ax.hist(total_error, bins=50, alpha=0.7, edgecolor='black')
-        ax.set_xlabel('Mean Absolute Error')
+        ee_errors = np.concatenate([errors[:, 6:7], errors[:, 7:14]], axis=1)
+        ee_mae = np.mean(np.abs(ee_errors), axis=1)
+        ax.hist(ee_mae, bins=50, alpha=0.7, edgecolor='black')
+        ax.set_xlabel('EE MAE')
         ax.set_ylabel('Count')
-        ax.set_title('Total MAE per Step')
+        ax.set_title('EE MAE per Step')
         
         plt.tight_layout()
         
@@ -658,8 +715,8 @@ class OfflineEvaluator:
             
             # 打印当前 episode 指标
             m = result['metrics']
-            print(f"  Joint MAE: {m['joint_mae']:.4f}, Gripper MAE: {m['gripper_mae']:.4f}, "
-                  f"Pose MAE: {m['pose_mae']:.4f}, Total MAE: {m['total_mae']:.4f}")
+            print(f"  Joint MAE: {m['joint_mae']:.4f}, Gripper MAE: {m['gripper_joint_mae']:.4f}, "
+                f"Pose MAE: {m['pose_mae']:.4f}, EE MAE: {m['ee_mae']:.4f}, Total MAE: {m['total_mae']:.4f}")
         
         # 计算整体指标
         avg_metrics = {
@@ -679,8 +736,9 @@ class OfflineEvaluator:
         print(f"{'='*60}")
         print(f"Total Episodes: {num_episodes}")
         print(f"Average Joint MAE:   {avg_metrics['joint_mae']:.4f} rad")
-        print(f"Average Gripper MAE: {avg_metrics['gripper_mae']:.4f} m")
+        print(f"Average Gripper MAE: {avg_metrics['gripper_joint_mae']:.4f} m")
         print(f"Average Pose MAE:    {avg_metrics['pose_mae']:.4f}")
+        print(f"Average EE MAE:      {avg_metrics['ee_mae']:.4f}")
         print(f"Average Total MAE:   {avg_metrics['total_mae']:.4f}")
         print(f"\nResults saved to: {self.output_dir}")
         print(f"{'='*60}\n")
@@ -833,14 +891,27 @@ class EMAComparisonEvaluator:
         """计算评估指标"""
         joint_pred = pred[:, :6]
         joint_gt = gt[:, :6]
+        gripper_joint_pred = pred[:, 6]
+        gripper_joint_gt = gt[:, 6]
         pose_pred = pred[:, 7:14]
         pose_gt = gt[:, 7:14]
+        gripper_pose_pred = pred[:, 14]
+        gripper_pose_gt = gt[:, 14]
+
+        ee_pred = np.concatenate([pred[:, 6:7], pred[:, 7:14]], axis=1)
+        ee_gt = np.concatenate([gt[:, 6:7], gt[:, 7:14]], axis=1)
         
         return {
             'joint_mse': np.mean((joint_pred - joint_gt) ** 2),
             'joint_mae': np.mean(np.abs(joint_pred - joint_gt)),
+            'gripper_joint_mse': np.mean((gripper_joint_pred - gripper_joint_gt) ** 2),
+            'gripper_joint_mae': np.mean(np.abs(gripper_joint_pred - gripper_joint_gt)),
+            'gripper_pose_mse': np.mean((gripper_pose_pred - gripper_pose_gt) ** 2),
+            'gripper_pose_mae': np.mean(np.abs(gripper_pose_pred - gripper_pose_gt)),
             'pose_mse': np.mean((pose_pred - pose_gt) ** 2),
             'pose_mae': np.mean(np.abs(pose_pred - pose_gt)),
+            'ee_mse': np.mean((ee_pred - ee_gt) ** 2),
+            'ee_mae': np.mean(np.abs(ee_pred - ee_gt)),
             'total_mse': np.mean((pred - gt) ** 2),
             'total_mae': np.mean(np.abs(pred - gt)),
         }
@@ -853,7 +924,7 @@ class EMAComparisonEvaluator:
         T = len(gt)
         time_steps = np.arange(T)
         
-        fig, axes = plt.subplots(3, 3, figsize=(18, 12))
+        fig, axes = plt.subplots(3, 4, figsize=(22, 12))
         fig.suptitle(f'Episode {ep_idx}: EMA vs Non-EMA Comparison', fontsize=14)
         
         # 关节 1-6
@@ -900,6 +971,43 @@ class EMAComparisonEvaluator:
         ax.set_ylabel('Mean Abs Difference')
         ax.grid(True, alpha=0.3)
         ax.set_title('EMA vs Non-EMA Difference')
+
+        # 夹爪对比（joint 通道）
+        ax = axes[0, 3]
+        ax.plot(time_steps, gt[:, 6], 'k-', label='GT', alpha=0.5, linewidth=2)
+        ax.plot(time_steps, pred_r[:, 6], 'b--', label='Non-EMA', alpha=0.7)
+        ax.plot(time_steps, pred_e[:, 6], 'r--', label='EMA', alpha=0.7)
+        ax.set_xlabel('Time Step')
+        ax.set_ylabel('Gripper (m)')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        ax.set_title('Gripper (joint channel)')
+
+        # 夹爪对比（ee 通道）
+        ax = axes[1, 3]
+        ax.plot(time_steps, gt[:, 14], 'k-', label='GT', alpha=0.5, linewidth=2)
+        ax.plot(time_steps, pred_r[:, 14], 'b--', label='Non-EMA', alpha=0.7)
+        ax.plot(time_steps, pred_e[:, 14], 'r--', label='EMA', alpha=0.7)
+        ax.set_xlabel('Time Step')
+        ax.set_ylabel('Gripper (m)')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        ax.set_title('Gripper (ee channel)')
+
+        # EE MAE 对比
+        ax = axes[2, 3]
+        ee_r = np.concatenate([pred_r[:, 6:7], pred_r[:, 7:14]], axis=1)
+        ee_e = np.concatenate([pred_e[:, 6:7], pred_e[:, 7:14]], axis=1)
+        ee_gt = np.concatenate([gt[:, 6:7], gt[:, 7:14]], axis=1)
+        ee_err_r = np.mean(np.abs(ee_r - ee_gt), axis=1)
+        ee_err_e = np.mean(np.abs(ee_e - ee_gt), axis=1)
+        ax.plot(time_steps, ee_err_r, 'b-', label='Non-EMA', alpha=0.7)
+        ax.plot(time_steps, ee_err_e, 'r-', label='EMA', alpha=0.7)
+        ax.set_xlabel('Time Step')
+        ax.set_ylabel('EE MAE')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        ax.set_title('EE MAE Comparison')
         
         plt.tight_layout()
         
@@ -942,17 +1050,19 @@ class EMAComparisonEvaluator:
             m_r = result['metrics_regular']
             m_e = result['metrics_ema']
             d = result['diff_metrics']
-            print(f"  Non-EMA: Joint MAE={m_r['joint_mae']:.4f}, Total MAE={m_r['total_mae']:.4f}")
-            print(f"  EMA:     Joint MAE={m_e['joint_mae']:.4f}, Total MAE={m_e['total_mae']:.4f}")
+            print(f"  Non-EMA: Joint MAE={m_r['joint_mae']:.4f}, EE MAE={m_r['ee_mae']:.4f}, Total MAE={m_r['total_mae']:.4f}")
+            print(f"  EMA:     Joint MAE={m_e['joint_mae']:.4f}, EE MAE={m_e['ee_mae']:.4f}, Total MAE={m_e['total_mae']:.4f}")
             print(f"  Diff:    Mean={d['mean_diff']:.4f}, Max={d['max_diff']:.4f}")
         
         # 汇总统计
         avg_regular = {
             'joint_mae': np.mean([r['metrics_regular']['joint_mae'] for r in all_results]),
+            'ee_mae': np.mean([r['metrics_regular']['ee_mae'] for r in all_results]),
             'total_mae': np.mean([r['metrics_regular']['total_mae'] for r in all_results]),
         }
         avg_ema = {
             'joint_mae': np.mean([r['metrics_ema']['joint_mae'] for r in all_results]),
+            'ee_mae': np.mean([r['metrics_ema']['ee_mae'] for r in all_results]),
             'total_mae': np.mean([r['metrics_ema']['total_mae'] for r in all_results]),
         }
         avg_diff = np.mean([r['diff_metrics']['mean_diff'] for r in all_results])
@@ -964,9 +1074,11 @@ class EMAComparisonEvaluator:
         print(f"Total Episodes: {num_episodes}")
         print(f"\n[Non-EMA Model]")
         print(f"  Average Joint MAE: {avg_regular['joint_mae']:.4f}")
+        print(f"  Average EE MAE:    {avg_regular['ee_mae']:.4f}")
         print(f"  Average Total MAE: {avg_regular['total_mae']:.4f}")
         print(f"\n[EMA Model]")
         print(f"  Average Joint MAE: {avg_ema['joint_mae']:.4f}")
+        print(f"  Average EE MAE:    {avg_ema['ee_mae']:.4f}")
         print(f"  Average Total MAE: {avg_ema['total_mae']:.4f}")
         print(f"\n[Comparison]")
         improvement = (avg_regular['total_mae'] - avg_ema['total_mae']) / avg_regular['total_mae'] * 100

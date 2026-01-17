@@ -32,6 +32,7 @@ import signal
 import numpy as np
 import cv2
 import rospy
+from datetime import datetime
 from scipy.spatial.transform import Rotation as R
 from einops import rearrange
 from typing import Optional, Dict, List, Any
@@ -39,10 +40,13 @@ from typing import Optional, Dict, List, Any
 # 本地模块
 import sys
 import os
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+# 添加 carm_deploy 根目录到路径
+carm_deploy_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, carm_deploy_root)
 
 # 添加训练代码路径
-rl_vla_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+rl_vla_root = os.path.dirname(os.path.dirname(os.path.dirname(carm_deploy_root)))
 sys.path.insert(0, os.path.join(rl_vla_root, 'rlft', 'diffusion_policy'))
 
 # PyTorch
@@ -60,11 +64,12 @@ from diffusion_policy.algorithms import (
 )
 
 # 安全控制和日志
-from safety_controller import SafetyController
-from inference_logger import InferenceLogger
+from core.safety_controller import SafetyController
+from inference.inference_logger import InferenceLogger
 
-from env_ros import RealEnvironment
+from core.env_ros import RealEnvironment
 from utils.trajectory_interpolator import VecTF, ActionChunkManager
+from utils.timeline_logger import TimelineLogger
 
 
 def pose_to_transform_matrix(position, quaternion):
@@ -622,6 +627,26 @@ class InferenceNode:
         # 初始化推理日志记录器
         self.logger = self._create_logger(config)
         self.episode_started = False
+
+        # 时间线日志（用于分析 chunking 时间语义）
+        self.timeline_enabled = config.get('timeline_enabled', True)
+        self.timeline_control_stride = config.get('timeline_control_stride', 10)
+        self.chunk_time_base = config.get('chunk_time_base', 'sys_time')
+        self.timeline_logger = None
+        if self.timeline_enabled:
+            timeline_path = config.get('timeline_log', '')
+            if not timeline_path:
+                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                timeline_path = os.path.join(self.logger.log_dir, f'timeline_{timestamp}.jsonl')
+            self.timeline_logger = TimelineLogger(timeline_path)
+            self.timeline_logger.log(
+                'init',
+                desire_inference_freq=self.desire_inference_freq,
+                temporal_factor_k=self.temporal_factor_k,
+                pos_lookahead_step=self.pos_lookahead_step,
+                pos_lookahead_duration=self.pos_lookahead_duration,
+                chunk_time_base=self.chunk_time_base,
+            )
         
         # 动作管理器
         self.action_manager = ActionChunkManager(temporal_factor_k=self.temporal_factor_k)
@@ -633,6 +658,11 @@ class InferenceNode:
         self.pos_lookahead_step_start_idx = 0
         self.step_count = 0
         self.last_action = None
+        self.control_step_count = 0
+        self._last_control_time = None
+        self._control_hz_ema = None
+        self._last_gripper_value = None
+        self._last_gripper_log_time = 0.0
         
         # 启动推理线程
         self.inference_thread = threading.Thread(target=self._inference_loop, daemon=True)
@@ -690,9 +720,9 @@ class InferenceNode:
             os.makedirs(log_dir, exist_ok=True)
             return InferenceLogger(log_dir=log_dir)
         else:
-            # 默认日志目录
-            default_log_dir = os.path.expanduser('~/rl-vla/inference_logs')
-            os.makedirs(default_log_dir, exist_ok=True)
+            # 使用路径模块获取默认日志目录
+            from utils.paths import get_inference_logs_dir, ensure_dir
+            default_log_dir = ensure_dir(get_inference_logs_dir())
             return InferenceLogger(log_dir=default_log_dir)
     
     def _preprocess_image(self, image: np.ndarray, target_size=(128, 128)) -> np.ndarray:
@@ -745,6 +775,19 @@ class InferenceNode:
                     time.sleep(0.5)
                     rospy.loginfo_throttle(5.0, "Waiting for observation...")
                     continue
+
+                t_obs_ready_sys = time.time()
+                obs_stamp_ros = self.latest_obs.get('stamp', None)
+                if self.timeline_logger is not None:
+                    delta_obs = None
+                    if obs_stamp_ros is not None:
+                        delta_obs = t_obs_ready_sys - obs_stamp_ros
+                    self.timeline_logger.log(
+                        'obs',
+                        obs_stamp_ros=obs_stamp_ros,
+                        t_obs_ready_sys=t_obs_ready_sys,
+                        delta_obs=delta_obs,
+                    )
                 
                 # 启动 episode（如果尚未启动）
                 if not self.episode_started:
@@ -777,6 +820,15 @@ class InferenceNode:
                     inference_start = time.time()
                     ret = self.policy({"qpos": qpos, "image": curr_image})
                     inference_time = time.time() - inference_start
+                    inference_end = inference_start + inference_time
+
+                    if self.timeline_logger is not None:
+                        self.timeline_logger.log(
+                            'inference',
+                            t_infer_start=inference_start,
+                            t_infer_end=inference_end,
+                            inference_time=inference_time,
+                        )
                     
                     all_actions = ret["a_hat"].squeeze(0).cpu().numpy()  # [pred_horizon, action_dim]
                     
@@ -817,7 +869,7 @@ class InferenceNode:
                         for i in range(len(all_actions)):
                             if all_actions[i].shape[0] >= 15:
                                 relative_pose = all_actions[i, 7:14]  # [7] 相对位姿
-                                grip = all_actions[i, 6]  # 夹爪
+                                grip = all_actions[i, 14]  # 夹爪
                                 
                                 # 检查相对位移是否过大
                                 max_trans = 0.1  # 10cm
@@ -899,7 +951,7 @@ class InferenceNode:
                             # 取 index 7 开始的 8D: relative_end_pose(7) + gripper(1)
                             relative_pose = all_actions[i][7:14]  # [7] 相对位姿
                             # 取 index 6: 第一个 gripper
-                            grip = all_actions[i][6]
+                            grip = all_actions[i][14]
                             # 将相对位姿变换应用到当前位姿，得到目标绝对位姿
                             target_pose = apply_relative_transform(relative_pose, qpos_end[:7], grip)
                             all_endactions.append(target_pose)
@@ -909,7 +961,11 @@ class InferenceNode:
                         all_actions = all_actions[:, :7]
                     
                     # 创建轨迹并添加到管理器
-                    stamp = self.latest_obs["stamp"]
+                    obs_stamp_ros = self.latest_obs.get("stamp", None)
+                    if self.chunk_time_base == 'obs_stamp' and obs_stamp_ros is not None:
+                        chunk_base_time = obs_stamp_ros
+                    else:
+                        chunk_base_time = time.time()
                     tf = VecTF({})
                     
                     # 使用固定的动作执行间隔 (0.033s ≈ 30Hz)，而不是推理周期
@@ -917,14 +973,35 @@ class InferenceNode:
                     action_interval = 1.0 / 30.0  # 30Hz 的动作执行频率
                     
                     self.pos_lookahead_step_start_idx += 1
+                    chunk_targets = []
                     for i in range(len(all_actions)):
                         if self.pos_lookahead_step == 1:
-                            tf.append(stamp + i * action_interval, all_actions[i].tolist())
+                            target_time = chunk_base_time + i * action_interval
+                            tf.append(target_time, all_actions[i].tolist())
                         else:
                             if self.pos_lookahead_step_start_idx % self.pos_lookahead_step == 0:
-                                tf.append(stamp + i * action_interval, all_actions[i].tolist())
+                                target_time = chunk_base_time + i * action_interval
+                                tf.append(target_time, all_actions[i].tolist())
                             else:
-                                tf.append(stamp + i * self.pos_lookahead_duration, all_actions[i].tolist())
+                                target_time = chunk_base_time + i * self.pos_lookahead_duration
+                                tf.append(target_time, all_actions[i].tolist())
+
+                        chunk_targets.append(target_time)
+
+                    if self.timeline_logger is not None:
+                        delta_chunk_obs = None
+                        if obs_stamp_ros is not None:
+                            delta_chunk_obs = chunk_base_time - obs_stamp_ros
+                        self.timeline_logger.log(
+                            'chunk',
+                            chunk_base_time=chunk_base_time,
+                            obs_stamp_ros=obs_stamp_ros,
+                            t_obs_ready_sys=t_obs_ready_sys,
+                            action_interval=action_interval,
+                            pred_horizon=len(all_actions),
+                            delta_chunk_obs=delta_chunk_obs,
+                            chunk_targets=chunk_targets,
+                        )
                     
                     with self.lock_tfs:
                         self.action_manager.add_trajectory(tf)
@@ -954,13 +1031,46 @@ class InferenceNode:
         while self.running and not rospy.is_shutdown():
             # 获取融合后的动作
             tm = time.time()
-            
+            meta = None
             with self.lock_tfs:
-                action = self.action_manager.get_fused_action(tm)
+                if self.timeline_logger is not None:
+                    action, meta = self.action_manager.get_fused_action_with_meta(tm)
+                else:
+                    action = self.action_manager.get_fused_action(tm)
             
             if action is None:
                 time.sleep(0.02)
                 continue
+
+            # 估计控制频率 (EMA)
+            if self._last_control_time is not None:
+                dt = tm - self._last_control_time
+                if dt > 0:
+                    inst_hz = 1.0 / dt
+                    if self._control_hz_ema is None:
+                        self._control_hz_ema = inst_hz
+                    else:
+                        self._control_hz_ema = 0.2 * inst_hz + 0.8 * self._control_hz_ema
+            self._last_control_time = tm
+
+            # 打印夹爪下发值与频率（节流）
+            grip_val = None
+            if self.joint_cmd_mode:
+                if len(action) > 6:
+                    grip_val = float(action[6])
+            else:
+                if len(action) > 0:
+                    grip_val = float(action[-1])
+
+            now = time.time()
+            if grip_val is not None and (now - self._last_gripper_log_time) >= 1.0:
+                delta = None if self._last_gripper_value is None else (grip_val - self._last_gripper_value)
+                hz_str = f"{self._control_hz_ema:.1f}Hz" if self._control_hz_ema is not None else "n/a"
+                rospy.loginfo(
+                    f"Gripper cmd: {grip_val:.4f}, delta: {delta if delta is not None else 'n/a'}, control_hz: {hz_str}"
+                )
+                self._last_gripper_value = grip_val
+                self._last_gripper_log_time = now
             
             # 执行控制
             if self.joint_cmd_mode:
@@ -969,6 +1079,17 @@ class InferenceNode:
             else:
                 rospy.logdebug("End pose control")
                 self.env.end_control_nostep(action)
+
+            if self.timeline_logger is not None and (self.control_step_count % self.timeline_control_stride == 0):
+                self.timeline_logger.log(
+                    'control',
+                    query_time=tm,
+                    t_send_sys=time.time(),
+                    candidate_timestamps=meta.get('candidate_timestamps', []) if meta else [],
+                    weights=meta.get('weights', []) if meta else [],
+                    num_candidates=meta.get('num_candidates', 0) if meta else 0,
+                )
+            self.control_step_count += 1
             
             time.sleep(control_period)
     
@@ -990,6 +1111,9 @@ class InferenceNode:
             log_path = self.logger.end_episode()
             if log_path:
                 rospy.loginfo(f"Inference log saved to: {log_path}")
+
+        if self.timeline_logger is not None:
+            self.timeline_logger.close()
         
         self.env.shutdown()
         rospy.loginfo("InferenceNode shutdown complete")
@@ -1003,7 +1127,7 @@ def parse_args():
     parser.add_argument('--robot_ip', type=str, default='10.42.0.101',
                         help='Robot IP address')
     parser.add_argument('--robot_mode', type=int, default=4,
-                        help='Control mode (0=IDLE, 1=POSITION, 2=MIT, 3=DRAG)')
+                        help='Control mode (0=IDLE, 1=POSITION, 2=MIT, 3=DRAG, 4=PF)')
     parser.add_argument('--robot_tau', type=float, default=10,
                         help='Gripper torque')
     
@@ -1018,8 +1142,21 @@ def parse_args():
     parser.add_argument('--camera_topics', type=str,
                         default='/camera/color/image_raw',
                         help='Camera topic(s), comma separated')
-    parser.add_argument('--sync_slop', type=float, default=0.1,
+    parser.add_argument('--sync_slop', type=float, default=0.02,
                         help='Image sync tolerance in seconds')
+    
+    # 时间线与 chunking 诊断
+    parser.add_argument('--timeline_enabled', action='store_true',
+                        help='Enable timeline logging (default: enabled)')
+    parser.add_argument('--timeline_disabled', action='store_true',
+                        help='Disable timeline logging')
+    parser.add_argument('--timeline_log', type=str, default='',
+                        help='Timeline log path (JSONL). Empty uses log_dir')
+    parser.add_argument('--timeline_control_stride', type=int, default=10,
+                        help='Log every N control steps (control loop)')
+    parser.add_argument('--chunk_time_base', type=str, default='sys_time',
+                        choices=['sys_time', 'obs_stamp'],
+                        help='Chunk base time: sys_time (recommended) or obs_stamp')
     
     # 策略参数
     parser.add_argument('--pretrain', type=str, default='',
@@ -1031,7 +1168,7 @@ def parse_args():
                         help='Desired inference frequency')
     parser.add_argument('--temporal_factor_k', type=float, default=0.05,
                         help='Temporal factor for action fusion')
-    parser.add_argument('--num_inference_steps', type=int, default=5,
+    parser.add_argument('--num_inference_steps', type=int, default=2,
                         help='Number of flow/diffusion steps for inference (default: 10, more steps = better quality but slower)')
     parser.add_argument('--use_ema', action='store_true',
                         help='Use EMA model for inference (recommended only for 1-step inference, otherwise Non-EMA is better)')
@@ -1064,7 +1201,7 @@ def parse_args():
     
     # 安全控制参数
     parser.add_argument('--safety_config', type=str, default='',
-                        help='Path to safety config JSON file')
+                        help='Path to safety config JSON file (required)')
     parser.add_argument('--data_dir', type=str, default='',
                         help='Data directory for auto-loading safety limits from dataset_info.json')
     parser.add_argument('--no_workspace_check', action='store_true',
@@ -1080,7 +1217,8 @@ def parse_args():
     parser.add_argument('--vis', action='store_true', default=True,
                         help='Visualize images in OpenCV window')
     
-    return parser.parse_args()
+    # 兼容 roslaunch remap 参数
+    return parser.parse_args(args=rospy.myargv()[1:])
 
 
 def main():
@@ -1093,10 +1231,45 @@ def main():
     
     # 转换为配置字典
     config = vars(args)
+
+    # 从 ROS 参数覆盖（支持 roslaunch <param> 方式）
+    for key in [
+        'robot_ip', 'robot_mode', 'robot_tau', 'arm_init_pose', 'arm_init_gripper',
+        'camera_topics', 'sync_slop', 'timeline_log', 'timeline_enabled',
+        'timeline_disabled', 'timeline_control_stride', 'chunk_time_base',
+        'pretrain', 'algorithm', 'desire_inference_freq', 'temporal_factor_k',
+        'num_inference_steps', 'use_ema', 'pos_lookahead_step', 'pos_lookahead_duration',
+        'joint_cmd_mode', 'not_origin', 'dry_run', 'slow_mode', 'no_confirm',
+        'no_return_home', 'return_to_init', 'init_speed', 'safety_config', 'data_dir',
+        'no_workspace_check', 'log_dir', 'save_images', 'vis'
+    ]:
+        if rospy.has_param(f'~{key}'):
+            config[key] = rospy.get_param(f'~{key}')
+
+    # 时间线日志开关：默认开启，除非显式禁用
+    if config.get('timeline_disabled', False):
+        config['timeline_enabled'] = False
+    else:
+        config['timeline_enabled'] = True
     
     # 处理相机话题
     if isinstance(config['camera_topics'], str):
         config['camera_topics'] = config['camera_topics'].split(',')
+
+    # 规范化 arm_init_pose / arm_init_gripper（roslaunch 传入可能是字符串）
+    if isinstance(config.get('arm_init_pose'), str):
+        config['arm_init_pose'] = [float(x) for x in config['arm_init_pose'].split()]
+    if isinstance(config.get('arm_init_gripper'), str):
+        config['arm_init_gripper'] = float(config['arm_init_gripper'])
+
+    # 安全配置：默认使用仓库根目录 safety_config.json，且必须存在
+    if not config.get('safety_config'):
+        default_safety = os.path.join(rl_vla_root, 'safety_config.json')
+        config['safety_config'] = default_safety
+    config['safety_config'] = os.path.expandvars(os.path.expanduser(config['safety_config']))
+    if not os.path.exists(config['safety_config']):
+        rospy.logerr("safety_config is required and not found: %s", config['safety_config'])
+        raise SystemExit(1)
     
     # 传递确认和退出参数
     config['skip_init_confirm'] = config.get('no_confirm', False)

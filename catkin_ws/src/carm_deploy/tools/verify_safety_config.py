@@ -33,7 +33,12 @@ except ImportError as e:
     print("  source ~/rl-vla/scripts/setup_carm_env.sh")
     sys.exit(1)
 
-from safety_controller import SafetyController
+# 添加 carm_deploy 根目录到路径
+script_dir = os.path.dirname(os.path.abspath(__file__))
+carm_deploy_root = os.path.dirname(script_dir)
+sys.path.insert(0, carm_deploy_root)
+
+from core.safety_controller import SafetyController
 
 
 class SafetyConfigVerifier:

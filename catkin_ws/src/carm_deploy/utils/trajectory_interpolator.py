@@ -65,6 +65,26 @@ class TrajectoryInterpolator:
             
             # 如果所有时间戳都小于查询时间，返回 None（已过期）
             return None
+
+    def get_once_with_timestamp(self, query_time):
+        """
+        按时间查询动作并返回其时间戳
+
+        Args:
+            query_time: 查询时间戳
+
+        Returns:
+            tuple: (action, timestamp) 如果没有有效动作返回 (None, None)
+        """
+        with self.lock:
+            if len(self.timestamps) == 0:
+                return None, None
+
+            for i, ts in enumerate(self.timestamps):
+                if ts >= query_time:
+                    return self.actions[i].copy(), ts
+
+            return None, None
     
     def get_interpolated(self, query_time):
         """
@@ -207,6 +227,52 @@ class ActionChunkManager:
             
             fused_action = (all_actions * exp_weights).sum(axis=0)
             return fused_action
+
+    def get_fused_action_with_meta(self, query_time):
+        """
+        获取时间加权融合后的动作，并返回候选元信息
+
+        Args:
+            query_time: 查询时间戳
+
+        Returns:
+            tuple: (fused_action, meta)
+                   meta: {"candidate_timestamps": [...], "weights": [...], "num_candidates": int}
+        """
+        with self.lock:
+            action_candidates = []
+            candidate_timestamps = []
+            valid_offset = 0
+
+            for idx, traj in enumerate(self.trajectories):
+                action, ts = traj.get_once_with_timestamp(query_time)
+                if action is None:
+                    valid_offset = idx
+                    continue
+                action_candidates.append(action)
+                candidate_timestamps.append(ts)
+
+            self.trajectories = self.trajectories[valid_offset:]
+
+            if len(action_candidates) < 1:
+                return None, {
+                    "candidate_timestamps": [],
+                    "weights": [],
+                    "num_candidates": 0,
+                }
+
+            all_actions = np.array(action_candidates)
+            exp_weights = np.exp(-self.temporal_factor_k * np.arange(len(action_candidates) - 1, -1, -1))
+            exp_weights = exp_weights / exp_weights.sum()
+            exp_weights = exp_weights[:, np.newaxis]
+
+            fused_action = (all_actions * exp_weights).sum(axis=0)
+
+            return fused_action, {
+                "candidate_timestamps": candidate_timestamps,
+                "weights": exp_weights.squeeze(-1).tolist(),
+                "num_candidates": len(action_candidates),
+            }
     
     def clear(self):
         """清空所有轨迹"""

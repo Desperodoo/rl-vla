@@ -1,159 +1,230 @@
 # CARM ROS 部署包
 
-基于 ROS1 原生通信的 CARM 机械臂部署框架，替代 svar 方案。
+基于 ROS1 原生通信的 CARM 机械臂部署框架。
 
-## 项目结构
+## 📁 目录结构
 
 ```
 carm_deploy/
-├── config/
-│   └── default.yaml          # 默认配置
-├── launch/
-│   ├── camera.launch         # 相机启动
-│   ├── realsense_d405.launch # D405 专用配置
-│   ├── inference.launch      # 推理节点
-│   ├── record.launch         # 数据记录
-│   └── full_system.launch    # 完整系统
-├── camera/
-│   ├── test_realsense.py     # 相机测试 (pyrealsense2)
-│   └── ros_camera_subscriber.py  # ROS 相机订阅
-├── utils/
+├── core/                       # 核心模块
 │   ├── __init__.py
-│   ├── image_sync.py         # 图像同步 (替代 svar TopicSync)
-│   └── trajectory_interpolator.py  # 轨迹插值 (替代 svar VecTF)
-├── env_ros.py                # 环境封装 (替代 carm_real/env_api.py)
-├── inference_ros.py          # 推理程序 (替代 carm_real/infer_g3_api.py)
-├── record_data_ros.py        # 数据记录 (替代 carm_real/record_data_surreal3576.py)
+│   ├── env_ros.py             # 机械臂环境封装 (RealEnvironment)
+│   └── safety_controller.py   # 安全控制器 (SafetyController)
+│
+├── inference/                  # 推理模块
+│   ├── __init__.py
+│   ├── inference_ros.py       # 策略推理主程序
+│   └── inference_logger.py    # 推理日志记录器
+│
+├── data/                       # 数据模块
+│   ├── __init__.py
+│   ├── record_data_ros.py     # 数据记录程序
+│   ├── dataset_loader.py      # 数据集加载器
+│   └── analyze_dataset.py     # 数据集分析脚本
+│
+├── tools/                      # 工具脚本
+│   ├── __init__.py
+│   ├── offline_test.py        # 离线测试脚本
+│   ├── verify_safety_config.py # 安全配置验证
+│   ├── record_workspace.py    # 工作空间记录
+│   └── arm_test/              # 机械臂测试脚本
+│       ├── test_connection.py # 测试连接
+│       ├── test_motion.py     # 测试运动
+│       ├── test_gripper.py    # 测试夹爪
+│       └── safe_shutdown.py   # 安全关闭
+│
+├── utils/                      # 工具模块
+│   ├── __init__.py
+│   ├── image_sync.py          # 多相机图像同步
+│   ├── trajectory_interpolator.py  # 轨迹插值工具
+│   └── paths.py               # 路径配置
+│
+├── camera/                     # 相机工具
+│   ├── test_realsense.py      # 相机测试 (pyrealsense2)
+│   └── ros_camera_subscriber.py  # ROS 相机订阅
+│
+├── config/                     # 配置文件
+│   └── default.yaml           # 默认配置
+│
+├── launch/                     # ROS Launch 文件
+│   ├── camera.launch          # 相机启动（统一入口）
+│   ├── realsense_d405.launch  # 兼容旧入口（已废弃，内部转发）
+│   ├── inference.launch       # 推理节点
+│   ├── record.launch          # 数据记录
+│   └── full_system.launch     # 完整系统
+│
 ├── CMakeLists.txt
 ├── package.xml
 └── README.md
 ```
 
-## 依赖
+## 🚀 快速开始
 
-### 系统依赖
-- Ubuntu 20.04
-- ROS Noetic
-- Intel RealSense SDK 2.0
+### 依赖安装
 
-### ROS 包
 ```bash
+# 系统依赖
 sudo apt install ros-noetic-realsense2-camera ros-noetic-cv-bridge
-```
 
-### Python 依赖
-```bash
+# Python 依赖
 conda activate carm
 pip install numpy scipy h5py opencv-python einops
-```
 
-### 机械臂 SDK
-```bash
+# CARM SDK
 pip install /path/to/carm_sdk/lib/amd64/carm_py-1.0-cp310-cp310-linux_x86_64.whl
 ```
 
-## 快速开始
-
-### 1. 编译 ROS 包
+### 编译 ROS 包
 
 ```bash
-# 使用项目统一编译脚本
 cd /path/to/rl-vla
 ./scripts/build_catkin.sh
 source catkin_ws/devel/setup.bash
 ```
 
-### 2. 启动相机
+### 环境变量（可选）
 
 ```bash
-roslaunch carm_deploy camera.launch
-# 或使用 D405 专用配置
-roslaunch carm_deploy realsense_d405.launch
+# 设置项目根目录
+export RL_VLA_ROOT=/path/to/rl-vla
 ```
 
-### 3. 数据记录（拖动示教）
+## 📷 相机操作
 
 ```bash
-roslaunch carm_deploy record.launch output_dir:=~/recorded_data
+# 启动相机
+roslaunch carm_deploy camera.launch
+```
+
+## 📝 数据采集
+
+### 拖动示教录制
+
+```bash
+# 启动相机
+roslaunch carm_deploy camera.launch
+
+# 启动录制
+roslaunch carm_deploy record.launch output_dir:=~/rl-vla/recorded_data
+
+# 如果相机已在别处启动
+roslaunch carm_deploy record.launch output_dir:=~/rl-vla/recorded_data use_camera:=false
 ```
 
 控制键:
-- `s`: 开始/停止记录
+- `s`: 开始/停止录制
 - `q`: 保存并退出
 
-### 4. 策略推理
+### 数据分析
 
 ```bash
-roslaunch carm_deploy inference.launch pretrain:=/path/to/model.pt
+python data/analyze_dataset.py --data_dir ~/rl-vla/recorded_data/mix
 ```
 
-### 5. 完整系统
+## 🤖 策略推理
+
+### 测试模式
 
 ```bash
-roslaunch carm_deploy full_system.launch pretrain:=/path/to/model.pt
+# 干运行模式（不执行动作，最安全）
+rosrun carm_deploy inference_ros.py --pretrain /path/to/model.pt --dry_run
+
+# 慢速模式（5Hz）
+rosrun carm_deploy inference_ros.py --pretrain /path/to/model.pt --slow_mode
 ```
 
-## 配置说明
+### 正常推理
+
+```bash
+# 使用 launch 文件
+roslaunch carm_deploy inference.launch pretrain:=/path/to/model.pt safety_config:=~/rl-vla/safety_config.json
+
+# 或直接运行
+rosrun carm_deploy inference_ros.py --pretrain /path/to/model.pt --safety_config ~/rl-vla/safety_config.json
+```
+
+> 推理必须提供 `safety_config.json`，默认路径为 `~/rl-vla/safety_config.json`。
+
+### 离线测试
+
+```bash
+# 使用数据集评估模型（不需要机械臂）
+python tools/offline_test.py \
+    --model_path /path/to/model.pt \
+    --data_dir ~/rl-vla/recorded_data/mix \
+    --compare_ema
+```
+
+## 🔒 安全控制
+
+### 工作空间记录
+
+```bash
+# 拖动示教模式记录安全边界
+python tools/record_workspace.py --output ~/rl-vla/safety_config.json
+```
+
+### 安全配置验证
+
+```bash
+# 验证安全配置
+python tools/verify_safety_config.py --config ~/rl-vla/safety_config.json
+```
+
+## 🔧 机械臂调试
+
+```bash
+# 测试连接
+python tools/arm_test/test_connection.py
+
+# 测试关节运动
+python tools/arm_test/test_motion.py
+
+# 测试夹爪
+python tools/arm_test/test_gripper.py
+
+# 安全关闭
+python tools/arm_test/safe_shutdown.py
+```
+
+## ⚙️ 配置说明
 
 ### 机械臂参数
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
-| robot_ip | 10.42.0.101 | 机器人 IP |
-| robot_mode | 4 | 控制模式 (0=IDLE, ~~1=POSITION~~, 2=MIT, 3=DRAG, **4=PF推荐**) |
-| robot_tau | 10 | 夹爪扭矩 |
+| `robot_ip` | 10.42.0.101 | 机械臂 IP |
+| `robot_mode` | 2 (MIT) | 控制模式 (禁用 mode=1) |
+| `robot_tau` | 10.0 | 夹爪力矩 |
 
-> ⚠️ **安全警告**: 严禁使用 Position 模式 (mode=1)，请使用 PF 力位混合模式 (mode=4)
+### 控制模式
 
-### 相机参数
-
-| 参数 | 默认值 | 说明 |
-|------|--------|------|
-| camera_serial | 218622279840 | 相机序列号 |
-| camera_topics | /camera/color/image_raw | 图像话题 |
+| 模式 | 值 | 说明 |
+|------|-----|------|
+| IDLE | 0 | 空闲 |
+| POSITION | 1 | **禁用** (危险) |
+| MIT | 2 | 推荐 |
+| DRAG | 3 | 拖动示教 |
+| PF | 4 | 力位混合 |
 
 ### 推理参数
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
-| pretrain | "" | 模型路径 |
-| desire_inference_freq | 30 | 推理频率 |
-| temporal_factor_k | 0.05 | 时序融合系数 |
-| joint_cmd_mode | false | 关节控制模式 |
+| `num_inference_steps` | 10 | 推理步数 |
+| `use_ema` | False | 使用 EMA 模型 |
+| `temporal_factor_k` | 0.05 | 时序融合因子 |
+| `desire_inference_freq` | 30 | 推理频率 (Hz) |
 
-## 与 carm_real 的对应关系
+> 图像尺寸：推理时会根据训练的 `args.json` 自动选择。ResNet 编码器默认使用 224x224，其它编码器使用 128x128。
 
-| carm_real | carm_ros_deploy | 说明 |
-|-----------|-----------------|------|
-| svar ros2.TopicSync | utils/image_sync.py | 图像同步 |
-| svar vectf.VecTF | utils/trajectory_interpolator.py | 轨迹插值 |
-| svar messenger | rospy.Publisher/Subscriber | ROS 通信 |
-| env_api.py | env_ros.py | 环境封装 |
-| infer_g3_api.py | inference_ros.py | 推理程序 |
-| record_data_surreal3576.py | record_data_ros.py | 数据记录 |
+## 📊 支持的算法
 
-## 策略接口
+- **Consistency Flow** (推荐): 快速、高质量
+- **Flow Matching**: 标准 Flow Matching
+- **Diffusion Policy**: DDPM-based
 
-推理程序使用 `PolicyInterface` 抽象类，用户需要继承并实现：
-
-```python
-from inference_ros import PolicyInterface
-
-class MyPolicy(PolicyInterface):
-    def load_model(self, model_path):
-        # 加载模型
-        self.model = torch.load(model_path)
-    
-    def __call__(self, inputs):
-        # 执行推理
-        # inputs: {'qpos': Tensor[B,7], 'image': Tensor[B,C,H,W]}
-        # 返回: {'a_hat': Tensor[B,H,D]}
-        return self.model(inputs)
-```
-
-然后修改 `inference_ros.py` 中的 `_create_policy` 方法加载自定义策略。
-
-## 数据格式
+## 📋 数据格式
 
 记录的数据保存为 HDF5 格式：
 
@@ -173,46 +244,8 @@ episode_0001_20240108_120000.hdf5
     └── ...
 ```
 
-### 图像格式协议
+## 🔗 相关链接
 
-**重要**：本项目统一使用 **RGB** 格式存储和处理图像。
-
-| 阶段 | 格式 | 说明 |
-|------|------|------|
-| ROS 话题 | RGB8 | RealSense ROS 节点发布 |
-| ImageSynchronizer | RGB | `get_images()` 返回 RGB |
-| HDF5 存储 | RGB | `observations/images` |
-| 训练加载 | RGB | 与 PyTorch/预训练模型兼容 |
-| 推理输入 | RGB | 同训练一致 |
-
-**注意**：
-- 使用 OpenCV (`cv2.imshow`, `cv2.imwrite`) 时需要转换为 BGR：
-  ```python
-  img_bgr = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
-  cv2.imwrite('output.jpg', img_bgr)
-  ```
-- 使用 matplotlib 或 PIL 时直接使用 RGB，无需转换
-
-## 常见问题
-
-### 1. 相机无法启动
-
-检查相机序列号：
-```bash
-rs-enumerate-devices | grep Serial
-```
-
-### 2. 机械臂连接失败
-
-检查网络连接：
-```bash
-ping 10.42.0.101
-```
-
-### 3. 关节限位错误
-
-J2 限位 [0, 3.14]，J3 限位 [-3.14, 0]，确保目标位置在限位内。
-
-## 许可证
-
-MIT License
+- [根目录 README](../../../README.md)
+- [数据集 README](../../../recorded_data/README.md)
+- [训练代码](../../../rlft/diffusion_policy/README.md)

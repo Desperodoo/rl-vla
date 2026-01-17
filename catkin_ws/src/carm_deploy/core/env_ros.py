@@ -15,6 +15,10 @@ from scipy.spatial.transform import Rotation as R
 from carm import carm_py
 
 # ROS 图像同步
+import sys
+import os
+# 添加父目录到路径以访问 utils
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from utils.image_sync import ImageSynchronizer
 
 

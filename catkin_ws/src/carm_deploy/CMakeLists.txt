@@ -9,13 +9,10 @@ find_package(catkin REQUIRED COMPONENTS
 
 catkin_package()
 
-# 安装 Python 脚本
+# 安装 Python 脚本 (主程序)
 catkin_install_python(PROGRAMS
-  inference_ros.py
-  record_data_ros.py
-  env_ros.py
-  camera/test_realsense.py
-  camera/ros_camera_subscriber.py
+  inference/inference_ros.py
+  data/record_data_ros.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 
@@ -29,7 +26,14 @@ install(DIRECTORY config/
   DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}/config
 )
 
-# 安装 utils 模块
-install(DIRECTORY utils/
-  DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}/utils
+# 安装 Python 模块
+install(DIRECTORY 
+  core/
+  inference/
+  data/
+  tools/
+  utils/
+  camera/
+  DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}
+  FILES_MATCHING PATTERN "*.py"
 )

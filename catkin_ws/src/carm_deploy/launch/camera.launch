@@ -1,6 +1,6 @@
 <?xml version="1.0"?>
 <!--
-  RealSense D405 相机启动文件
+  RealSense 相机启动文件（统一入口）
   
   使用方法:
     roslaunch carm_ros_deploy camera.launch
@@ -8,11 +8,13 @@
   参数:
     serial_no: 相机序列号
     camera: 相机命名空间
+    tf_prefix: TF 前缀
 -->
 <launch>
   <!-- 相机参数 -->
   <arg name="serial_no" default="218622279840"/>
   <arg name="camera" default="camera"/>
+  <arg name="tf_prefix" default="$(arg camera)"/>
   
   <!-- 图像参数 -->
   <arg name="color_width" default="640"/>
@@ -28,12 +30,16 @@
   <arg name="enable_depth" default="true"/>
   <arg name="enable_infra1" default="false"/>
   <arg name="enable_infra2" default="false"/>
+  <arg name="enable_pointcloud" default="false"/>
+  <arg name="pointcloud_texture_stream" default="RS2_STREAM_COLOR"/>
   <arg name="align_depth" default="true"/>
+  <arg name="filters" default=""/>
   
   <!-- 启动 RealSense 节点 -->
   <include file="$(find realsense2_camera)/launch/rs_camera.launch">
     <arg name="serial_no" value="$(arg serial_no)"/>
     <arg name="camera" value="$(arg camera)"/>
+    <arg name="tf_prefix" value="$(arg tf_prefix)"/>
     
     <!-- 颜色流 -->
     <arg name="enable_color" value="$(arg enable_color)"/>
@@ -53,6 +59,13 @@
     
     <!-- 对齐 -->
     <arg name="align_depth" value="$(arg align_depth)"/>
+
+    <!-- 点云 -->
+    <arg name="enable_pointcloud" value="$(arg enable_pointcloud)"/>
+    <arg name="pointcloud_texture_stream" value="$(arg pointcloud_texture_stream)"/>
+
+    <!-- 滤波器 -->
+    <arg name="filters" value="$(arg filters)"/>
   </include>
   
 </launch>
