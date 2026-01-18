@@ -36,6 +36,7 @@ from datetime import datetime
 from scipy.spatial.transform import Rotation as R
 from einops import rearrange
 from typing import Optional, Dict, List, Any
+from collections import deque
 
 # 本地模块
 import sys
@@ -207,7 +208,8 @@ class RealPolicy(PolicyInterface):
         # 默认参数（会被 args.json 覆盖）
         self.obs_horizon = config.get('obs_horizon', 2)
         self.pred_horizon = config.get('pred_horizon', 16)
-        self.action_dim = config.get('action_dim', 15)  # full mode
+        self.action_dim = config.get('action_dim', 13)  # full mode (continuous, no gripper)
+        self.action_dim_full = config.get('action_dim_full', 15)  # full action with gripper
         self.state_dim = 7  # 6 joints + 1 gripper
         self.target_image_size = config.get('target_image_size', (128, 128))
         self.visual_feature_dim = config.get('visual_feature_dim', 256)
@@ -220,10 +222,23 @@ class RealPolicy(PolicyInterface):
         self.num_inference_steps = config.get('num_inference_steps', 10)  # 默认10步，与训练一致
         self.use_ema = config.get('use_ema', False)  # 默认使用 Non-EMA（学生模型）
         
+        # Discrete gripper parameters (loaded from args.json)
+        # Based on data analysis: gripper range [0.011, 0.078], close < 0.05, open ≈ 0.078
+        self.gripper_threshold = config.get('gripper_threshold', 0.05)
+        self.gripper_open_val = config.get('gripper_open_val', 0.078)
+        self.gripper_close_val = config.get('gripper_close_val', 0.04)
+        self.gripper_head_hidden_dim = config.get('gripper_head_hidden_dim', 256)
+        
+        # Hysteresis for gripper: 5-frame majority voting
+        self.gripper_hysteresis_window = 5
+        self._gripper_history = deque(maxlen=self.gripper_hysteresis_window)
+        self._last_gripper_state = 0  # 0=open, 1=close
+        
         # 模型组件
         self.visual_encoder = None
         self.state_encoder = None
         self.agent = None
+        self.gripper_head = None  # Discrete gripper classification head
         
         # 观测历史缓冲区
         self.obs_history = {
@@ -284,15 +299,24 @@ class RealPolicy(PolicyInterface):
                     target_size = tuple(target_size)
                 self.target_image_size = target_size
             
-            # action_mode 决定 action_dim
+            # action_mode 决定 action_dim (continuous only, gripper is discrete)
             action_mode = args.get('action_mode', 'full')
             if action_mode == 'full':
-                self.action_dim = 15
+                self.action_dim = 13  # joint(6) + rel_pose(7), no gripper
+                self.action_dim_full = 15  # Original full dimension for output
             else:  # ee_only
-                self.action_dim = 8
+                self.action_dim = 7  # rel_pose(7), no gripper
+                self.action_dim_full = 8  # Original full dimension for output
+            
+            # Discrete gripper configuration
+            self.gripper_threshold = args.get('gripper_threshold', self.gripper_threshold)
+            self.gripper_open_val = args.get('gripper_open_val', self.gripper_open_val)
+            self.gripper_close_val = args.get('gripper_close_val', self.gripper_close_val)
+            self.gripper_head_hidden_dim = args.get('gripper_head_hidden_dim', self.gripper_head_hidden_dim)
                 
-            rospy.loginfo(f"Config: algorithm={self.algorithm}, action_dim={self.action_dim}, "
+            rospy.loginfo(f"Config: algorithm={self.algorithm}, action_dim={self.action_dim} (continuous), "
                          f"obs_horizon={self.obs_horizon}, pred_horizon={self.pred_horizon}")
+            rospy.loginfo(f"Discrete gripper: threshold={self.gripper_threshold}, open={self.gripper_open_val}, close={self.gripper_close_val}")
             rospy.loginfo(f"Inference config: num_steps={self.num_inference_steps}, use_ema={self.use_ema}")
             rospy.loginfo(f"Visual encoder: {visual_encoder_type}, image_size={self.target_image_size}")
         else:
@@ -344,6 +368,17 @@ class RealPolicy(PolicyInterface):
         # Agent
         self.agent = self._create_agent(global_cond_dim)
         
+        # GripperHead (discrete classification)
+        from train_carm import GripperHead
+        self.gripper_head = GripperHead(
+            obs_dim=self.visual_feature_dim + encoded_state_dim,
+            obs_horizon=self.obs_horizon,
+            pred_horizon=self.pred_horizon,
+            hidden_dim=self.gripper_head_hidden_dim,
+            num_classes=2,
+        ).to(self.device)
+        rospy.loginfo(f"Created GripperHead: hidden_dim={self.gripper_head_hidden_dim}")
+        
         # 3. 加载权重
         rospy.loginfo(f"Loading checkpoint from: {model_path}")
         ckpt = torch.load(model_path, map_location=self.device)
@@ -385,14 +420,22 @@ class RealPolicy(PolicyInterface):
             else:
                 raise ValueError("No agent weights in checkpoint")
         
+        # 加载 gripper_head
+        if "gripper_head" in ckpt:
+            self.gripper_head.load_state_dict(ckpt["gripper_head"])
+            rospy.loginfo("Loaded gripper_head weights")
+        else:
+            rospy.logwarn("gripper_head not in checkpoint! Using random initialization (this may cause poor gripper behavior)")
+        
         # 4. 设置为评估模式
         self.visual_encoder.eval()
         if self.state_encoder is not None:
             self.state_encoder.eval()
         self.agent.eval()
+        self.gripper_head.eval()
         
         self.loaded = True
-        rospy.loginfo(f"Model loaded successfully! Algorithm: {self.algorithm}")
+        rospy.loginfo(f"Model loaded successfully! Algorithm: {self.algorithm}, Gripper: discrete")
     
     def _create_agent(self, global_cond_dim: int) -> nn.Module:
         """根据算法类型创建 agent"""
@@ -528,8 +571,10 @@ class RealPolicy(PolicyInterface):
         return obs_features
     
     def reset(self):
-        """重置观测历史"""
+        """重置观测历史和 gripper 状态"""
         self.obs_history = {'rgb': [], 'state': []}
+        self._gripper_history.clear()
+        self._last_gripper_state = 0  # Reset to open
     
     def __call__(self, inputs: Dict[str, Any]) -> Dict[str, torch.Tensor]:
         """
@@ -539,7 +584,7 @@ class RealPolicy(PolicyInterface):
             inputs: 包含 'qpos' (状态) 和 'image' (图像) 的字典
             
         Returns:
-            {'a_hat': [1, pred_horizon, action_dim]}
+            {'a_hat': [1, pred_horizon, action_dim_full]} - Full action with gripper
         """
         if not self.loaded:
             raise RuntimeError("Model not loaded. Call load_model() first.")
@@ -562,13 +607,97 @@ class RealPolicy(PolicyInterface):
         
         # 编码观测
         with torch.no_grad():
-            obs_features = self._encode_observations()
+            obs_features = self._encode_observations()  # [1, obs_horizon, obs_dim]
             
-            # 调用 agent.get_action()
-            actions = self.agent.get_action_deterministic(obs_features)  # [1, pred_horizon, action_dim]
-            # actions = self.agent.get_action(obs_features)  # [1, pred_horizon, action_dim]
+            # 1. Get continuous actions (no gripper)
+            actions_cont = self.agent.get_action_deterministic(obs_features)  # [1, pred_horizon, action_dim]
+            
+            # 2. Get discrete gripper predictions
+            gripper_logits = self.gripper_head(obs_features)  # [1, pred_horizon, 2]
+            gripper_cls = gripper_logits.argmax(dim=-1)  # [1, pred_horizon], 0=open, 1=close
+            
+            # 3. Apply hysteresis (5-frame majority voting)
+            gripper_vals = self._apply_gripper_hysteresis(gripper_cls[0].cpu().numpy())  # [pred_horizon]
+            
+            # 4. Reconstruct full action with gripper
+            actions_full = self._reconstruct_full_action(actions_cont[0], gripper_vals)  # [pred_horizon, action_dim_full]
         
-        return {'a_hat': actions}
+        return {'a_hat': actions_full.unsqueeze(0)}  # [1, pred_horizon, action_dim_full]
+    
+    def _apply_gripper_hysteresis(self, gripper_cls: np.ndarray) -> np.ndarray:
+        """
+        Apply hysteresis to gripper predictions to prevent rapid switching.
+        Uses 5-frame majority voting with "any close in act_horizon" logic.
+        
+        The key insight: if ANY timestep in the action horizon predicts close,
+        we should close the gripper (safety-first for grasping).
+        
+        Args:
+            gripper_cls: [pred_horizon] array of gripper class predictions (0=open, 1=close)
+            
+        Returns:
+            [pred_horizon] array of gripper values
+        """
+        # Use "any close in act_horizon" logic:
+        # If any timestep in the chunk predicts close, treat as close intent
+        # This handles the case where model predicts close at later timesteps
+        act_horizon = min(8, len(gripper_cls))  # Typically act_horizon=8
+        chunk_has_close = np.any(gripper_cls[:act_horizon] == 1)
+        current_vote = 1 if chunk_has_close else 0
+        
+        # Add current vote to history
+        self._gripper_history.append(current_vote)
+        
+        # Majority voting over history (5-frame window)
+        if len(self._gripper_history) >= 3:  # Need at least 3 frames for voting
+            vote_result = sum(self._gripper_history) > len(self._gripper_history) / 2
+            new_state = 1 if vote_result else 0
+        else:
+            # Not enough history, use current vote
+            new_state = current_vote
+        
+        # Log state change
+        if new_state != self._last_gripper_state:
+            old_str = "OPEN" if self._last_gripper_state == 0 else "CLOSE"
+            new_str = "OPEN" if new_state == 0 else "CLOSE"
+            rospy.loginfo(f"Gripper state changed: {old_str} -> {new_str} (chunk_has_close={chunk_has_close})")
+            self._last_gripper_state = new_state
+        
+        # Map class to continuous value for the entire horizon
+        # Use the smoothed state for all timesteps in this chunk
+        gripper_val = self.gripper_close_val if new_state == 1 else self.gripper_open_val
+        gripper_vals = np.full(len(gripper_cls), gripper_val, dtype=np.float32)
+        
+        return gripper_vals
+    
+    def _reconstruct_full_action(self, actions_cont: torch.Tensor, gripper_vals: np.ndarray) -> torch.Tensor:
+        """
+        Reconstruct full action tensor by inserting gripper values.
+        
+        Args:
+            actions_cont: [pred_horizon, action_dim] continuous actions (no gripper)
+            gripper_vals: [pred_horizon] gripper values
+            
+        Returns:
+            [pred_horizon, action_dim_full] full action tensor
+        """
+        pred_horizon = actions_cont.shape[0]
+        actions_full = torch.zeros(pred_horizon, self.action_dim_full, device=actions_cont.device)
+        
+        if self.action_dim_full == 15:  # full mode
+            # actions_cont: [joint(6), rel_pose(7)] = 13D
+            # actions_full: [joint(6), gripper(1), rel_pose(7), gripper(1)] = 15D
+            actions_full[:, :6] = actions_cont[:, :6]  # joints
+            actions_full[:, 6] = torch.from_numpy(gripper_vals).to(actions_cont.device)  # gripper 1
+            actions_full[:, 7:14] = actions_cont[:, 6:13]  # rel_pose
+            actions_full[:, 14] = torch.from_numpy(gripper_vals).to(actions_cont.device)  # gripper 2
+        else:  # ee_only mode (action_dim_full == 8)
+            # actions_cont: [rel_pose(7)] = 7D
+            # actions_full: [rel_pose(7), gripper(1)] = 8D
+            actions_full[:, :7] = actions_cont[:, :7]  # rel_pose
+            actions_full[:, 7] = torch.from_numpy(gripper_vals).to(actions_cont.device)  # gripper
+        
+        return actions_full
 
 
 class InferenceNode:
@@ -633,6 +762,14 @@ class InferenceNode:
         self.timeline_control_stride = config.get('timeline_control_stride', 10)
         self.chunk_time_base = config.get('chunk_time_base', 'sys_time')
         self.timeline_logger = None
+        
+        # 从策略获取 horizon 参数（如果已加载）
+        self._act_horizon = getattr(self.policy, 'pred_horizon', 16)  # 默认与 pred_horizon 相同
+        self._pred_horizon = getattr(self.policy, 'pred_horizon', 16)
+        self._obs_horizon = getattr(self.policy, 'obs_horizon', 2)
+        # 允许通过 config 覆盖 act_horizon
+        self._act_horizon = config.get('act_horizon', self._act_horizon)
+        
         if self.timeline_enabled:
             timeline_path = config.get('timeline_log', '')
             if not timeline_path:
@@ -646,6 +783,9 @@ class InferenceNode:
                 pos_lookahead_step=self.pos_lookahead_step,
                 pos_lookahead_duration=self.pos_lookahead_duration,
                 chunk_time_base=self.chunk_time_base,
+                act_horizon=self._act_horizon,
+                pred_horizon=self._pred_horizon,
+                obs_horizon=self._obs_horizon,
             )
         
         # 动作管理器
@@ -948,9 +1088,9 @@ class InferenceNode:
                     if not self.joint_cmd_mode:
                         all_endactions = []
                         for i in range(all_actions.shape[0]):
-                            # 取 index 7 开始的 8D: relative_end_pose(7) + gripper(1)
+                            # 取 index 7 开始的 7D: relative_end_pose(7)
                             relative_pose = all_actions[i][7:14]  # [7] 相对位姿
-                            # 取 index 6: 第一个 gripper
+                            # 统一使用 index 14 的 gripper（与 _reconstruct_full_action 保持一致）
                             grip = all_actions[i][14]
                             # 将相对位姿变换应用到当前位姿，得到目标绝对位姿
                             target_pose = apply_relative_transform(relative_pose, qpos_end[:7], grip)
@@ -992,19 +1132,24 @@ class InferenceNode:
                         delta_chunk_obs = None
                         if obs_stamp_ros is not None:
                             delta_chunk_obs = chunk_base_time - obs_stamp_ros
+                        # chunk_id 在下方 add_trajectory 后获取
+                        
+                    with self.lock_tfs:
+                        chunk_id = self.action_manager.add_trajectory(tf)
+                    
+                    if self.timeline_logger is not None:
                         self.timeline_logger.log(
                             'chunk',
+                            chunk_id=chunk_id,
                             chunk_base_time=chunk_base_time,
                             obs_stamp_ros=obs_stamp_ros,
                             t_obs_ready_sys=t_obs_ready_sys,
                             action_interval=action_interval,
                             pred_horizon=len(all_actions),
+                            act_horizon=self._act_horizon,
                             delta_chunk_obs=delta_chunk_obs,
                             chunk_targets=chunk_targets,
                         )
-                    
-                    with self.lock_tfs:
-                        self.action_manager.add_trajectory(tf)
                     
                     self.step_count += 1
                     rospy.loginfo_throttle(1.0, 
@@ -1088,6 +1233,7 @@ class InferenceNode:
                     candidate_timestamps=meta.get('candidate_timestamps', []) if meta else [],
                     weights=meta.get('weights', []) if meta else [],
                     num_candidates=meta.get('num_candidates', 0) if meta else 0,
+                    used_chunk_ids=meta.get('used_chunk_ids', []) if meta else [],
                 )
             self.control_step_count += 1
             
@@ -1168,7 +1314,7 @@ def parse_args():
                         help='Desired inference frequency')
     parser.add_argument('--temporal_factor_k', type=float, default=0.05,
                         help='Temporal factor for action fusion')
-    parser.add_argument('--num_inference_steps', type=int, default=2,
+    parser.add_argument('--num_inference_steps', type=int, default=3,
                         help='Number of flow/diffusion steps for inference (default: 10, more steps = better quality but slower)')
     parser.add_argument('--use_ema', action='store_true',
                         help='Use EMA model for inference (recommended only for 1-step inference, otherwise Non-EMA is better)')

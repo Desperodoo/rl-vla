@@ -339,8 +339,10 @@ class DataRecorder:
         if self.timeline_logger is not None:
             obs_stamp_ros = obs.get('stamp', None)
             delta_obs = None
+            delta_action_obs = None
             if obs_stamp_ros is not None:
                 delta_obs = t_obs_ready_sys - obs_stamp_ros
+                delta_action_obs = t_action_query_sys - obs_stamp_ros
             self.timeline_logger.log(
                 'record_step',
                 episode=self.episode_count,
@@ -349,6 +351,7 @@ class DataRecorder:
                 t_obs_ready_sys=t_obs_ready_sys,
                 delta_obs=delta_obs,
                 t_action_query_sys=t_action_query_sys,
+                delta_action_obs=delta_action_obs,
                 action_present=action is not None,
             )
         

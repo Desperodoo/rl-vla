@@ -108,6 +108,21 @@ class Args:
     """whether to normalize actions for training"""
     action_norm_mode: Literal["standard", "minmax"] = "standard"
     """action normalization mode"""
+    
+    # Discrete gripper settings (gripper as binary classification)
+    # Based on data analysis: gripper range [0.011, 0.078], close < 0.05, open ≈ 0.078
+    gripper_threshold: float = 0.05
+    """threshold to discretize gripper: close (label=1) if g < threshold, else open (label=0)"""
+    gripper_ce_weight: float = 1.0
+    """weight for gripper cross-entropy loss"""
+    gripper_class_weight_close: float = 3.0
+    """class weight for close label in CE loss (to handle class imbalance, open:close ≈ 65:35)"""
+    gripper_open_val: float = 0.078
+    """gripper value for open state during inference"""
+    gripper_close_val: float = 0.04
+    """gripper value for close state during inference (typical close value from data)"""
+    gripper_head_hidden_dim: int = 256
+    """hidden dimension for gripper classification head"""
 
     # Camera settings
     target_image_size: Optional[Tuple[int, int]] = (128, 128)
@@ -239,6 +254,56 @@ class Args:
     """whether to resume optimizer state (set False to reset learning rate)"""
 
 
+class GripperHead(nn.Module):
+    """
+    Gripper classification head.
+    
+    Takes encoded observation features and predicts open/close for each timestep
+    in the prediction horizon.
+    
+    Input: obs_features [B, obs_horizon, obs_dim]
+    Output: logits [B, pred_horizon, 2]
+    """
+    
+    def __init__(
+        self,
+        obs_dim: int,
+        obs_horizon: int,
+        pred_horizon: int,
+        hidden_dim: int = 256,
+        num_classes: int = 2,
+    ):
+        super().__init__()
+        self.obs_horizon = obs_horizon
+        self.pred_horizon = pred_horizon
+        self.num_classes = num_classes
+        
+        # Flatten obs_features and project to hidden
+        input_dim = obs_horizon * obs_dim
+        self.net = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, pred_horizon * num_classes),
+        )
+    
+    def forward(self, obs_features: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            obs_features: [B, obs_horizon, obs_dim]
+        Returns:
+            logits: [B, pred_horizon, num_classes]
+        """
+        B = obs_features.shape[0]
+        # Flatten: [B, obs_horizon * obs_dim]
+        x = obs_features.view(B, -1)
+        # Forward: [B, pred_horizon * num_classes]
+        x = self.net(x)
+        # Reshape: [B, pred_horizon, num_classes]
+        return x.view(B, self.pred_horizon, self.num_classes)
+
+
 class IterationBasedBatchSampler:
     """Wraps a BatchSampler, resampling until specified iterations."""
     
@@ -311,6 +376,7 @@ class CARMDataset(Dataset):
         action_mode: str = "full",
         precompute_actions: bool = False,
         action_normalizer: Optional[ActionNormalizer] = None,
+        gripper_threshold: float = 0.05,
     ):
         self.obs_horizon = obs_horizon
         self.pred_horizon = pred_horizon
@@ -318,9 +384,13 @@ class CARMDataset(Dataset):
         self.action_mode = action_mode
         self.precompute_actions = precompute_actions
         self.action_normalizer = action_normalizer
+        self.gripper_threshold = gripper_threshold
         
-        # Determine action dimension
-        self.action_dim = 15 if action_mode == 'full' else 8
+        # Determine action dimension (continuous only, gripper is now discrete)
+        # full: joint(6) + relative_pose(7) = 13D (gripper removed)
+        # ee_only: relative_pose(7) = 7D (gripper removed)
+        self.action_dim = 13 if action_mode == 'full' else 7
+        self.action_dim_full = 15 if action_mode == 'full' else 8  # Original full dim for reference
         
         # Load dataset
         print(f"Loading CARM dataset from {data_path}...")
@@ -336,6 +406,7 @@ class CARMDataset(Dataset):
         }
         
         all_relative_actions = []  # For computing normalization stats
+        gripper_consistency_errors = []  # Track gripper consistency
         
         for ep_idx in tqdm(range(len(raw_data['images'])), desc="Processing episodes"):
             images = raw_data['images'][ep_idx]
@@ -355,12 +426,23 @@ class CARMDataset(Dataset):
             # Action format: [joint(6), gripper(1), end_pose(7), gripper(1)] = 15D
             raw_actions = raw_data['action'][ep_idx]
             
+            # Verify gripper consistency: action[:,14] should match raw_data['gripper']
+            if raw_actions.shape[1] >= 15:
+                action_gripper = raw_actions[:, 14]
+                max_diff = np.abs(action_gripper - gripper).max()
+                if max_diff > 1e-5:
+                    gripper_consistency_errors.append((ep_idx, max_diff))
+                # Also check action[:,6] vs action[:,14]
+                action_g6_g14_diff = np.abs(raw_actions[:, 6] - raw_actions[:, 14]).max()
+                if action_g6_g14_diff > 1e-5:
+                    print(f"  Warning: Episode {ep_idx} has gripper mismatch: |action[6]-action[14]|={action_g6_g14_diff:.6f}")
+            
             # Store trajectory data
             trajectories["observations"].append(processed_obs)
             trajectories["raw_actions"].append(raw_actions)
             trajectories["qpos_end"].append(qpos_end[:, :7])  # [T, 7]
             
-            # Compute sample relative actions for normalization stats
+            # Compute sample relative actions for normalization stats (continuous only, no gripper)
             for t in range(0, len(raw_actions) - pred_horizon, pred_horizon):
                 ref_pose = qpos_end[t, :7]
                 for k in range(pred_horizon):
@@ -368,14 +450,25 @@ class CARMDataset(Dataset):
                     relative_pose = compute_relative_pose_transform(ref_pose, target_pose)
                     
                     if self.action_mode == 'full':
-                        rel_action = np.zeros(15, dtype=np.float32)
-                        rel_action[:7] = raw_actions[t + k, :7]
-                        rel_action[7:14] = relative_pose
-                        rel_action[14] = raw_actions[t + k, 14]
+                        # Continuous action: joint(6) + relative_pose(7) = 13D (no gripper)
+                        rel_action = np.zeros(self.action_dim, dtype=np.float32)
+                        rel_action[:6] = raw_actions[t + k, :6]  # joints only, no gripper
+                        rel_action[6:13] = relative_pose
                     else:  # ee_only
-                        rel_action = np.concatenate([relative_pose, [raw_actions[t + k, 14]]])
+                        # Continuous action: relative_pose(7) = 7D (no gripper)
+                        rel_action = relative_pose.astype(np.float32)
                     
                     all_relative_actions.append(rel_action)
+        
+        # Report gripper consistency check results
+        if gripper_consistency_errors:
+            print(f"WARNING: Found {len(gripper_consistency_errors)} episodes with gripper inconsistency!")
+            for ep_idx, max_diff in gripper_consistency_errors[:5]:
+                print(f"  Episode {ep_idx}: max|action[14] - gripper| = {max_diff:.6f}")
+            if len(gripper_consistency_errors) > 5:
+                print(f"  ... and {len(gripper_consistency_errors) - 5} more")
+        else:
+            print("Gripper consistency check passed: action[:,14] matches raw_data['gripper']")
         
         # Compute action normalization stats
         if self.action_normalizer is not None and len(all_relative_actions) > 0:
@@ -409,15 +502,21 @@ class CARMDataset(Dataset):
             self._precompute_all_actions()
     
     def _precompute_all_actions(self):
-        """Precompute relative actions for all slices.
+        """Precompute relative actions and gripper labels for all slices.
         
-        This trades memory for speed: stores [num_slices, pred_horizon, action_dim]
-        instead of computing on-the-fly in __getitem__.
+        This trades memory for speed:
+        - actions_cont: [num_slices, pred_horizon, action_dim] (continuous, no gripper)
+        - gripper_labels: [num_slices, pred_horizon] (discrete labels)
         """
         num_slices = len(self.slices)
         self.precomputed_actions = torch.zeros(
             (num_slices, self.pred_horizon, self.action_dim),
             dtype=torch.float32,
+            device=self.device,
+        )
+        self.precomputed_gripper_labels = torch.zeros(
+            (num_slices, self.pred_horizon),
+            dtype=torch.long,
             device=self.device,
         )
         
@@ -438,21 +537,26 @@ class CARMDataset(Dataset):
             if end > L:
                 act_indices = act_indices + [L - 1] * (end - L)
             
-            # Compute relative actions
+            # Compute relative actions (continuous) and gripper labels (discrete)
             for k, act_idx in enumerate(act_indices):
                 raw_action = raw_actions[act_idx]
                 target_pose = raw_action[7:14]
                 relative_pose = compute_relative_pose_transform(ref_pose, target_pose)
+                gripper_val = raw_action[14]  # Use index 14 gripper (main)
                 
+                # Continuous action (no gripper)
                 if self.action_mode == 'full':
-                    self.precomputed_actions[idx, k, :7] = torch.from_numpy(raw_action[:7])
-                    self.precomputed_actions[idx, k, 7:14] = torch.from_numpy(relative_pose)
-                    self.precomputed_actions[idx, k, 14] = raw_action[14]
+                    # full: joint(6) + relative_pose(7) = 13D
+                    self.precomputed_actions[idx, k, :6] = torch.from_numpy(raw_action[:6])  # joints only
+                    self.precomputed_actions[idx, k, 6:13] = torch.from_numpy(relative_pose)
                 else:  # ee_only
+                    # ee_only: relative_pose(7) = 7D
                     self.precomputed_actions[idx, k, :7] = torch.from_numpy(relative_pose)
-                    self.precomputed_actions[idx, k, 7] = raw_action[14]
+                
+                # Gripper label: 1 = close, 0 = open
+                self.precomputed_gripper_labels[idx, k] = 1 if gripper_val < self.gripper_threshold else 0
             
-            # Apply normalization if configured
+            # Apply normalization if configured (only to continuous actions)
             if self.action_normalizer is not None:
                 act_np = self.precomputed_actions[idx].cpu().numpy()
                 act_np = self.action_normalizer.transform(act_np)
@@ -462,8 +566,16 @@ class CARMDataset(Dataset):
         del self.trajectories["raw_actions"]
         del self.trajectories["qpos_end"]
         
-        memory_mb = self.precomputed_actions.element_size() * self.precomputed_actions.nelement() / 1024 / 1024
-        print(f"Precomputed actions shape: {self.precomputed_actions.shape}, Memory: {memory_mb:.2f} MB")
+        memory_mb = (self.precomputed_actions.element_size() * self.precomputed_actions.nelement() + 
+                     self.precomputed_gripper_labels.element_size() * self.precomputed_gripper_labels.nelement()) / 1024 / 1024
+        print(f"Precomputed actions shape: {self.precomputed_actions.shape}, gripper_labels shape: {self.precomputed_gripper_labels.shape}")
+        print(f"Memory: {memory_mb:.2f} MB")
+        
+        # Print gripper label statistics
+        total_labels = self.precomputed_gripper_labels.numel()
+        close_count = (self.precomputed_gripper_labels == 1).sum().item()
+        open_count = (self.precomputed_gripper_labels == 0).sum().item()
+        print(f"Gripper labels: close={close_count} ({close_count/total_labels*100:.1f}%), open={open_count} ({open_count/total_labels*100:.1f}%)")
     
     def __getitem__(self, index):
         """Get a training sample.
@@ -474,6 +586,12 @@ class CARMDataset(Dataset):
         Relative pose computation matches inference:
             Training: relative_pose = inv(ref_pose) @ target_pose
             Inference: target_pose = ref_pose @ relative_pose
+        
+        Returns:
+            dict with:
+                - observations: {rgb, state}
+                - actions_cont: [pred_horizon, action_dim] continuous actions (no gripper)
+                - gripper_label: [pred_horizon] discrete labels (0=open, 1=close)
         """
         traj_idx, start, end = self.slices[index]
         obs_traj = self.trajectories["observations"][traj_idx]
@@ -486,10 +604,11 @@ class CARMDataset(Dataset):
                 pad_obs_seq = torch.stack([obs_seq[k][0]] * abs(start), dim=0)
                 obs_seq[k] = torch.cat((pad_obs_seq, obs_seq[k]), dim=0)
         
-        # Get action sequence
+        # Get action sequence and gripper labels
         if self.precompute_actions:
-            # Fast path: return precomputed actions
+            # Fast path: return precomputed actions and labels
             act_seq = self.precomputed_actions[index]
+            gripper_label = self.precomputed_gripper_labels[index]
         else:
             # Dynamic computation path
             raw_actions = self.trajectories["raw_actions"][traj_idx]
@@ -507,37 +626,48 @@ class CARMDataset(Dataset):
             if end > L:
                 act_indices = act_indices + [L - 1] * (end - L)
             
-            # Compute relative actions: relative = inv(ref_pose) @ target_pose
+            # Compute relative actions (continuous) and gripper labels (discrete)
             act_seq_list = []
+            gripper_label_list = []
             for idx in act_indices:
                 raw_action = raw_actions[idx]
                 target_pose = raw_action[7:14]
                 relative_pose = compute_relative_pose_transform(ref_pose, target_pose)
+                gripper_val = raw_action[14]
                 
+                # Continuous action (no gripper)
                 if self.action_mode == 'full':
-                    rel_action = np.zeros(15, dtype=np.float32)
-                    rel_action[:7] = raw_action[:7]
-                    rel_action[7:14] = relative_pose
-                    rel_action[14] = raw_action[14]
+                    # full: joint(6) + relative_pose(7) = 13D
+                    rel_action = np.zeros(self.action_dim, dtype=np.float32)
+                    rel_action[:6] = raw_action[:6]  # joints only
+                    rel_action[6:13] = relative_pose
                 else:  # ee_only
-                    rel_action = np.concatenate([relative_pose, [raw_action[14]]], dtype=np.float32)
+                    # ee_only: relative_pose(7) = 7D
+                    rel_action = relative_pose.astype(np.float32)
                 
                 act_seq_list.append(rel_action)
+                
+                # Gripper label: 1 = close, 0 = open
+                gripper_label_list.append(1 if gripper_val < self.gripper_threshold else 0)
             
             act_seq = np.stack(act_seq_list, axis=0)
+            gripper_label = np.array(gripper_label_list, dtype=np.int64)
             
-            # Apply normalization if configured
+            # Apply normalization if configured (only to continuous actions)
             if self.action_normalizer is not None:
                 act_seq = self.action_normalizer.transform(act_seq)
             
             act_seq = torch.from_numpy(act_seq).float().to(self.device)
+            gripper_label = torch.from_numpy(gripper_label).long().to(self.device)
         
         assert obs_seq["state"].shape[0] == self.obs_horizon
         assert act_seq.shape[0] == self.pred_horizon
+        assert gripper_label.shape[0] == self.pred_horizon
         
         return {
             "observations": obs_seq,
-            "actions": act_seq,
+            "actions_cont": act_seq,
+            "gripper_label": gripper_label,
         }
     
     def __len__(self):
@@ -682,7 +812,7 @@ def create_agent(algorithm: str, action_dim: int, global_cond_dim: int, args):
 
 def save_ckpt(run_name, tag, agent, ema_agent, visual_encoder=None, state_encoder=None, 
               action_normalizer=None, args=None, optimizer=None, lr_scheduler=None, 
-              ema=None, iteration=None):
+              ema=None, iteration=None, gripper_head=None):
     """Save checkpoint."""
     os.makedirs(f"runs/{run_name}/checkpoints", exist_ok=True)
     ckpt = {
@@ -693,6 +823,8 @@ def save_ckpt(run_name, tag, agent, ema_agent, visual_encoder=None, state_encode
         ckpt["visual_encoder"] = visual_encoder.state_dict()
     if state_encoder is not None:
         ckpt["state_encoder"] = state_encoder.state_dict()
+    if gripper_head is not None:
+        ckpt["gripper_head"] = gripper_head.state_dict()
     if optimizer is not None:
         ckpt["optimizer"] = optimizer.state_dict()
     if lr_scheduler is not None:
@@ -741,15 +873,18 @@ if __name__ == "__main__":
     data_info = get_carm_data_info(args.demo_path)
     print(f"Dataset info: {data_info}")
     
-    # Determine action dimension based on mode
+    # Determine action dimension based on mode (continuous only, gripper is discrete)
     if args.action_mode == "full":
-        action_dim = 15  # joint(6) + gripper(1) + rel_pose(7) + gripper(1)
+        action_dim = 13  # joint(6) + rel_pose(7), gripper is now discrete
+        action_dim_full = 15  # Original full dimension for inference compatibility
     else:  # ee_only
-        action_dim = 8   # rel_pose(7) + gripper(1)
+        action_dim = 7   # rel_pose(7), gripper is now discrete
+        action_dim_full = 8  # Original full dimension for inference compatibility
     
     state_dim = data_info['state_dim']  # 7 (qpos_joint)
     
-    print(f"Action mode: {args.action_mode}, action_dim: {action_dim}")
+    print(f"Action mode: {args.action_mode}, action_dim (continuous): {action_dim}")
+    print(f"Gripper: discrete classification (threshold={args.gripper_threshold})")
     print(f"State dim: {state_dim}")
     
     # Wandb tracking
@@ -804,6 +939,7 @@ if __name__ == "__main__":
         action_mode=args.action_mode,
         precompute_actions=args.precompute_actions,
         action_normalizer=action_normalizer,
+        gripper_threshold=args.gripper_threshold,
     )
     
     sampler = RandomSampler(dataset, replacement=False)
@@ -874,6 +1010,16 @@ if __name__ == "__main__":
     agent = create_agent(args.algorithm, action_dim, global_cond_dim, args).to(device)
     print(f"Agent ({args.algorithm}) parameters: {sum(p.numel() for p in agent.parameters()) / 1e6:.2f}M")
     
+    # Create gripper classification head
+    gripper_head = GripperHead(
+        obs_dim=visual_feature_dim + encoded_state_dim,
+        obs_horizon=args.obs_horizon,
+        pred_horizon=args.pred_horizon,
+        hidden_dim=args.gripper_head_hidden_dim,
+        num_classes=2,
+    ).to(device)
+    print(f"GripperHead parameters: {sum(p.numel() for p in gripper_head.parameters()) / 1e6:.4f}M")
+    
     # Setup optimizer with optional separate learning rates for backbone
     param_groups = []
     
@@ -915,6 +1061,13 @@ if __name__ == "__main__":
             'lr': args.lr,
             'name': 'state_encoder'
         })
+    
+    # Gripper head parameters
+    param_groups.append({
+        'params': list(gripper_head.parameters()),
+        'lr': args.lr,
+        'name': 'gripper_head'
+    })
     
     optimizer = optim.AdamW(
         params=param_groups,
@@ -962,6 +1115,13 @@ if __name__ == "__main__":
         if state_encoder is not None and "state_encoder" in ckpt:
             state_encoder.load_state_dict(ckpt["state_encoder"], strict=True)
             print("  Loaded state_encoder weights")
+        
+        # Load gripper head weights
+        if "gripper_head" in ckpt:
+            gripper_head.load_state_dict(ckpt["gripper_head"], strict=True)
+            print("  Loaded gripper_head weights")
+        else:
+            print("  gripper_head not in checkpoint (will train from scratch)")
         
         # Load EMA state
         if "ema" in ckpt:
@@ -1029,6 +1189,7 @@ if __name__ == "__main__":
     # Training loop
     agent.train()
     visual_encoder.train()
+    gripper_head.train()
     if state_encoder is not None:
         state_encoder.train()
     
@@ -1045,27 +1206,51 @@ if __name__ == "__main__":
         
         # Encode observations
         obs_seq = data_batch["observations"]
-        action_seq = data_batch["actions"]
+        action_cont_seq = data_batch["actions_cont"]  # [B, pred_horizon, action_dim] (continuous, no gripper)
+        gripper_label = data_batch["gripper_label"]   # [B, pred_horizon] (discrete labels)
         obs_features = encode_observations(obs_seq)
         
-        # Compute loss
+        # Compute flow/diffusion loss for continuous actions
         loss_dict = agent.compute_loss(
             obs_features=obs_features,
-            actions=action_seq,
+            actions=action_cont_seq,
         )
         
         if isinstance(loss_dict, dict):
-            total_loss = loss_dict["loss"]
+            flow_loss = loss_dict["loss"]
             losses = {k: v.item() if isinstance(v, torch.Tensor) else v for k, v in loss_dict.items()}
         else:
-            total_loss = loss_dict
-            losses = {"total_loss": total_loss.item()}
+            flow_loss = loss_dict
+            losses = {"flow_loss": flow_loss.item()}
+        
+        # Compute gripper classification loss (with class weight for imbalance)
+        gripper_logits = gripper_head(obs_features)  # [B, pred_horizon, 2]
+        gripper_class_weights = torch.tensor([1.0, args.gripper_class_weight_close], device=device)
+        gripper_ce_loss = F.cross_entropy(
+            gripper_logits.view(-1, 2),  # [B * pred_horizon, 2]
+            gripper_label.view(-1),       # [B * pred_horizon]
+            weight=gripper_class_weights,
+        )
+        
+        # Compute gripper accuracy
+        with torch.no_grad():
+            gripper_pred = gripper_logits.argmax(dim=-1)  # [B, pred_horizon]
+            gripper_acc = (gripper_pred == gripper_label).float().mean()
+        
+        # Total loss
+        total_loss = flow_loss + args.gripper_ce_weight * gripper_ce_loss
+        
+        # Update losses dict for logging
+        losses["gripper_ce"] = gripper_ce_loss.item()
+        losses["gripper_acc"] = gripper_acc.item()
+        losses["total_loss"] = total_loss.item()
         
         # Backward pass
         optimizer.zero_grad()
         total_loss.backward()
         torch.nn.utils.clip_grad_norm_(agent.parameters(), 1.0)
         torch.nn.utils.clip_grad_norm_(visual_encoder.parameters(), 1.0)
+        torch.nn.utils.clip_grad_norm_(gripper_head.parameters(), 1.0)
         if state_encoder is not None:
             torch.nn.utils.clip_grad_norm_(state_encoder.parameters(), 1.0)
         optimizer.step()
@@ -1090,10 +1275,10 @@ if __name__ == "__main__":
             copy_ema_to_eval_agent()
             save_ckpt(run_name, f"iter_{iteration}", agent, ema_agent, 
                      visual_encoder, state_encoder, action_normalizer, args,
-                     optimizer, lr_scheduler, ema, iteration)
+                     optimizer, lr_scheduler, ema, iteration, gripper_head)
             save_ckpt(run_name, "latest", agent, ema_agent,
                      visual_encoder, state_encoder, action_normalizer, args,
-                     optimizer, lr_scheduler, ema, iteration)
+                     optimizer, lr_scheduler, ema, iteration, gripper_head)
         
         pbar.update(1)
         pbar.set_postfix({k: f"{v:.4f}" for k, v in losses.items()})
@@ -1103,7 +1288,7 @@ if __name__ == "__main__":
     copy_ema_to_eval_agent()
     save_ckpt(run_name, "final", agent, ema_agent, 
              visual_encoder, state_encoder, action_normalizer, args,
-             optimizer, lr_scheduler, ema, args.total_iters)
+             optimizer, lr_scheduler, ema, args.total_iters, gripper_head)
     log_metrics(args.total_iters, losses)
     
     writer.close()

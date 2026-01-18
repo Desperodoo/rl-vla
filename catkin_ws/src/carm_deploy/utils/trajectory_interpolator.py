@@ -178,8 +178,10 @@ class ActionChunkManager:
             temporal_factor_k: 时间加权因子
         """
         self.temporal_factor_k = temporal_factor_k
-        self.trajectories = []
+        self.trajectories = []  # list of (chunk_id, TrajectoryInterpolator)
         self.lock = threading.Lock()
+        self._next_chunk_id = 0  # 递增 chunk ID
+        self._last_fused_chunk_ids = []  # 上次融合使用的 chunk_ids
     
     def add_trajectory(self, trajectory):
         """
@@ -187,9 +189,15 @@ class ActionChunkManager:
         
         Args:
             trajectory: TrajectoryInterpolator 实例
+            
+        Returns:
+            int: 分配给该轨迹的 chunk_id
         """
         with self.lock:
-            self.trajectories.append(trajectory)
+            chunk_id = self._next_chunk_id
+            self._next_chunk_id += 1
+            self.trajectories.append((chunk_id, trajectory))
+            return chunk_id
     
     def get_fused_action(self, query_time):
         """
@@ -203,20 +211,23 @@ class ActionChunkManager:
         """
         with self.lock:
             action_candidates = []
+            chunk_ids_used = []
             valid_offset = 0
             
             # 收集所有有效的动作候选
-            for idx, traj in enumerate(self.trajectories):
+            for idx, (chunk_id, traj) in enumerate(self.trajectories):
                 action = traj.get_once(query_time)
                 if action is None:
                     valid_offset = idx
                     continue
                 action_candidates.append(action)
+                chunk_ids_used.append(chunk_id)
             
             # 清理过期的轨迹
             self.trajectories = self.trajectories[valid_offset:]
             
             if len(action_candidates) < 1:
+                self._last_fused_chunk_ids = []
                 return None
             
             # 时间加权融合
@@ -226,6 +237,7 @@ class ActionChunkManager:
             exp_weights = exp_weights[:, np.newaxis]
             
             fused_action = (all_actions * exp_weights).sum(axis=0)
+            self._last_fused_chunk_ids = chunk_ids_used
             return fused_action
 
     def get_fused_action_with_meta(self, query_time):
@@ -237,28 +249,32 @@ class ActionChunkManager:
 
         Returns:
             tuple: (fused_action, meta)
-                   meta: {"candidate_timestamps": [...], "weights": [...], "num_candidates": int}
+                   meta: {"candidate_timestamps": [...], "weights": [...], "num_candidates": int, "used_chunk_ids": [...]}
         """
         with self.lock:
             action_candidates = []
             candidate_timestamps = []
+            chunk_ids_used = []
             valid_offset = 0
 
-            for idx, traj in enumerate(self.trajectories):
+            for idx, (chunk_id, traj) in enumerate(self.trajectories):
                 action, ts = traj.get_once_with_timestamp(query_time)
                 if action is None:
                     valid_offset = idx
                     continue
                 action_candidates.append(action)
                 candidate_timestamps.append(ts)
+                chunk_ids_used.append(chunk_id)
 
             self.trajectories = self.trajectories[valid_offset:]
 
             if len(action_candidates) < 1:
+                self._last_fused_chunk_ids = []
                 return None, {
                     "candidate_timestamps": [],
                     "weights": [],
                     "num_candidates": 0,
+                    "used_chunk_ids": [],
                 }
 
             all_actions = np.array(action_candidates)
@@ -267,17 +283,25 @@ class ActionChunkManager:
             exp_weights = exp_weights[:, np.newaxis]
 
             fused_action = (all_actions * exp_weights).sum(axis=0)
+            self._last_fused_chunk_ids = chunk_ids_used
 
             return fused_action, {
                 "candidate_timestamps": candidate_timestamps,
                 "weights": exp_weights.squeeze(-1).tolist(),
                 "num_candidates": len(action_candidates),
+                "used_chunk_ids": chunk_ids_used,
             }
     
     def clear(self):
         """清空所有轨迹"""
         with self.lock:
             self.trajectories.clear()
+            self._last_fused_chunk_ids = []
+    
+    def get_last_fused_chunk_ids(self):
+        """获取上次融合使用的 chunk_ids（供外部查询，如数据采集）"""
+        with self.lock:
+            return list(self._last_fused_chunk_ids)
     
     def __len__(self):
         with self.lock:
