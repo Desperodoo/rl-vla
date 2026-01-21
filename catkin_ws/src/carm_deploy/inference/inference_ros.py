@@ -8,20 +8,12 @@ CARM 机械臂 ROS 策略推理主程序
     - flow_matching: Flow Matching Policy
     - diffusion_policy: DDPM-based Diffusion Policy
 
-测试模式:
-    --dry_run: 只推理不执行动作（安全测试）
-    --slow_mode: 慢速执行（5Hz）
-    --log_dir: 保存推理日志
-
 使用方法:
-    # 干运行模式（不执行动作）
-    rosrun carm_deploy inference_ros.py --pretrain /path/to/model.pt --dry_run
-    
-    # 慢速模式（5Hz）
-    rosrun carm_deploy inference_ros.py --pretrain /path/to/model.pt --slow_mode
-    
-    # 正常模式（30Hz）
+    # 正常推理 (30Hz)
     rosrun carm_deploy inference_ros.py --pretrain /path/to/model.pt
+    
+    # 启用干预和采集
+    rosrun carm_deploy inference_ros.py --pretrain /path/to/model.pt --intervention --record_inference
 """
 
 import argparse
@@ -67,10 +59,12 @@ from diffusion_policy.algorithms import (
 # 安全控制和日志
 from core.safety_controller import SafetyController
 from inference.inference_logger import InferenceLogger
+from inference.inference_recorder import InferenceRecorder
 
 from core.env_ros import RealEnvironment
 from utils.trajectory_interpolator import VecTF, ActionChunkManager
 from utils.timeline_logger import TimelineLogger
+from utils.keyboard_intervention import KeyboardInterventionHandler, InterventionApplier
 
 
 def pose_to_transform_matrix(position, quaternion):
@@ -160,35 +154,6 @@ class PolicyInterface:
             输出字典，包含 'a_hat' (动作预测)
         """
         raise NotImplementedError("Subclass must implement __call__()")
-
-
-class DummyPolicy(PolicyInterface):
-    """
-    虚拟策略（用于测试）
-    返回零动作
-    """
-    
-    def load_model(self, model_path):
-        rospy.loginfo(f"DummyPolicy: would load model from {model_path}")
-        self.model = True
-    
-    def __call__(self, inputs):
-        # 返回零动作，形状为 [1, horizon, action_dim]
-        batch_size = 1
-        horizon = 16
-        action_dim = 15
-        
-        # 获取当前 qpos 作为动作
-        qpos = inputs['qpos'].cpu().numpy()  # [B, 7]
-        
-        # 扩展为 horizon 步
-        actions = np.zeros((batch_size, horizon, action_dim))
-        actions[:, :, :7] = qpos  # 关节位置
-        actions[:, :, 7:14] = [0, 0, 0, 0, 0, 0, 1]  # 单位四元数表示零位移
-        actions[:, :, 6] = qpos[:, -1]  # gripper
-        actions[:, :, 14] = qpos[:, -1]  # gripper
-        
-        return {'a_hat': torch.from_numpy(actions).float()}
 
 
 class RealPolicy(PolicyInterface):
@@ -704,10 +669,7 @@ class InferenceNode:
     """
     ROS 推理节点
     
-    支持测试模式:
-        - dry_run: 只推理不执行动作（安全测试）
-        - slow_mode: 慢速执行（5Hz）
-        - normal: 正常速度
+    支持人工干预和数据采集
     """
     
     def __init__(self, config):
@@ -719,28 +681,20 @@ class InferenceNode:
         """
         self.config = config
         
-        # 测试模式
-        self.dry_run = config.get('dry_run', False)
-        self.slow_mode = config.get('slow_mode', False)
-        
         # 参数
         self.temporal_factor_k = config.get('temporal_factor_k', 0.05)  # 默认 0.05
         self.desire_inference_freq = config.get('desire_inference_freq', 30)  # 默认 30Hz
         self.pos_lookahead_step = config.get('pos_lookahead_step', 1)
         self.pos_lookahead_duration = config.get('pos_lookahead_duration', 0.015)
         self.joint_cmd_mode = config.get('joint_cmd_mode', False)
-        self.check_workspace = not config.get('no_workspace_check', False)  # 默认开启 workspace 检测
+        self.check_workspace = True  # 默认开启 workspace 检测
         
-        # 如果是 slow_mode，降低推理频率并调整相关参数
-        if self.slow_mode:
-            self.desire_inference_freq = 5
-            # slow_mode 下使用更小的时间加权因子，因为轨迹更新较慢
-            self.temporal_factor_k = config.get('temporal_factor_k', 0.01)
-            rospy.logwarn(f"SLOW MODE: Inference frequency set to {self.desire_inference_freq} Hz")
-            rospy.logwarn(f"SLOW MODE: temporal_factor_k adjusted to {self.temporal_factor_k}")
-        
-        if self.dry_run:
-            rospy.logwarn("DRY RUN MODE: Actions will NOT be executed on robot!")
+        # Action Chunk 执行模式参数
+        # execution_mode: 'temporal_ensemble' (原始) 或 'receding_horizon' (标准 action chunking)
+        self.execution_mode = config.get('execution_mode', 'temporal_ensemble')
+        self.max_active_chunks = config.get('max_active_chunks', None)  # None = 不限制
+        self.crossfade_steps = config.get('crossfade_steps', 0)  # 0 = 无 crossfade
+        self.truncate_at_act_horizon = config.get('truncate_at_act_horizon', False)  # 是否截断到 act_horizon
         
         # 初始化环境
         rospy.loginfo("Initializing environment...")
@@ -786,11 +740,26 @@ class InferenceNode:
                 act_horizon=self._act_horizon,
                 pred_horizon=self._pred_horizon,
                 obs_horizon=self._obs_horizon,
+                # 新增: 执行模式参数
+                execution_mode=self.execution_mode,
+                max_active_chunks=self.max_active_chunks,
+                crossfade_steps=self.crossfade_steps,
+                truncate_at_act_horizon=self.truncate_at_act_horizon,
             )
         
         # 动作管理器
-        self.action_manager = ActionChunkManager(temporal_factor_k=self.temporal_factor_k)
+        self.action_manager = ActionChunkManager(
+            temporal_factor_k=self.temporal_factor_k,
+            execution_mode=self.execution_mode,
+            max_active_chunks=self.max_active_chunks,
+            crossfade_steps=self.crossfade_steps,
+        )
         self.lock_tfs = threading.Lock()
+        
+        rospy.loginfo(f"ActionChunkManager: mode={self.execution_mode}, "
+                      f"max_active_chunks={self.max_active_chunks}, "
+                      f"crossfade_steps={self.crossfade_steps}, "
+                      f"truncate_at_act_horizon={self.truncate_at_act_horizon}")
         
         # 控制变量
         self.running = True
@@ -804,31 +773,205 @@ class InferenceNode:
         self._last_gripper_value = None
         self._last_gripper_log_time = 0.0
         
+        # Episode 状态（用于多 episode 采集）
+        # 只有启用 record_inference 时才等待按键开始
+        self.record_inference_enabled = config.get('record_inference', False)
+        self.waiting_start = self.record_inference_enabled  # 启用采集时等待 R 键开始
+        self.episode_paused = self.waiting_start  # 与 waiting_start 一致
+        self.pending_save = False  # 等待保存确认
+        self.max_steps = config.get('max_steps', 99999)  # 每个 episode 最大步数
+        
+        # 干预和采集模块
+        self.intervention_enabled = config.get('intervention', False)
+        self.intervention_handler = None
+        self.inference_recorder = None
+        
+        if self.intervention_enabled or self.record_inference_enabled:
+            self._init_intervention_and_recording(config)
+        
         # 启动推理线程
         self.inference_thread = threading.Thread(target=self._inference_loop, daemon=True)
         self.inference_thread.start()
         
         rospy.loginfo("InferenceNode initialized")
     
+    def _init_intervention_and_recording(self, config):
+        """初始化干预和数据采集模块"""
+        # 干预处理器
+        if self.intervention_enabled:
+            self.intervention_handler = KeyboardInterventionHandler(
+                xyz_scale=config.get('intervention_xyz_scale', 0.005),
+                gripper_open=config.get('intervention_gripper_open', 1.0),
+                gripper_close=config.get('intervention_gripper_close', 0.0),
+                mode=config.get('intervention_mode', 'replace'),
+            )
+            
+            # 设置录制控制回调
+            def on_record_action(action):
+                self._handle_record_action(action)
+            
+            def on_quit():
+                rospy.loginfo("Quit requested via keyboard")
+                self.running = False
+            
+            self.intervention_handler.set_record_callback(on_record_action)
+            self.intervention_handler.set_quit_callback(on_quit)
+            self.intervention_handler.start()
+            rospy.loginfo("Keyboard intervention enabled")
+        
+        # 数据采集记录器
+        if self.record_inference_enabled:
+            record_dir = config.get('record_dir', '')
+            if not record_dir:
+                record_dir = config.get('log_dir', '')
+            if not record_dir:
+                from utils.paths import get_inference_logs_dir
+                record_dir = get_inference_logs_dir()
+            
+            # 获取 action_dim
+            action_dim = getattr(self.policy, 'action_dim_full', 15)
+            
+            self.inference_recorder = InferenceRecorder(
+                output_dir=record_dir,
+                pred_horizon=self._pred_horizon,
+                action_dim=action_dim,
+            )
+            rospy.loginfo(f"Inference recording enabled, output_dir: {record_dir}")
+            
+            # 启动时等待按 R 开始第一个 episode
+            rospy.loginfo("=" * 60)
+            rospy.loginfo("Multi-episode recording mode enabled")
+            rospy.loginfo("Press 'R' to start recording an episode")
+            rospy.loginfo("Press 'R' again to stop and choose to save (Y) or discard (N)")
+            rospy.loginfo("After save/discard, arm will return to init position")
+            rospy.loginfo("Press 'R' to start next episode")
+            rospy.loginfo("Press Ctrl+C to quit")
+            rospy.loginfo("=" * 60)
+    
+    def _handle_record_action(self, action: str):
+        """
+        处理录制相关的键盘动作
+        
+        状态机:
+        1. waiting_start=True, pending_save=False: 等待按 R 开始
+        2. waiting_start=False, pending_save=False: 正在录制，按 R 停止
+        3. waiting_start=False, pending_save=True: 等待 Y/N 确认保存
+        """
+        if action == 'toggle':  # R 键
+            if self.pending_save:
+                # 正在等待保存确认，忽略 R 键
+                rospy.logwarn("Please confirm save first (Y/N)")
+                return
+            
+            if self.waiting_start:
+                # 开始新 episode
+                self._start_new_episode()
+            else:
+                # 停止当前 episode，等待确认
+                self._stop_current_episode()
+                
+        elif action == 'confirm':  # Y 键
+            if self.pending_save:
+                self._confirm_save_episode(save=True)
+            else:
+                rospy.logwarn("No episode waiting for save")
+                
+        elif action == 'discard':  # N 键
+            if self.pending_save:
+                self._confirm_save_episode(save=False)
+            else:
+                rospy.logwarn("No episode to discard")
+    
+    def _start_new_episode(self):
+        """开始新的 episode"""
+        self.waiting_start = False
+        self.episode_paused = False
+        self.pending_save = False
+        
+        # 清空 action chunk 管理器
+        with self.lock_tfs:
+            self.action_manager.clear()
+        
+        # 开始录制
+        if self.inference_recorder:
+            self.inference_recorder.start_recording()
+        
+        self.step_count = 0
+        rospy.loginfo("=" * 60)
+        rospy.loginfo("Episode started! Robot is now under policy control.")
+        rospy.loginfo("Press 'R' to stop recording")
+        rospy.loginfo("=" * 60)
+    
+    def _stop_current_episode(self):
+        """停止当前 episode，等待保存确认"""
+        self.episode_paused = True
+        self.pending_save = True
+        
+        # 停止录制
+        if self.inference_recorder:
+            self.inference_recorder.stop_recording()
+        
+        step_count = self.step_count
+        rospy.loginfo("=" * 60)
+        rospy.loginfo(f"Episode stopped - {step_count} steps recorded")
+        rospy.loginfo("Save this episode? Press 'Y' to save, 'N' to discard")
+        rospy.loginfo("=" * 60)
+    
+    def _confirm_save_episode(self, save: bool):
+        """确认保存或丢弃 episode，然后初始化机械臂等待下一个 episode"""
+        if save:
+            # 保存
+            if self.inference_recorder:
+                filepath = self.inference_recorder.confirm_save()
+                if filepath:
+                    rospy.loginfo(f"Episode saved to: {filepath}")
+        else:
+            # 丢弃
+            if self.inference_recorder:
+                self.inference_recorder.discard()
+            rospy.loginfo("Episode discarded")
+        
+        self.pending_save = False
+        
+        # 初始化机械臂回到初始位置
+        rospy.loginfo("Returning to initial position...")
+        self._reinitialize_arm()
+        
+        # 进入等待开始状态
+        self.waiting_start = True
+        self.episode_paused = True
+        
+        rospy.loginfo("=" * 60)
+        rospy.loginfo("Ready for next episode. Press 'R' to start recording")
+        rospy.loginfo("=" * 60)
+    
+    def _reinitialize_arm(self):
+        """重新初始化机械臂到初始位置"""
+        try:
+            # 使用 env 的 init_status 方法
+            self.env.init_status()
+            rospy.loginfo("Arm returned to initial position")
+        except Exception as e:
+            rospy.logerr(f"Failed to reinitialize arm: {e}")
+    
     def _create_policy(self, config):
         """
         创建策略实例
-        
-        根据 pretrain 路径决定使用 RealPolicy 还是 DummyPolicy
         """
         pretrain_path = config.get('pretrain', '')
         
-        if pretrain_path and os.path.exists(pretrain_path):
-            # 使用真实策略
-            rospy.loginfo(f"Loading real policy from: {pretrain_path}")
-            policy = RealPolicy(config)
-            policy.load_model(pretrain_path)
-            return policy
-        else:
-            # 使用虚拟策略（用于测试）
-            rospy.logwarn("No valid pretrain model specified, using dummy policy")
-            policy = DummyPolicy(config)
-            return policy
+        if not pretrain_path:
+            rospy.logerr("No pretrain model specified! Use --pretrain to specify model path.")
+            raise SystemExit(1)
+        
+        if not os.path.exists(pretrain_path):
+            rospy.logerr(f"Pretrain model not found: {pretrain_path}")
+            raise SystemExit(1)
+        
+        rospy.loginfo(f"Loading policy from: {pretrain_path}")
+        policy = RealPolicy(config)
+        policy.load_model(pretrain_path)
+        return policy
     
     def _create_safety_controller(self, config):
         """
@@ -909,6 +1052,11 @@ class InferenceNode:
         
         with torch.inference_mode():
             while self.running and not rospy.is_shutdown():
+                # 如果 episode 暂停（等待保存确认或等待开始），不执行推理
+                if self.episode_paused or self.waiting_start:
+                    time.sleep(0.1)
+                    continue
+                
                 # 获取观测
                 self.latest_obs = self.env.get_observation()
                 if self.latest_obs is None:
@@ -1058,6 +1206,35 @@ class InferenceNode:
                                         safety_events.extend(grip_warnings)
                                         safety_clipped = True
                     
+                    # 保存模型原始输出（安全检查后，干预前）
+                    action_model = all_actions.copy()
+                    
+                    # 应用键盘干预（如果启用）
+                    intervention_mask = None
+                    if self.intervention_enabled and self.intervention_handler is not None:
+                        intervention = self.intervention_handler.get_intervention()
+                        if intervention is not None:
+                            # 确定 action 格式
+                            action_format = 'joint' if self.joint_cmd_mode else 'ee_delta'
+                            all_actions, intervention_mask = InterventionApplier.apply_to_action_chunk(
+                                all_actions, intervention, action_format=action_format
+                            )
+                            rospy.loginfo_throttle(2.0, f"Intervention applied: mask={intervention_mask[0].sum()} dims")
+                    
+                    # 保存干预后的 action
+                    action_intervened = all_actions.copy()
+                    
+                    # 记录数据（如果启用采集）
+                    if self.record_inference_enabled and self.inference_recorder is not None:
+                        if self.inference_recorder.is_recording:
+                            self.inference_recorder.record_step(
+                                obs=self.latest_obs,
+                                action_model=action_model,
+                                action_intervened=action_intervened,
+                                intervention_mask=intervention_mask,
+                                timestamp=time.time(),
+                            )
+                    
                     # 记录第一个动作用于下一次参考
                     self.last_action = all_actions[0].copy()
                     
@@ -1070,18 +1247,6 @@ class InferenceNode:
                         safety_clipped=safety_clipped,
                         safety_warnings=safety_events if safety_events else None,
                     )
-                    
-                    # 如果是 dry_run 模式，跳过动作执行
-                    if self.dry_run:
-                        self.step_count += 1
-                        rospy.loginfo_throttle(1.0, 
-                            f"[DRY RUN] Step {self.step_count}, Inference: {inference_time:.4f}s, "
-                            f"Actions: {all_actions.shape}, Safety events: {len(safety_events)}")
-                        
-                        wait_tm = desire_period - (time.time() - last_start)
-                        if wait_tm > 0:
-                            time.sleep(wait_tm)
-                        continue
                     
                     # 转换动作空间 (full mode: 15D)
                     # all_actions: [joint(6), gripper(1), relative_end_pose(7), gripper(1)]
@@ -1108,13 +1273,20 @@ class InferenceNode:
                         chunk_base_time = time.time()
                     tf = VecTF({})
                     
-                    # 使用固定的动作执行间隔 (0.033s ≈ 30Hz)，而不是推理周期
-                    # 这样即使在 slow_mode 下，动作轨迹也能保持合理的时间分布
+                    # 使用固定的动作执行间隔 (0.033s ≈ 30Hz)
                     action_interval = 1.0 / 30.0  # 30Hz 的动作执行频率
+                    
+                    # 根据 truncate_at_act_horizon 决定添加多少步动作到 chunk
+                    # 标准 action chunking: 只添加前 act_horizon 步
+                    # 旧行为: 添加所有 pred_horizon 步
+                    if self.truncate_at_act_horizon:
+                        num_actions_to_add = min(self._act_horizon, len(all_actions))
+                    else:
+                        num_actions_to_add = len(all_actions)
                     
                     self.pos_lookahead_step_start_idx += 1
                     chunk_targets = []
-                    for i in range(len(all_actions)):
+                    for i in range(num_actions_to_add):
                         if self.pos_lookahead_step == 1:
                             target_time = chunk_base_time + i * action_interval
                             tf.append(target_time, all_actions[i].tolist())
@@ -1147,14 +1319,21 @@ class InferenceNode:
                             action_interval=action_interval,
                             pred_horizon=len(all_actions),
                             act_horizon=self._act_horizon,
+                            num_actions_added=num_actions_to_add,  # 实际添加的动作数
+                            truncated=self.truncate_at_act_horizon,
                             delta_chunk_obs=delta_chunk_obs,
                             chunk_targets=chunk_targets,
                         )
                     
                     self.step_count += 1
-                    rospy.loginfo_throttle(1.0, 
+                    rospy.loginfo_throttle(5.0, 
                         f"Step {self.step_count}, Inference: {inference_time:.4f}s, "
                         f"Actions: {all_actions.shape}")
+                    
+                    # 检查是否达到最大步数
+                    if self.step_count >= self.max_steps:
+                        rospy.logwarn(f"Reached max_steps ({self.max_steps}), auto-stopping episode...")
+                        self._stop_current_episode()
                     
                 except Exception as e:
                     import traceback
@@ -1170,10 +1349,14 @@ class InferenceNode:
         """控制主循环"""
         rospy.loginfo("Control loop started")
         
-        # 控制频率: slow_mode 下稍微降低以减少 CPU 负载
-        control_period = 0.005 if not self.slow_mode else 0.01  # 200Hz / 100Hz
+        control_period = 0.005  # 200Hz
         
         while self.running and not rospy.is_shutdown():
+            # 如果 episode 暂停，不执行控制
+            if self.episode_paused or self.waiting_start:
+                time.sleep(0.05)
+                continue
+            
             # 获取融合后的动作
             tm = time.time()
             meta = None
@@ -1208,7 +1391,7 @@ class InferenceNode:
                     grip_val = float(action[-1])
 
             now = time.time()
-            if grip_val is not None and (now - self._last_gripper_log_time) >= 1.0:
+            if grip_val is not None and (now - self._last_gripper_log_time) >= 5.0:
                 delta = None if self._last_gripper_value is None else (grip_val - self._last_gripper_value)
                 hz_str = f"{self._control_hz_ema:.1f}Hz" if self._control_hz_ema is not None else "n/a"
                 rospy.loginfo(
@@ -1251,6 +1434,18 @@ class InferenceNode:
         
         if self.inference_thread.is_alive():
             self.inference_thread.join(timeout=2.0)
+        
+        # 停止键盘干预
+        if self.intervention_handler is not None:
+            self.intervention_handler.stop()
+        
+        # 处理未保存的录制数据
+        if self.inference_recorder is not None:
+            if self.inference_recorder.is_recording:
+                self.inference_recorder.stop_recording()
+            if self.inference_recorder.is_pending_save:
+                rospy.logwarn("Discarding unsaved recording data on shutdown")
+                self.inference_recorder.discard()
         
         # 结束并保存日志
         if self.episode_started:
@@ -1319,6 +1514,21 @@ def parse_args():
     parser.add_argument('--use_ema', action='store_true',
                         help='Use EMA model for inference (recommended only for 1-step inference, otherwise Non-EMA is better)')
     
+    # Action Chunk 执行模式参数
+    parser.add_argument('--execution_mode', type=str, default='temporal_ensemble',
+                        choices=['temporal_ensemble', 'receding_horizon'],
+                        help='Action chunk execution mode: '
+                             'temporal_ensemble (original, multi-chunk time-weighted fusion) or '
+                             'receding_horizon (standard action chunking, only use latest chunk)')
+    parser.add_argument('--max_active_chunks', type=int, default=None,
+                        help='Max active chunks in manager (default: None for temporal_ensemble, 2 for receding_horizon)')
+    parser.add_argument('--crossfade_steps', type=int, default=0,
+                        help='Number of steps for crossfade smoothing when switching chunks (receding_horizon mode only)')
+    parser.add_argument('--truncate_at_act_horizon', action='store_true', default=True,
+                        help='Truncate action chunk at act_horizon (standard action chunking behavior)')
+    parser.add_argument('--act_horizon', type=int, default=10,
+                        help='Action horizon for chunk truncation (default: same as pred_horizon)')
+    
     # 控制参数
     parser.add_argument('--pos_lookahead_step', type=int, default=1,
                         help='Position lookahead step')
@@ -1326,32 +1536,14 @@ def parse_args():
                         help='Position lookahead duration')
     parser.add_argument('--joint_cmd_mode', action='store_true',
                         help='Use joint command mode instead of end-effector pose')
-    parser.add_argument('--not_origin', action='store_true',
-                        help='Skip moving to initial pose on startup')
-    
-    # 测试模式参数
-    parser.add_argument('--dry_run', action='store_true',
-                        help='Dry run mode: inference only, no action execution (safest)')
-    parser.add_argument('--slow_mode', action='store_true',
-                        help='Slow mode: run at 5Hz instead of 30Hz (safer)')
-    
-    # 安全和确认参数
-    parser.add_argument('--no_confirm', action='store_true',
-                        help='Skip user confirmation before initializing arm position')
-    parser.add_argument('--no_return_home', action='store_true',
-                        help='Do not return to any position on exit (robot stays in current position)')
-    parser.add_argument('--return_to_init', action='store_true',
-                        help='Return to init pose on exit instead of zero position (default: return to zero)')
-    parser.add_argument('--init_speed', type=float, default=2.0,
-                        help='Speed level for initialization movement (0-10, default: 2.0 = slow)')
     
     # 安全控制参数
     parser.add_argument('--safety_config', type=str, default='',
                         help='Path to safety config JSON file (required)')
     parser.add_argument('--data_dir', type=str, default='',
                         help='Data directory for auto-loading safety limits from dataset_info.json')
-    parser.add_argument('--no_workspace_check', action='store_true',
-                        help='Disable workspace boundary checking (NOT recommended)')
+    parser.add_argument('--init_speed', type=float, default=2.0,
+                        help='Speed level for initialization movement (0-10, default: 2.0 = slow)')
     
     # 日志参数
     parser.add_argument('--log_dir', type=str, default='',
@@ -1362,6 +1554,25 @@ def parse_args():
     # 可视化
     parser.add_argument('--vis', action='store_true', default=True,
                         help='Visualize images in OpenCV window')
+    
+    # 干预和数据采集参数
+    parser.add_argument('--record_inference', action='store_true',
+                        help='Enable inference data recording')
+    parser.add_argument('--intervention', action='store_true',
+                        help='Enable keyboard intervention during inference')
+    parser.add_argument('--intervention_mode', type=str, default='replace',
+                        choices=['replace', 'additive'],
+                        help='Intervention mode: replace (override) or additive (delta)')
+    parser.add_argument('--intervention_xyz_scale', type=float, default=0.01,
+                        help='XYZ movement scale per keypress in meters (default: 10mm)')
+    parser.add_argument('--intervention_gripper_open', type=float, default=1.0,
+                        help='Gripper open value for intervention')
+    parser.add_argument('--intervention_gripper_close', type=float, default=0.0,
+                        help='Gripper close value for intervention')
+    parser.add_argument('--record_dir', type=str, default='',
+                        help='Directory to save recorded inference data (default: log_dir)')
+    parser.add_argument('--max_steps', type=int, default=99999,
+                        help='Maximum steps per episode (default: 99999). Episode auto-stops when exceeded.')
     
     # 兼容 roslaunch remap 参数
     return parser.parse_args(args=rospy.myargv()[1:])
@@ -1385,9 +1596,15 @@ def main():
         'timeline_disabled', 'timeline_control_stride', 'chunk_time_base',
         'pretrain', 'algorithm', 'desire_inference_freq', 'temporal_factor_k',
         'num_inference_steps', 'use_ema', 'pos_lookahead_step', 'pos_lookahead_duration',
-        'joint_cmd_mode', 'not_origin', 'dry_run', 'slow_mode', 'no_confirm',
-        'no_return_home', 'return_to_init', 'init_speed', 'safety_config', 'data_dir',
-        'no_workspace_check', 'log_dir', 'save_images', 'vis'
+        'joint_cmd_mode', 'safety_config', 'data_dir',
+        'log_dir', 'save_images', 'vis',
+        # Action chunk 执行模式参数
+        'execution_mode', 'max_active_chunks', 'crossfade_steps', 
+        'truncate_at_act_horizon', 'act_horizon',
+        # 干预和采集参数
+        'record_inference', 'intervention', 'intervention_mode',
+        'intervention_xyz_scale', 'intervention_gripper_open', 'intervention_gripper_close',
+        'record_dir', 'max_steps',
     ]:
         if rospy.has_param(f'~{key}'):
             config[key] = rospy.get_param(f'~{key}')
@@ -1417,11 +1634,6 @@ def main():
         rospy.logerr("safety_config is required and not found: %s", config['safety_config'])
         raise SystemExit(1)
     
-    # 传递确认和退出参数
-    config['skip_init_confirm'] = config.get('no_confirm', False)
-    config['no_return_home'] = config.get('no_return_home', False)
-    config['return_to_zero'] = not config.get('return_to_init', False)  # 默认回零位
-    
     rospy.loginfo("=" * 60)
     rospy.loginfo("CARM Policy Inference Node")
     rospy.loginfo("=" * 60)
@@ -1434,26 +1646,24 @@ def main():
     rospy.loginfo(f"  num_inference_steps: {config['num_inference_steps']} (more = better quality)")
     rospy.loginfo(f"  use_ema: {config['use_ema']} (EMA better for 1-step, Non-EMA better for multi-step)")
     rospy.loginfo("-" * 60)
-    rospy.loginfo("Test Mode Configuration:")
-    rospy.loginfo(f"  dry_run: {config['dry_run']} (no action execution)")
-    rospy.loginfo(f"  slow_mode: {config['slow_mode']} (5Hz inference)")
-    rospy.loginfo(f"  no_confirm: {config['skip_init_confirm']} (skip init confirmation)")
-    rospy.loginfo(f"  no_return_home: {config['no_return_home']} (skip return on exit)")
-    rospy.loginfo(f"  return_to_zero: {config['return_to_zero']} (return to zero position on exit)")
+    rospy.loginfo("Action Chunk Execution Mode:")
+    rospy.loginfo(f"  execution_mode: {config.get('execution_mode', 'temporal_ensemble')}")
+    rospy.loginfo(f"  max_active_chunks: {config.get('max_active_chunks', 'auto')}")
+    rospy.loginfo(f"  crossfade_steps: {config.get('crossfade_steps', 0)}")
+    rospy.loginfo(f"  truncate_at_act_horizon: {config.get('truncate_at_act_horizon', False)}")
+    rospy.loginfo(f"  act_horizon: {config.get('act_horizon', 'same as pred_horizon')}")
+    rospy.loginfo("-" * 60)
     rospy.loginfo(f"  log_dir: {config['log_dir'] or '~/rl-vla/inference_logs'}")
     rospy.loginfo("-" * 60)
+    rospy.loginfo("Intervention & Recording:")
+    rospy.loginfo(f"  record_inference: {config.get('record_inference', False)}")
+    rospy.loginfo(f"  intervention: {config.get('intervention', False)}")
+    rospy.loginfo(f"  intervention_mode: {config.get('intervention_mode', 'replace')}")
+    rospy.loginfo(f"  max_steps: {config.get('max_steps', 99999)} (auto-stop episode when reached)")
+    rospy.loginfo("-" * 60)
     rospy.loginfo("Safety Configuration:")
-    rospy.loginfo(f"  workspace_check: {not config.get('no_workspace_check', False)} (check end-effector position bounds)")
     rospy.loginfo(f"  safety_config: {config['safety_config'] or 'default'}")
     rospy.loginfo("=" * 60)
-    
-    # 安全警告
-    if not config['dry_run'] and not config['slow_mode']:
-        rospy.logwarn("=" * 60)
-        rospy.logwarn("RUNNING IN NORMAL MODE - ROBOT WILL MOVE AT FULL SPEED!")
-        rospy.logwarn("Ensure the workspace is clear and E-stop is ready!")
-        rospy.logwarn("=" * 60)
-        rospy.sleep(2.0)  # 给用户时间阅读警告
     
     # 创建推理节点
     node = InferenceNode(config)

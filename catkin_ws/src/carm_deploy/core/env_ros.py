@@ -41,7 +41,6 @@ class RealEnvironment:
                 - arm_init_gripper: 初始夹爪开度
                 - camera_topics: 相机话题列表
                 - sync_slop: 图像同步容差
-                - not_origin: 是否跳过初始化
                 - vis: 是否可视化图像
         """
         self.config = config
@@ -64,11 +63,9 @@ class RealEnvironment:
         self.arm_init_gripper = config.get('arm_init_gripper', 0.078)
         self.camera_topics = config.get('camera_topics', ['/camera/color/image_raw'])
         self.sync_slop = config.get('sync_slop', 0.1)
-        self.not_origin = config.get('not_origin', False)
         self.vis = config.get('vis', False)
         self.passive_mode = config.get('passive_mode', False)  # 被动模式：不设置控制模式
         self.skip_init_confirm = config.get('skip_init_confirm', False)  # 跳过初始化确认
-        self.no_return_home = config.get('no_return_home', False)  # 退出时不回原位
         self.return_to_zero = config.get('return_to_zero', True)  # 退出时回到零位(关节角度全为0)
         
         # 速度限制: 最大速度不超过 3 (0-10 范围)
@@ -93,7 +90,7 @@ class RealEnvironment:
         self._print_arm_status()
         
         # 初始化位置（被动模式下跳过）
-        if not self.not_origin and not self.passive_mode:
+        if not self.passive_mode:
             # 用户确认（除非跳过）
             if not self.skip_init_confirm:
                 self._wait_for_init_confirmation()
@@ -356,11 +353,9 @@ class RealEnvironment:
         if self.plan_thread.is_alive():
             self.plan_thread.join(timeout=1.0)
         
-        # 被动模式或 no_return_home 模式下不回位
+        # 被动模式下不回位
         if self.passive_mode:
             rospy.loginfo("Passive mode: skipping return to home")
-        elif self.no_return_home:
-            rospy.logwarn("no_return_home mode: skipping return to home (robot stays in current position)")
         else:
             # 回位（不断开连接，不下使能）
             try:
@@ -406,7 +401,6 @@ def create_environment_from_args(args):
         'arm_init_gripper': getattr(args, 'arm_init_gripper', 0.05),
         'camera_topics': getattr(args, 'camera_topics', ['/camera/color/image_raw']),
         'sync_slop': getattr(args, 'sync_slop', 0.1),
-        'not_origin': getattr(args, 'not_origin', False),
         'vis': getattr(args, 'vis', False),
     }
     

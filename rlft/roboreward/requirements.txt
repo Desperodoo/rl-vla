@@ -1,0 +1,29 @@
+# RoboReward 依赖
+# 建议在独立虚拟环境中安装
+
+# PyTorch (需要 CUDA 支持)
+# 如果已有合适版本可跳过
+--extra-index-url https://download.pytorch.org/whl/cu121
+torch>=2.1.0
+torchvision>=0.16.0
+
+# Transformers (需要源码版本以支持 Qwen3-VL)
+# 安装方式: pip install git+https://github.com/huggingface/transformers
+# 或等待 transformers>=4.57.0 发布
+git+https://github.com/huggingface/transformers
+
+# Flash Attention (推荐，提升推理速度)
+# 需要 CUDA 和编译环境
+# pip install flash-attn --no-build-isolation
+flash-attn>=2.5.0
+
+# 视觉处理
+Pillow>=9.0.0
+qwen-vl-utils>=0.0.2
+
+# 数据处理
+h5py>=3.0.0
+numpy>=1.20.0
+
+# 工具
+tqdm>=4.60.0

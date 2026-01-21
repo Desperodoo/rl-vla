@@ -19,7 +19,6 @@ carm_deploy/
 ├── data/                       # 数据模块
 │   ├── __init__.py
 │   ├── record_data_ros.py     # 数据记录程序
-│   ├── dataset_loader.py      # 数据集加载器
 │   └── analyze_dataset.py     # 数据集分析脚本
 │
 ├── tools/                      # 工具脚本
