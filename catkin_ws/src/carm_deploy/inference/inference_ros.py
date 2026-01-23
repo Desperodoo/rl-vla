@@ -175,7 +175,14 @@ class RealPolicy(PolicyInterface):
         self.pred_horizon = config.get('pred_horizon', 16)
         self.action_dim = config.get('action_dim', 13)  # full mode (continuous, no gripper)
         self.action_dim_full = config.get('action_dim_full', 15)  # full action with gripper
-        self.state_dim = 7  # 6 joints + 1 gripper
+        
+        # State mode configuration (new!)
+        # joint_only: qpos_joint [7] = 6 joints + 1 gripper (default)
+        # ee_only: qpos_end [8] = 7 ee_pose + 1 gripper
+        # both: concat [14] = qpos_joint[7] + qpos_end[:7]
+        self.state_mode = config.get('state_mode', 'joint_only')
+        self.state_dim = self._get_state_dim_for_mode(self.state_mode)
+        
         self.target_image_size = config.get('target_image_size', (128, 128))
         self.visual_feature_dim = config.get('visual_feature_dim', 256)
         self.state_encoder_hidden_dim = config.get('state_encoder_hidden_dim', 128)
@@ -214,6 +221,53 @@ class RealPolicy(PolicyInterface):
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.loaded = False
     
+    def _get_state_dim_for_mode(self, state_mode: str) -> int:
+        """
+        Get state dimension based on state mode.
+        
+        Args:
+            state_mode: One of 'joint_only', 'ee_only', 'both'
+            
+        Returns:
+            State dimension
+        """
+        if state_mode == 'joint_only':
+            return 7  # 6 joints + 1 gripper
+        elif state_mode == 'ee_only':
+            return 8  # 7 ee_pose (xyz + quat) + 1 gripper
+        elif state_mode == 'both':
+            return 14  # 7 joint (6 joints + gripper) + 7 ee_pose (no extra gripper)
+        else:
+            rospy.logwarn(f"Unknown state_mode: {state_mode}, defaulting to joint_only")
+            return 7
+    
+    def build_state_from_obs(self, qpos_joint: np.ndarray, qpos_end: np.ndarray) -> np.ndarray:
+        """
+        Build state vector based on state_mode.
+        
+        Args:
+            qpos_joint: Joint positions [7] = 6 joints + 1 gripper
+            qpos_end: End effector pose [8] = 7 ee_pose + 1 gripper
+            
+        Returns:
+            State vector with dimension matching self.state_dim
+        """
+        if self.state_mode == 'joint_only':
+            # Original behavior: qpos_joint [7]
+            return qpos_joint.astype(np.float32)
+        elif self.state_mode == 'ee_only':
+            # EE pose only: qpos_end [8]
+            return qpos_end.astype(np.float32)
+        elif self.state_mode == 'both':
+            # Both: concat [14] = qpos_joint[7] + qpos_end[:7]
+            return np.concatenate([
+                qpos_joint.astype(np.float32),  # [7]
+                qpos_end[:7].astype(np.float32),  # [7] ee_pose without gripper
+            ])
+        else:
+            rospy.logwarn(f"Unknown state_mode: {self.state_mode}, using joint_only")
+            return qpos_joint.astype(np.float32)
+    
     def load_model(self, model_path: str):
         """
         加载模型 checkpoint
@@ -244,6 +298,10 @@ class RealPolicy(PolicyInterface):
             self.state_encoder_out_dim = args.get('state_encoder_out_dim', self.state_encoder_out_dim)
             self.use_state_encoder = args.get('use_state_encoder', self.use_state_encoder)
             self.algorithm = args.get('algorithm', self.algorithm)
+            
+            # State mode configuration (backward compatible: default to 'joint_only')
+            self.state_mode = args.get('state_mode', 'joint_only')
+            self.state_dim = self._get_state_dim_for_mode(self.state_mode)
             
             # 视觉编码器类型
             visual_encoder_type = args.get('visual_encoder_type', 'plain_conv')
@@ -281,6 +339,7 @@ class RealPolicy(PolicyInterface):
                 
             rospy.loginfo(f"Config: algorithm={self.algorithm}, action_dim={self.action_dim} (continuous), "
                          f"obs_horizon={self.obs_horizon}, pred_horizon={self.pred_horizon}")
+            rospy.loginfo(f"State mode: {self.state_mode}, state_dim={self.state_dim}")
             rospy.loginfo(f"Discrete gripper: threshold={self.gripper_threshold}, open={self.gripper_open_val}, close={self.gripper_close_val}")
             rospy.loginfo(f"Inference config: num_steps={self.num_inference_steps}, use_ema={self.use_ema}")
             rospy.loginfo(f"Visual encoder: {visual_encoder_type}, image_size={self.target_image_size}")
@@ -555,7 +614,7 @@ class RealPolicy(PolicyInterface):
             raise RuntimeError("Model not loaded. Call load_model() first.")
         
         # 获取当前观测
-        qpos = inputs['qpos'].cpu().numpy().squeeze()  # [7]
+        qpos = inputs['qpos'].cpu().numpy().squeeze()  # [state_dim] (depends on state_mode)
         image = inputs['image'].cpu().numpy().squeeze()  # [C, H, W] 或 [1, C, H, W]
         
         # 如果图像是 4D，取第一个
@@ -723,6 +782,11 @@ class InferenceNode:
         self._obs_horizon = getattr(self.policy, 'obs_horizon', 2)
         # 允许通过 config 覆盖 act_horizon
         self._act_horizon = config.get('act_horizon', self._act_horizon)
+        
+        # 从策略获取 action_dim_full（用于后处理）
+        # full mode: 15D = joint(6) + gripper(1) + rel_pose(7) + gripper(1)
+        # ee_only mode: 8D = rel_pose(7) + gripper(1)
+        self._action_dim_full = getattr(self.policy, 'action_dim_full', 15)
         
         if self.timeline_enabled:
             timeline_path = config.get('timeline_log', '')
@@ -985,9 +1049,6 @@ class InferenceNode:
         if safety_config_path and os.path.exists(safety_config_path):
             rospy.loginfo(f"Loading safety config from: {safety_config_path}")
             return SafetyController.from_config(safety_config_path)
-        elif data_dir and os.path.exists(os.path.join(data_dir, 'dataset_info.json')):
-            rospy.loginfo(f"Creating safety controller from dataset stats: {data_dir}")
-            return SafetyController.from_dataset_stats(data_dir, margin=0.1)
         else:
             # 使用默认参数
             rospy.logwarn("No safety config or dataset stats found, using default safety limits")
@@ -1088,10 +1149,21 @@ class InferenceNode:
                 try:
                     # 准备输入
                     qpos_joint = np.array(self.latest_obs['qpos_joint'])  # [7]
-                    qpos_end = np.array(self.latest_obs['qpos_end']).tolist()  # [8]
+                    qpos_end = np.array(self.latest_obs['qpos_end'])  # [8]
                     
-                    # 状态: qpos_joint 已经是 7D (6 joints + 1 gripper)
-                    qpos = torch.from_numpy(qpos_joint).float().cuda().unsqueeze(0)  # [1, 7]
+                    # 构建 state 向量（基于 state_mode 配置）
+                    # joint_only: qpos_joint [7]
+                    # ee_only: qpos_end [8]
+                    # both: concat [14]
+                    if hasattr(self.policy, 'build_state_from_obs'):
+                        state = self.policy.build_state_from_obs(qpos_joint, qpos_end)
+                    else:
+                        # Fallback for old policies without state_mode support
+                        state = qpos_joint.astype(np.float32)
+                    qpos = torch.from_numpy(state).float().cuda().unsqueeze(0)  # [1, state_dim]
+                    
+                    # 保存 qpos_end 用于后续安全检查（转回 list 以兼容后续代码）
+                    qpos_end = qpos_end.tolist()
                     
                     # 图像预处理: resize + HWC->CHW
                     # 获取目标尺寸（从 policy 获取，如果是 RealPolicy）
@@ -1126,85 +1198,103 @@ class InferenceNode:
                     
                     if self.joint_cmd_mode:
                         # 关节模式：对每个动作进行安全检查
-                        current_state = qpos_joint[:6]  # 当前关节位置作为参考
-                        
-                        for i in range(len(all_actions)):
-                            joint_action = all_actions[i, :7].copy()  # [6 joints + 1 gripper]
-                            
-                            # 检查关节限位并裁剪
-                            clipped_action, warnings = self.safety_controller.check_and_clip(
-                                joint_action,
-                                current_state,
-                                apply_filter=(i == 0),  # 只对第一个动作应用滤波
+                        # 注意：ee_only mode (8D) 不包含 joint 信息，不能使用 joint_cmd_mode
+                        if self._action_dim_full != 15:
+                            rospy.logerr_once(
+                                "joint_cmd_mode is enabled but model was trained with ee_only action mode (8D). "
+                                "Joint control requires full action mode (15D). Skipping joint safety check!"
                             )
+                        else:
+                            current_state = qpos_joint[:6]  # 当前关节位置作为参考
                             
-                            if warnings:
-                                safety_clipped = True
-                                if i == 0:  # 只记录第一个动作的警告
-                                    safety_events.extend(warnings)
-                                    for w in warnings:
-                                        rospy.logwarn(f"Safety clip: {w}")
-                            
-                            # 用裁剪后的动作替换原始动作
-                            all_actions[i, :7] = clipped_action
-                            
-                            # 更新参考状态为当前裁剪后的关节位置
-                            current_state = clipped_action[:6]
+                            for i in range(len(all_actions)):
+                                joint_action = all_actions[i, :7].copy()  # [6 joints + 1 gripper]
+                                
+                                # 检查关节限位并裁剪
+                                clipped_action, warnings = self.safety_controller.check_and_clip(
+                                    joint_action,
+                                    current_state,
+                                    apply_filter=(i == 0),  # 只对第一个动作应用滤波
+                                )
+                                
+                                if warnings:
+                                    safety_clipped = True
+                                    if i == 0:  # 只记录第一个动作的警告
+                                        safety_events.extend(warnings)
+                                        for w in warnings:
+                                            rospy.logwarn(f"Safety clip: {w}")
+                                
+                                # 用裁剪后的动作替换原始动作
+                                all_actions[i, :7] = clipped_action
+                                
+                                # 更新参考状态为当前裁剪后的关节位置
+                                current_state = clipped_action[:6]
                     else:
                         # 末端位姿模式：
                         # 1. 检查相对位移是否过大
                         # 2. 计算绝对位姿并检查工作空间边界
+                        # 
+                        # 根据 action_dim_full 确定索引：
+                        # - full mode (15D): [joint(6), gripper(1), rel_pose(7), gripper(1)]
+                        #   rel_pose at [7:14], gripper at [14]
+                        # - ee_only mode (8D): [rel_pose(7), gripper(1)]
+                        #   rel_pose at [0:7], gripper at [7]
+                        is_full_mode = (self._action_dim_full == 15)
+                        rel_pose_start = 7 if is_full_mode else 0
+                        rel_pose_end = 14 if is_full_mode else 7
+                        gripper_idx = 14 if is_full_mode else 7
+                        
                         for i in range(len(all_actions)):
-                            if all_actions[i].shape[0] >= 15:
-                                relative_pose = all_actions[i, 7:14]  # [7] 相对位姿
-                                grip = all_actions[i, 14]  # 夹爪
-                                
-                                # 检查相对位移是否过大
-                                max_trans = 0.1  # 10cm
-                                trans_norm = np.linalg.norm(relative_pose[:3])
-                                if trans_norm > max_trans:
-                                    # 缩放位移到安全范围
-                                    scale = max_trans / trans_norm
-                                    all_actions[i, 7:10] *= scale
-                                    relative_pose = all_actions[i, 7:14]  # 更新
-                                    if i == 0:
-                                        safety_events.append(f"Translation scaled: {trans_norm:.3f}m -> {max_trans}m")
-                                        rospy.logwarn(f"Safety: Translation scaled from {trans_norm:.3f}m to {max_trans}m")
+                            relative_pose = all_actions[i, rel_pose_start:rel_pose_end]  # [7] 相对位姿
+                            grip = all_actions[i, gripper_idx]  # 夹爪
+                            
+                            # 检查相对位移是否过大
+                            max_trans = 0.1  # 10cm
+                            trans_norm = np.linalg.norm(relative_pose[:3])
+                            if trans_norm > max_trans:
+                                # 缩放位移到安全范围
+                                scale = max_trans / trans_norm
+                                all_actions[i, rel_pose_start:rel_pose_start+3] *= scale
+                                relative_pose = all_actions[i, rel_pose_start:rel_pose_end]  # 更新
+                                if i == 0:
+                                    safety_events.append(f"Translation scaled: {trans_norm:.3f}m -> {max_trans}m")
+                                    rospy.logwarn(f"Safety: Translation scaled from {trans_norm:.3f}m to {max_trans}m")
+                                safety_clipped = True
+                            
+                            # 计算目标绝对位姿
+                            target_pose = apply_relative_transform(relative_pose, qpos_end[:7], grip)
+                            target_pose_np = np.array(target_pose[:7])  # [x,y,z,qx,qy,qz,qw]
+                            
+                            # 检查工作空间边界 (如果启用)
+                            if self.check_workspace:
+                                clipped_pose, ws_warnings = self.safety_controller.check_workspace(target_pose_np)
+                                if ws_warnings:
                                     safety_clipped = True
-                                
-                                # 计算目标绝对位姿
-                                target_pose = apply_relative_transform(relative_pose, qpos_end[:7], grip)
-                                target_pose_np = np.array(target_pose[:7])  # [x,y,z,qx,qy,qz,qw]
-                                
-                                # 检查工作空间边界 (如果启用)
-                                if self.check_workspace:
-                                    clipped_pose, ws_warnings = self.safety_controller.check_workspace(target_pose_np)
-                                    if ws_warnings:
-                                        safety_clipped = True
-                                        if i == 0:
-                                            safety_events.extend(ws_warnings)
-                                            for w in ws_warnings:
-                                                rospy.logwarn(f"Workspace clip: {w}")
-                                        
-                                        # 重新计算相对位姿：clipped_target = current @ new_relative
-                                        # => new_relative = current^-1 @ clipped_target
-                                        T_current = pose_to_transform_matrix(qpos_end[:3], qpos_end[3:7])
-                                        T_clipped = pose_to_transform_matrix(clipped_pose[:3], clipped_pose[3:7])
-                                        T_relative_new = np.linalg.inv(T_current) @ T_clipped
-                                        new_relative_pos = T_relative_new[:3, 3]
-                                        new_relative_quat = R.from_matrix(T_relative_new[:3, :3]).as_quat()
-                                        all_actions[i, 7:10] = new_relative_pos
-                                        all_actions[i, 10:14] = new_relative_quat
-                                
-                                # 检查并裁剪夹爪限位
-                                gripper_action = np.array([0, 0, 0, 0, 0, 0, grip])  # dummy joints + gripper
-                                clipped_gripper, grip_warnings = self.safety_controller.check_joint_limits(gripper_action)
-                                if grip_warnings:
-                                    all_actions[i, 6] = clipped_gripper[6]
-                                    all_actions[i, 14] = clipped_gripper[6]  # 第二个 gripper
                                     if i == 0:
-                                        safety_events.extend(grip_warnings)
-                                        safety_clipped = True
+                                        safety_events.extend(ws_warnings)
+                                        for w in ws_warnings:
+                                            rospy.logwarn(f"Workspace clip: {w}")
+                                    
+                                    # 重新计算相对位姿：clipped_target = current @ new_relative
+                                    # => new_relative = current^-1 @ clipped_target
+                                    T_current = pose_to_transform_matrix(qpos_end[:3], qpos_end[3:7])
+                                    T_clipped = pose_to_transform_matrix(clipped_pose[:3], clipped_pose[3:7])
+                                    T_relative_new = np.linalg.inv(T_current) @ T_clipped
+                                    new_relative_pos = T_relative_new[:3, 3]
+                                    new_relative_quat = R.from_matrix(T_relative_new[:3, :3]).as_quat()
+                                    all_actions[i, rel_pose_start:rel_pose_start+3] = new_relative_pos
+                                    all_actions[i, rel_pose_start+3:rel_pose_end] = new_relative_quat
+                            
+                            # 检查并裁剪夹爪限位
+                            gripper_action = np.array([0, 0, 0, 0, 0, 0, grip])  # dummy joints + gripper
+                            clipped_gripper, grip_warnings = self.safety_controller.check_joint_limits(gripper_action)
+                            if grip_warnings:
+                                all_actions[i, gripper_idx] = clipped_gripper[6]
+                                if is_full_mode:
+                                    all_actions[i, 6] = clipped_gripper[6]  # 第一个 gripper (full mode only)
+                                if i == 0:
+                                    safety_events.extend(grip_warnings)
+                                    safety_clipped = True
                     
                     # 保存模型原始输出（安全检查后，干预前）
                     action_model = all_actions.copy()
@@ -1248,21 +1338,29 @@ class InferenceNode:
                         safety_warnings=safety_events if safety_events else None,
                     )
                     
-                    # 转换动作空间 (full mode: 15D)
-                    # all_actions: [joint(6), gripper(1), relative_end_pose(7), gripper(1)]
+                    # 转换动作空间
+                    # full mode (15D): [joint(6), gripper(1), relative_end_pose(7), gripper(1)]
+                    # ee_only mode (8D): [relative_end_pose(7), gripper(1)]
                     if not self.joint_cmd_mode:
+                        # 根据 action_dim_full 确定索引
+                        is_full_mode = (self._action_dim_full == 15)
+                        rel_pose_start = 7 if is_full_mode else 0
+                        rel_pose_end = 14 if is_full_mode else 7
+                        gripper_idx = 14 if is_full_mode else 7
+                        
                         all_endactions = []
                         for i in range(all_actions.shape[0]):
-                            # 取 index 7 开始的 7D: relative_end_pose(7)
-                            relative_pose = all_actions[i][7:14]  # [7] 相对位姿
-                            # 统一使用 index 14 的 gripper（与 _reconstruct_full_action 保持一致）
-                            grip = all_actions[i][14]
+                            relative_pose = all_actions[i][rel_pose_start:rel_pose_end]  # [7] 相对位姿
+                            grip = all_actions[i][gripper_idx]  # gripper
                             # 将相对位姿变换应用到当前位姿，得到目标绝对位姿
                             target_pose = apply_relative_transform(relative_pose, qpos_end[:7], grip)
                             all_endactions.append(target_pose)
                         all_actions = np.array(all_endactions)
                     else:
                         # joint mode: 取前 7D (6 joints + 1 gripper)
+                        # 注意：ee_only mode 不支持 joint_cmd_mode
+                        if self._action_dim_full != 15:
+                            rospy.logwarn_once("joint_cmd_mode requires full action mode (15D), but got ee_only (8D)")
                         all_actions = all_actions[:, :7]
                     
                     # 创建轨迹并添加到管理器
@@ -1540,8 +1638,6 @@ def parse_args():
     # 安全控制参数
     parser.add_argument('--safety_config', type=str, default='',
                         help='Path to safety config JSON file (required)')
-    parser.add_argument('--data_dir', type=str, default='',
-                        help='Data directory for auto-loading safety limits from dataset_info.json')
     parser.add_argument('--init_speed', type=float, default=2.0,
                         help='Speed level for initialization movement (0-10, default: 2.0 = slow)')
     

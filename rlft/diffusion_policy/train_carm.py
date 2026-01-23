@@ -51,6 +51,7 @@ from diffusion_policy.carm_utils import (
     load_carm_dataset,
     create_carm_obs_process_fn,
     get_carm_data_info,
+    get_state_dim_for_mode,
     compute_relative_pose_transform,
     ActionNormalizer,
     StateEncoder,
@@ -102,6 +103,15 @@ class Args:
     # Action space settings
     action_mode: Literal["full", "ee_only"] = "full"
     """action mode: 'full' (15D) or 'ee_only' (8D: relative_pose + gripper)"""
+    
+    # State space settings
+    state_mode: Literal["joint_only", "ee_only", "both"] = "joint_only"
+    """state composition mode:
+        - 'joint_only': qpos_joint [7] = 6 joints + 1 gripper (default)
+        - 'ee_only': qpos_end [8] = 7 ee_pose (xyz + quat) + 1 gripper
+        - 'both': concat [14] = qpos_joint[7] + qpos_end[:7] (gripper from joint)
+    """
+    
     precompute_actions: bool = False
     """precompute all relative actions at init (uses more memory but faster __getitem__)"""
     normalize_actions: bool = False
@@ -870,7 +880,7 @@ if __name__ == "__main__":
     
     # Get dataset info
     print(f"Loading dataset info from: {args.demo_path}")
-    data_info = get_carm_data_info(args.demo_path)
+    data_info = get_carm_data_info(args.demo_path, state_mode=args.state_mode)
     print(f"Dataset info: {data_info}")
     
     # Determine action dimension based on mode (continuous only, gripper is discrete)
@@ -881,11 +891,12 @@ if __name__ == "__main__":
         action_dim = 7   # rel_pose(7), gripper is now discrete
         action_dim_full = 8  # Original full dimension for inference compatibility
     
-    state_dim = data_info['state_dim']  # 7 (qpos_joint)
+    # State dimension depends on state_mode (computed in get_carm_data_info)
+    state_dim = data_info['state_dim']
     
     print(f"Action mode: {args.action_mode}, action_dim (continuous): {action_dim}")
+    print(f"State mode: {args.state_mode}, state_dim: {state_dim}")
     print(f"Gripper: discrete classification (threshold={args.gripper_threshold})")
-    print(f"State dim: {state_dim}")
     
     # Wandb tracking
     if args.track:
@@ -921,6 +932,7 @@ if __name__ == "__main__":
         output_format="NCHW",
         target_size=target_image_size,
         normalize_images=True,  # Output in [0, 255] range for PlainConv or [0, 1] for ResNet
+        state_mode=args.state_mode,
     )
     
     # Create action normalizer

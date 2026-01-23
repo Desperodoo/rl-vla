@@ -139,13 +139,108 @@ def analyze_episode_timeline(
     }
 
 
+def analyze_episode_perframe(
+    labeler: RoboRewardLabeler,
+    all_frames: np.ndarray,
+    task: str,
+    stride: int = 1,
+    verbose: bool = False,
+    progress_bar: bool = True
+) -> dict:
+    """逐帧分析 episode，为每一帧（或按 stride 间隔）计算 reward
+    
+    Args:
+        labeler: RoboReward 模型
+        all_frames: 所有帧 (numpy array)
+        task: 任务描述
+        stride: 评估间隔（1 = 逐帧，10 = 每10帧评估一次）
+        verbose: 是否打印详情
+        progress_bar: 是否显示进度条
+    
+    Returns:
+        dict: {
+            'frame_indices': [...],    # 评估的帧索引
+            'frame_scores': [...],     # 每帧的分数
+            'per_frame_reward': np.array,  # 完整的逐帧 reward 数组（插值填充）
+            'done_frame': int,         # 首次达到5分的帧（-1表示未完成）
+            'max_score': int,          # 最高分
+            'final_score': int,        # 最终分数
+            'done_array': np.array,    # done 标记数组
+        }
+    """
+    total_frames = len(all_frames)
+    
+    # 生成评估的帧索引
+    frame_indices = list(range(0, total_frames, stride))
+    if frame_indices[-1] != total_frames - 1:
+        frame_indices.append(total_frames - 1)  # 确保包含最后一帧
+    
+    frame_scores = []
+    done_frame = -1  # 首次达到5分的帧位置
+    
+    iterator = tqdm(frame_indices, desc="Per-frame scoring", leave=False) if progress_bar else frame_indices
+    
+    for end_idx in iterator:
+        end_frame = end_idx + 1  # 转为 1-indexed（包含该帧）
+        frames_subset = all_frames[:end_frame]
+        pil_frames = [Image.fromarray(f) for f in frames_subset]
+        
+        score, _ = labeler.score_episode(pil_frames, task, return_raw=True)
+        frame_scores.append(score)
+        
+        # 记录首次达到5分的位置
+        if score == 5 and done_frame == -1:
+            done_frame = end_frame
+        
+        if verbose:
+            progress = (end_frame / total_frames) * 100
+            bar = "█" * score + "░" * (5 - score)
+            print(f"    Frame 1-{end_frame:4d} ({progress:5.1f}%) | Score: {score} {bar}")
+    
+    # 构建完整的逐帧 reward 数组（使用前向填充插值）
+    per_frame_reward = np.zeros(total_frames, dtype=np.float32)
+    
+    # 使用阶梯插值：每个评估点的分数向前填充到下一个评估点
+    for i, (idx, score) in enumerate(zip(frame_indices, frame_scores)):
+        if i < len(frame_indices) - 1:
+            next_idx = frame_indices[i + 1]
+            per_frame_reward[idx:next_idx] = score
+        else:
+            per_frame_reward[idx:] = score
+    
+    # 构建 done 数组
+    done_array = np.zeros(total_frames, dtype=bool)
+    if done_frame > 0:
+        done_start_idx = done_frame - 1  # 转为0-indexed
+        done_array[done_start_idx:] = True
+    
+    max_score = max(frame_scores)
+    final_score = frame_scores[-1]
+    
+    return {
+        'frame_indices': frame_indices,
+        'frame_scores': frame_scores,
+        'per_frame_reward': per_frame_reward,
+        'done_frame': done_frame,
+        'done_start_index': done_frame - 1 if done_frame > 0 else -1,
+        'max_score': max_score,
+        'final_score': final_score,
+        'score_dropped': max_score > final_score,
+        'done_array': done_array,
+        'total_frames': total_frames,
+        'stride': stride,
+        'num_evaluations': len(frame_indices),
+    }
+
+
 def save_episode_with_reward_and_done(
     src_path: str,
     dst_path: str,
     reward: int,
     done_array: np.ndarray,
     timeline_info: dict,
-    raw_output: str = ""
+    raw_output: str = "",
+    per_frame_reward: Optional[np.ndarray] = None
 ):
     """保存带有 reward 和 done 标签的 episode
     
@@ -156,6 +251,7 @@ def save_episode_with_reward_and_done(
         done_array: done 标记数组
         timeline_info: 时间线分析信息
         raw_output: 原始模型输出
+        per_frame_reward: 逐帧 reward 数组（可选，用于逐帧模式）
     """
     import shutil
     
@@ -186,8 +282,24 @@ def save_episode_with_reward_and_done(
         if 'reward_timeline' in f:
             del f['reward_timeline']
         timeline_grp = f.create_group('reward_timeline')
-        timeline_grp.create_dataset('checkpoints', data=np.array(timeline_info['checkpoints']))
-        timeline_grp.create_dataset('scores', data=np.array(timeline_info['scores']))
+        
+        # 根据模式保存不同的数据
+        if 'checkpoints' in timeline_info:
+            # checkpoint 模式
+            timeline_grp.create_dataset('checkpoints', data=np.array(timeline_info['checkpoints']))
+            timeline_grp.create_dataset('scores', data=np.array(timeline_info['scores']))
+        elif 'frame_indices' in timeline_info:
+            # 逐帧模式
+            timeline_grp.create_dataset('frame_indices', data=np.array(timeline_info['frame_indices']))
+            timeline_grp.create_dataset('frame_scores', data=np.array(timeline_info['frame_scores']))
+            timeline_grp.attrs['stride'] = timeline_info.get('stride', 1)
+            timeline_grp.attrs['num_evaluations'] = timeline_info.get('num_evaluations', 0)
+        
+        # 保存逐帧 reward 数组（如果有）
+        if per_frame_reward is not None:
+            if 'per_frame_reward' in f:
+                del f['per_frame_reward']
+            f.create_dataset('per_frame_reward', data=per_frame_reward, dtype=np.float32)
 
 
 def parse_args():
@@ -197,8 +309,17 @@ def parse_args():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例:
+  # 基本用法（使用 10 个 checkpoint）
   python batch_label.py --input-dir ./recorded_data/mix --task "pick up the red cube"
+  
+  # 调整 checkpoint 数量
   python batch_label.py --input-dir ./data --task "task" --checkpoints 15
+  
+  # 逐帧标注（每帧都评估，非常慢！）
+  python batch_label.py --input-dir ./data --task "task" --per-frame
+  
+  # 逐帧标注但使用 stride（每 5 帧评估一次）
+  python batch_label.py --input-dir ./data --task "task" --per-frame --stride 5
         """
     )
     
@@ -240,7 +361,18 @@ def parse_args():
         "--checkpoints", "-c",
         type=int,
         default=10,
-        help="每个 episode 的时间线评估点数（默认: 10）"
+        help="每个 episode 的时间线评估点数（默认: 10，仅在非逐帧模式下有效）"
+    )
+    parser.add_argument(
+        "--per-frame",
+        action="store_true",
+        help="启用逐帧标注模式（非常慢！每帧或每 stride 帧评估一次）"
+    )
+    parser.add_argument(
+        "--stride",
+        type=int,
+        default=1,
+        help="逐帧模式下的评估间隔（默认: 1，即每帧都评估）"
     )
     parser.add_argument(
         "--dtype",
@@ -287,7 +419,8 @@ def main():
     if args.output_dir is None:
         parent_dir = os.path.dirname(args.input_dir.rstrip('/'))
         input_name = os.path.basename(args.input_dir.rstrip('/'))
-        args.output_dir = os.path.join(parent_dir, f"{input_name}_with_reward")
+        suffix = "_perframe_reward" if args.per_frame else "_with_reward"
+        args.output_dir = os.path.join(parent_dir, f"{input_name}{suffix}")
     
     print("=" * 70)
     print("RoboReward Batch Labeling Tool (with Done Detection)")
@@ -295,7 +428,13 @@ def main():
     print(f"Input:  {args.input_dir}")
     print(f"Output: {args.output_dir}")
     print(f"Model:  {args.model}")
-    print(f"Timeline checkpoints: {args.checkpoints}")
+    
+    # 显示标注模式
+    if args.per_frame:
+        print(f"Mode: Per-frame labeling (stride={args.stride})")
+        print("⚠️  WARNING: Per-frame mode is VERY SLOW! Each episode may take several minutes.")
+    else:
+        print(f"Mode: Checkpoint labeling (checkpoints={args.checkpoints})")
     
     # 创建配置
     config = RoboRewardConfig(
@@ -334,6 +473,14 @@ def main():
         for i, f in enumerate(episode_files):
             task = task_manager.get_task(f)
             print(f"  {i+1}. {os.path.basename(f)} -> Task: {task[:50]}...")
+        if args.per_frame:
+            # 估算总时间
+            avg_frames = 300  # 假设平均 300 帧
+            eval_per_episode = avg_frames // args.stride
+            total_evals = eval_per_episode * len(episode_files)
+            est_time_minutes = total_evals * 0.5 / 60  # 假设每次评估 0.5 秒
+            print(f"\n[Dry Run] Estimated evaluations: ~{total_evals}")
+            print(f"[Dry Run] Estimated time: ~{est_time_minutes:.1f} minutes")
         print("\n[Dry Run] Done")
         sys.exit(0)
     
@@ -351,7 +498,9 @@ def main():
         "input_dir": args.input_dir,
         "output_dir": args.output_dir,
         "model": args.model,
-        "checkpoints": args.checkpoints,
+        "mode": "per_frame" if args.per_frame else "checkpoint",
+        "checkpoints": args.checkpoints if not args.per_frame else None,
+        "stride": args.stride if args.per_frame else None,
         "task_description": args.task if args.task else f"from file: {args.task_file}",
         "episodes": [],
         "statistics": {
@@ -385,14 +534,28 @@ def main():
             if args.verbose:
                 print(f"\n  {episode_name} ({total_frames} frames):")
             
-            # 时间线分析
-            timeline_info = analyze_episode_timeline(
-                labeler,
-                all_frames,
-                task,
-                num_checkpoints=args.checkpoints,
-                verbose=args.verbose
-            )
+            # 根据模式选择分析方法
+            if args.per_frame:
+                # 逐帧模式
+                timeline_info = analyze_episode_perframe(
+                    labeler,
+                    all_frames,
+                    task,
+                    stride=args.stride,
+                    verbose=args.verbose,
+                    progress_bar=not args.verbose  # verbose 模式不显示进度条
+                )
+                per_frame_reward = timeline_info['per_frame_reward']
+            else:
+                # checkpoint 模式
+                timeline_info = analyze_episode_timeline(
+                    labeler,
+                    all_frames,
+                    task,
+                    num_checkpoints=args.checkpoints,
+                    verbose=args.verbose
+                )
+                per_frame_reward = None
             
             # 使用 max_score 作为最终 reward（解决分数下降问题）
             reward = timeline_info['max_score']
@@ -409,7 +572,8 @@ def main():
                 reward=reward,
                 done_array=timeline_info['done_array'],
                 timeline_info=timeline_info,
-                raw_output=raw_output
+                raw_output=raw_output,
+                per_frame_reward=per_frame_reward
             )
             
             # 统计
@@ -429,9 +593,21 @@ def main():
                 "done_frame": int(timeline_info['done_frame']),
                 "done_start_index": int(timeline_info['done_start_index']),
                 "score_dropped": timeline_info['score_dropped'],
-                "timeline_scores": [int(s) for s in timeline_info['scores']],
-                "raw_output": raw_output,
             }
+            
+            # 根据模式添加不同的时间线信息
+            if args.per_frame:
+                episode_result["mode"] = "per_frame"
+                episode_result["stride"] = args.stride
+                episode_result["num_evaluations"] = timeline_info['num_evaluations']
+                episode_result["frame_indices"] = timeline_info['frame_indices']
+                episode_result["frame_scores"] = [int(s) for s in timeline_info['frame_scores']]
+            else:
+                episode_result["mode"] = "checkpoint"
+                episode_result["timeline_scores"] = [int(s) for s in timeline_info['scores']]
+            
+            episode_result["raw_output"] = raw_output
+            
             results["episodes"].append(episode_result)
             results["statistics"]["score_distribution"][reward] += 1
             scores.append(reward)

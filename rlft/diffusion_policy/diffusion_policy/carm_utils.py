@@ -18,7 +18,10 @@ Action Space Design (aligned with infer_g3_api.py):
     - Policy outputs: [joint(6), gripper(1), relative_end_pose(7), gripper(1)] = 15D
     - relative_end_pose is a transformation relative to current pose
     - At inference: target_pose = current_pose @ relative_pose_transform
-"""
+State Mode Options:
+    - joint_only: qpos_joint [7] = 6 joints + 1 gripper
+    - ee_only: qpos_end [8] = 7 ee_pose (xyz + quat) + 1 gripper  
+    - both: [qpos_joint[7], qpos_end[:7]] [14] = 7 joint + 7 ee_pose (gripper from joint)"""
 
 import os
 import glob
@@ -26,7 +29,7 @@ import json
 import numpy as np
 import torch
 import cv2
-from typing import Dict, List, Optional, Tuple, Any, Callable
+from typing import Dict, List, Optional, Tuple, Any, Callable, Literal
 from h5py import File
 from scipy.spatial.transform import Rotation as R
 from tqdm import tqdm
@@ -215,22 +218,47 @@ def load_carm_dataset(
 # Observation Processing
 # ============================================================================
 
+def get_state_dim_for_mode(state_mode: str) -> int:
+    """
+    Get the state dimension for a given state mode.
+    
+    Args:
+        state_mode: One of 'joint_only', 'ee_only', 'both'
+        
+    Returns:
+        State dimension
+    """
+    if state_mode == 'joint_only':
+        return 7  # 6 joints + 1 gripper
+    elif state_mode == 'ee_only':
+        return 8  # 7 ee_pose (xyz + quat) + 1 gripper
+    elif state_mode == 'both':
+        return 14  # 7 joint (6 joints + gripper) + 7 ee_pose (no extra gripper)
+    else:
+        raise ValueError(f"Unknown state_mode: {state_mode}. Must be 'joint_only', 'ee_only', or 'both'")
+
+
 def create_carm_obs_process_fn(
     output_format: str = "NCHW",
     target_size: Optional[Tuple[int, int]] = None,
     normalize_images: bool = True,
+    state_mode: Literal["joint_only", "ee_only", "both"] = "joint_only",
 ) -> Callable:
     """
     Create observation processing function for CARM data.
     
     Aligned with infer_g3_api.py:
-        - State: qpos_joint [7] (6 joints + 1 gripper)
-        - Image: RGB image normalized to [0, 1]
+        - Image: RGB image 
+        - State: Configurable via state_mode
     
     Args:
         output_format: "NCHW" for training, "NHWC" for storage
         target_size: Optional (H, W) for resizing images
         normalize_images: Whether to normalize images to [0, 1]
+        state_mode: State composition mode:
+            - 'joint_only': qpos_joint [7] = 6 joints + 1 gripper (default, original behavior)
+            - 'ee_only': qpos_end [8] = 7 ee_pose (xyz + quat) + 1 gripper
+            - 'both': concat [14] = qpos_joint[7] + qpos_end[:7] (gripper from joint only)
         
     Returns:
         Function that processes observations
@@ -246,8 +274,8 @@ def create_carm_obs_process_fn(
         
         Args:
             images: RGB images [T, H, W, 3]
-            qpos_joint: Joint positions [T, 7]
-            qpos_end: End effector pose [T, 8]
+            qpos_joint: Joint positions [T, 7] (6 joints + gripper)
+            qpos_end: End effector pose [T, 8] (7 pose + gripper)
             
         Returns:
             Dict with 'rgb', 'state', 'ee_pose' keys
@@ -268,10 +296,24 @@ def create_carm_obs_process_fn(
         if output_format == "NCHW":
             rgb = np.transpose(rgb, (0, 3, 1, 2))  # [T, C, H, W]
         
-        # State: aligned with infer_g3_api.py - use qpos_joint [7]
-        state = qpos_joint.astype(np.float32)  # [T, 7]
+        # State: configurable based on state_mode
+        if state_mode == 'joint_only':
+            # Original behavior: qpos_joint [7] = 6 joints + 1 gripper
+            state = qpos_joint.astype(np.float32)  # [T, 7]
+        elif state_mode == 'ee_only':
+            # EE pose only: qpos_end [8] = 7 ee_pose + 1 gripper
+            state = qpos_end.astype(np.float32)  # [T, 8]
+        elif state_mode == 'both':
+            # Both joint and EE: concat [14] = qpos_joint[7] + qpos_end[:7]
+            # Note: gripper is included in qpos_joint, so we don't duplicate from qpos_end
+            state = np.concatenate([
+                qpos_joint.astype(np.float32),  # [T, 7] (6 joints + gripper)
+                qpos_end[:, :7].astype(np.float32),  # [T, 7] (ee_pose without gripper)
+            ], axis=-1)  # [T, 14]
+        else:
+            raise ValueError(f"Unknown state_mode: {state_mode}")
         
-        # Also provide ee_pose for action computation
+        # Also provide ee_pose for action computation (always needed for relative pose)
         ee_pose = qpos_end[:, :7].astype(np.float32)  # [T, 7] (without gripper)
         
         return {
@@ -365,12 +407,16 @@ class ActionNormalizer:
 # Dataset Information
 # ============================================================================
 
-def get_carm_data_info(data_dir: str) -> Dict[str, Any]:
+def get_carm_data_info(
+    data_dir: str,
+    state_mode: Literal["joint_only", "ee_only", "both"] = "joint_only",
+) -> Dict[str, Any]:
     """
     Get information about CARM dataset.
     
     Args:
         data_dir: Directory containing episode HDF5 files
+        state_mode: State composition mode for computing state_dim
         
     Returns:
         Dict with dataset information
@@ -404,10 +450,16 @@ def get_carm_data_info(data_dir: str) -> Dict[str, Any]:
         else:
             action_dim = 15  # default
     
+    # Compute state_dim based on state_mode
+    state_dim = get_state_dim_for_mode(state_mode)
+    
     info = {
         'num_episodes': len(files),
         'image_shape': list(image_shape),
-        'state_dim': qpos_joint_dim,  # 7 (aligned with infer_g3_api.py)
+        'state_dim': state_dim,  # Depends on state_mode
+        'state_mode': state_mode,  # Record which mode was used
+        'qpos_joint_dim': qpos_joint_dim,  # 7 (raw dimension)
+        'qpos_end_dim': qpos_end_dim,  # 8 (raw dimension)
         'ee_pose_dim': 7,  # end effector pose without gripper
         'action_dim': action_dim,  # 15
         'gripper_dim': 1,
