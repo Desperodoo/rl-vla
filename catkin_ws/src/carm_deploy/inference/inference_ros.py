@@ -211,6 +211,7 @@ class RealPolicy(PolicyInterface):
         self.state_encoder = None
         self.agent = None
         self.gripper_head = None  # Discrete gripper classification head
+        self.action_normalizer = None  # Action normalizer (loaded from checkpoint if available)
         
         # 观测历史缓冲区
         self.obs_history = {
@@ -336,6 +337,10 @@ class RealPolicy(PolicyInterface):
             self.gripper_open_val = args.get('gripper_open_val', self.gripper_open_val)
             self.gripper_close_val = args.get('gripper_close_val', self.gripper_close_val)
             self.gripper_head_hidden_dim = args.get('gripper_head_hidden_dim', self.gripper_head_hidden_dim)
+            
+            # Action normalization configuration
+            self.normalize_actions = args.get('normalize_actions', False)
+            self.action_norm_mode = args.get('action_norm_mode', 'standard')
                 
             rospy.loginfo(f"Config: algorithm={self.algorithm}, action_dim={self.action_dim} (continuous), "
                          f"obs_horizon={self.obs_horizon}, pred_horizon={self.pred_horizon}")
@@ -451,7 +456,23 @@ class RealPolicy(PolicyInterface):
         else:
             rospy.logwarn("gripper_head not in checkpoint! Using random initialization (this may cause poor gripper behavior)")
         
-        # 4. 设置为评估模式
+        # 5. 加载 action normalizer（如果训练时使用了 normalize_actions）
+        if hasattr(self, 'normalize_actions') and self.normalize_actions:
+            normalizer_path = os.path.join(checkpoint_dir, "action_normalizer.json")
+            if os.path.exists(normalizer_path):
+                from diffusion_policy.carm_utils import ActionNormalizer
+                self.action_normalizer = ActionNormalizer(mode=self.action_norm_mode)
+                self.action_normalizer.load(normalizer_path)
+                rospy.loginfo(f"Loaded action normalizer from: {normalizer_path}")
+                rospy.loginfo(f"  Mode: {self.action_normalizer.mode}")
+                if self.action_normalizer.mode == 'standard':
+                    rospy.loginfo(f"  Mean: {self.action_normalizer.stats['mean'][:3]}...")
+                    rospy.loginfo(f"  Std:  {self.action_normalizer.stats['std'][:3]}...")
+            else:
+                rospy.logwarn(f"normalize_actions=True but action_normalizer.json not found at {normalizer_path}")
+                rospy.logwarn("Actions will NOT be denormalized - this may cause incorrect behavior!")
+        
+        # 6. 设置为评估模式
         self.visual_encoder.eval()
         if self.state_encoder is not None:
             self.state_encoder.eval()
@@ -635,6 +656,16 @@ class RealPolicy(PolicyInterface):
             
             # 1. Get continuous actions (no gripper)
             actions_cont = self.agent.get_action_deterministic(obs_features)  # [1, pred_horizon, action_dim]
+            
+            # 1.5 Apply inverse normalization if action_normalizer exists
+            if self.action_normalizer is not None:
+                # actions_cont: [1, pred_horizon, action_dim]
+                actions_np = actions_cont.cpu().numpy()
+                batch_size, pred_horizon, action_dim = actions_np.shape
+                # Flatten to [batch*pred_horizon, action_dim] for inverse_transform
+                actions_flat = actions_np.reshape(-1, action_dim)
+                actions_denorm = self.action_normalizer.inverse_transform(actions_flat)
+                actions_cont = torch.from_numpy(actions_denorm.reshape(batch_size, pred_horizon, action_dim)).to(self.device).float()
             
             # 2. Get discrete gripper predictions
             gripper_logits = self.gripper_head(obs_features)  # [1, pred_horizon, 2]
