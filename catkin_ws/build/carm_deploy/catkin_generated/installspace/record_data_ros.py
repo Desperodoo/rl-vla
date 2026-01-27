@@ -42,6 +42,7 @@ sys.path.insert(0, carm_deploy_root)
 
 from core.env_ros import RealEnvironment
 from utils.image_sync import ImageSynchronizer, SingleImageSubscriber
+from utils.timeline_logger import TimelineLogger
 
 
 class DataRecorder:
@@ -58,8 +59,9 @@ class DataRecorder:
         """
         self.config = config
         
-        # 输出目录
-        self.output_dir = config.get('output_dir', './recorded_data')
+        # 输出目录（展开 ~ 和环境变量）
+        raw_output_dir = config.get('output_dir', './recorded_data')
+        self.output_dir = os.path.expandvars(os.path.expanduser(raw_output_dir))
         os.makedirs(self.output_dir, exist_ok=True)
         
         # 记录参数
@@ -80,6 +82,21 @@ class DataRecorder:
         # 初始化环境
         rospy.loginfo("Initializing environment...")
         self.env = RealEnvironment(config)
+
+        # 时间线日志（用于分析采集时间语义）
+        self.timeline_enabled = config.get('timeline_enabled', True)
+        self.timeline_logger = None
+        if self.timeline_enabled:
+            timeline_path = config.get('timeline_log', '')
+            if not timeline_path:
+                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                timeline_path = os.path.join(self.output_dir, f'timeline_record_{timestamp}.jsonl')
+            self.timeline_logger = TimelineLogger(timeline_path)
+            self.timeline_logger.log(
+                'init',
+                record_freq=self.record_freq,
+                output_dir=self.output_dir,
+            )
         
         # 数据缓冲
         self.episode_data = {
@@ -302,6 +319,8 @@ class DataRecorder:
         
         if obs is None:
             return
+
+        t_obs_ready_sys = time.time()
         
         # 记录数据
         self.episode_data['images'].append(obs['images'][0])  # 第一个相机
@@ -312,9 +331,29 @@ class DataRecorder:
         self.episode_data['timestamps'].append(obs['stamp'])
         
         # 记录动作命令
+        t_action_query_sys = time.time()
         action = self.env.get_last_action()
         if action is not None:
             self.episode_data['action'].append(action)
+
+        if self.timeline_logger is not None:
+            obs_stamp_ros = obs.get('stamp', None)
+            delta_obs = None
+            delta_action_obs = None
+            if obs_stamp_ros is not None:
+                delta_obs = t_obs_ready_sys - obs_stamp_ros
+                delta_action_obs = t_action_query_sys - obs_stamp_ros
+            self.timeline_logger.log(
+                'record_step',
+                episode=self.episode_count,
+                step=self.step_count,
+                obs_stamp_ros=obs_stamp_ros,
+                t_obs_ready_sys=t_obs_ready_sys,
+                delta_obs=delta_obs,
+                t_action_query_sys=t_action_query_sys,
+                delta_action_obs=delta_action_obs,
+                action_present=action is not None,
+            )
         
         self.step_count += 1
         
@@ -404,6 +443,9 @@ class DataRecorder:
         
         self.env.shutdown()
         cv2.destroyAllWindows()
+
+        if self.timeline_logger is not None:
+            self.timeline_logger.close()
         
         rospy.loginfo("DataRecorder shutdown complete")
 
@@ -424,7 +466,7 @@ def parse_args():
     parser.add_argument('--camera_topics', type=str,
                         default='/camera/color/image_raw',
                         help='Camera topic(s), comma separated')
-    parser.add_argument('--sync_slop', type=float, default=0.1,
+    parser.add_argument('--sync_slop', type=float, default=0.02,
                         help='Image sync tolerance in seconds')
     
     # 记录参数
@@ -444,8 +486,17 @@ def parse_args():
     # 可视化
     parser.add_argument('--vis', action='store_true',
                         help='Visualize images')
+
+    # 时间线日志
+    parser.add_argument('--timeline_enabled', action='store_true',
+                        help='Enable timeline logging (default: enabled)')
+    parser.add_argument('--timeline_disabled', action='store_true',
+                        help='Disable timeline logging')
+    parser.add_argument('--timeline_log', type=str, default='',
+                        help='Timeline log path (JSONL). Empty uses output_dir')
     
-    return parser.parse_args()
+    # 兼容 roslaunch remap 参数
+    return parser.parse_args(args=rospy.myargv()[1:])
 
 
 def main():
@@ -458,6 +509,21 @@ def main():
     
     # 转换为配置字典
     config = vars(args)
+
+    # 从 ROS 参数覆盖（支持 roslaunch <param> 方式）
+    for key in [
+        'output_dir', 'robot_ip', 'robot_mode', 'camera_topics', 'sync_slop',
+        'record_freq', 'max_episodes', 'max_steps', 'image_width', 'image_height',
+        'teleop', 'vis', 'timeline_log', 'timeline_enabled', 'timeline_disabled'
+    ]:
+        if rospy.has_param(f'~{key}'):
+            config[key] = rospy.get_param(f'~{key}')
+
+    # 时间线日志开关：默认开启，除非显式禁用
+    if config.get('timeline_disabled', False):
+        config['timeline_enabled'] = False
+    else:
+        config['timeline_enabled'] = True
     
     # 处理相机话题
     if isinstance(config['camera_topics'], str):

@@ -189,7 +189,7 @@ class KeyboardInterventionHandler:
                 self._intervention_active = True
                 self._log_event('xyz', key=key_lower, delta=self._current_xyz_delta.tolist())
                 
-            # 夹爪控制: G=打开, H=关闭
+            # 夹爪控制: G=打开, H=关闭 (一次性干预，不持续覆盖模型预测)
             elif key_lower == 'g':  # G - 打开
                 self._current_gripper = self.gripper_open
                 self._intervention_active = True
@@ -267,8 +267,9 @@ class KeyboardInterventionHandler:
                 mask[3] = True
             
             # 清除状态（一次性干预）
+            # 修复：gripper 干预也应该是一次性的，否则会持续覆盖模型预测
             self._current_xyz_delta = np.zeros(3)
-            # 注意：gripper 状态保持，直到按下另一个键
+            self._current_gripper = None  # 清除 gripper 干预，让模型恢复控制
             self._intervention_active = np.any(mask)
             
             if not np.any(mask):

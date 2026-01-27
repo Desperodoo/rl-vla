@@ -71,7 +71,7 @@ from diffusion_policy.algorithms import (
     ShortCutFlowAgent,
     ShortCutVelocityUNet1D,
 )
-from diffusion_policy.algorithms.networks import VelocityUNet1D
+from diffusion_policy.algorithms.networks import VelocityUNet1D, GripperHead
 
 
 @dataclass
@@ -161,8 +161,8 @@ class Args:
     """GroupNorm groups"""
     
     # Visual encoder settings
-    visual_encoder_type: Literal["plain_conv", "resnet18", "resnet34", "resnet50"] = "plain_conv"
-    """visual encoder type: plain_conv (lightweight), resnet18/34/50 (pretrained)"""
+    visual_encoder_type: Literal["plain_conv", "resnet10", "resnet18", "resnet34", "resnet50"] = "resnet10"
+    """visual encoder type: plain_conv (lightweight), resnet10 (4.9M, from HuggingFace), resnet18/34/50 (pretrained)"""
     visual_feature_dim: int = 256
     """visual encoder output dimension"""
     pretrained_backbone: bool = True
@@ -174,7 +174,7 @@ class Args:
     lr_backbone: float = 1e-5
     """learning rate for backbone (ResNet only, typically lower than main lr)"""
     auto_image_size: bool = True
-    """automatically adjust image size based on encoder type (128 for plain_conv, 224 for ResNet)"""
+    """automatically adjust image size based on encoder type (128 for plain_conv/resnet10, 224 for ResNet18+)"""
     
     # State encoder settings
     use_state_encoder: bool = True
@@ -264,54 +264,7 @@ class Args:
     """whether to resume optimizer state (set False to reset learning rate)"""
 
 
-class GripperHead(nn.Module):
-    """
-    Gripper classification head.
-    
-    Takes encoded observation features and predicts open/close for each timestep
-    in the prediction horizon.
-    
-    Input: obs_features [B, obs_horizon, obs_dim]
-    Output: logits [B, pred_horizon, 2]
-    """
-    
-    def __init__(
-        self,
-        obs_dim: int,
-        obs_horizon: int,
-        pred_horizon: int,
-        hidden_dim: int = 256,
-        num_classes: int = 2,
-    ):
-        super().__init__()
-        self.obs_horizon = obs_horizon
-        self.pred_horizon = pred_horizon
-        self.num_classes = num_classes
-        
-        # Flatten obs_features and project to hidden
-        input_dim = obs_horizon * obs_dim
-        self.net = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, pred_horizon * num_classes),
-        )
-    
-    def forward(self, obs_features: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-            obs_features: [B, obs_horizon, obs_dim]
-        Returns:
-            logits: [B, pred_horizon, num_classes]
-        """
-        B = obs_features.shape[0]
-        # Flatten: [B, obs_horizon * obs_dim]
-        x = obs_features.view(B, -1)
-        # Forward: [B, pred_horizon * num_classes]
-        x = self.net(x)
-        # Reshape: [B, pred_horizon, num_classes]
-        return x.view(B, self.pred_horizon, self.num_classes)
+# Note: GripperHead is now imported from diffusion_policy.algorithms.networks
 
 
 class IterationBasedBatchSampler:
@@ -1023,11 +976,12 @@ if __name__ == "__main__":
     print(f"Agent ({args.algorithm}) parameters: {sum(p.numel() for p in agent.parameters()) / 1e6:.2f}M")
     
     # Create gripper classification head
+    # GripperHead takes flattened obs features as input
+    gripper_input_dim = args.obs_horizon * (visual_feature_dim + encoded_state_dim)
     gripper_head = GripperHead(
-        obs_dim=visual_feature_dim + encoded_state_dim,
-        obs_horizon=args.obs_horizon,
-        pred_horizon=args.pred_horizon,
+        input_dim=gripper_input_dim,
         hidden_dim=args.gripper_head_hidden_dim,
+        pred_horizon=args.pred_horizon,
         num_classes=2,
     ).to(device)
     print(f"GripperHead parameters: {sum(p.numel() for p in gripper_head.parameters()) / 1e6:.4f}M")

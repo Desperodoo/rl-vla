@@ -37,8 +37,11 @@ from einops import rearrange
 # 训练代码中的模块
 from diffusion_policy.plain_conv import PlainConv
 from diffusion_policy.resnet_encoder import ResNetEncoder, create_visual_encoder, get_encoder_input_size
-from diffusion_policy.carm_utils import StateEncoder, load_carm_episode, compute_relative_pose_transform
-from diffusion_policy.algorithms.networks import VelocityUNet1D
+from diffusion_policy.carm_utils import (
+    StateEncoder, load_carm_episode, compute_relative_pose_transform,
+    ActionNormalizer, get_state_dim_for_mode,
+)
+from diffusion_policy.algorithms.networks import VelocityUNet1D, GripperHead
 from diffusion_policy.algorithms import (
     ConsistencyFlowAgent,
     FlowMatchingAgent,
@@ -70,7 +73,8 @@ class OfflinePolicy:
         # 默认参数
         self.obs_horizon = 2
         self.pred_horizon = 16
-        self.action_dim = 15
+        self.action_dim = 14  # Continuous action dim (no gripper)
+        self.action_dim_full = 15  # Full action dim for output
         self.state_dim = 7
         self.target_image_size = (128, 128)
         self.visual_feature_dim = 256
@@ -80,10 +84,25 @@ class OfflinePolicy:
         self.algorithm = 'consistency_flow'
         self.visual_encoder_type = 'plain_conv'  # 支持 plain_conv, resnet18, resnet34, resnet50
         
+        # 新增配置
+        self.state_mode = 'joint_only'  # joint_only, ee_only, both
+        self.action_mode = 'full'  # full, ee_only
+        self.normalize_actions = False
+        self.action_norm_mode = 'standard'
+        
         # 模型组件
         self.visual_encoder = None
         self.state_encoder = None
         self.agent = None
+        self.gripper_head = None  # Discrete gripper head
+        self.action_normalizer = None  # Action normalizer (if used during training)
+        
+        # Gripper 配置
+        self.gripper_threshold = 0.5
+        self.gripper_open_val = 0.08
+        self.gripper_close_val = 0.0
+        self.gripper_head_hidden_dim = 128
+        self._gripper_history = []  # For hysteresis
         
         # 观测历史
         self.obs_history = {'rgb': [], 'state': []}
@@ -129,11 +148,35 @@ class OfflinePolicy:
                     target_size = tuple(target_size)
                 self.target_image_size = target_size
             
-            action_mode = args.get('action_mode', 'full')
-            self.action_dim = 15 if action_mode == 'full' else 8
+            # State mode 配置
+            self.state_mode = args.get('state_mode', 'joint_only')
+            self.state_dim = get_state_dim_for_mode(self.state_mode)
             
-            print(f"Config: algorithm={self.algorithm}, action_dim={self.action_dim}, "
-                  f"obs_horizon={self.obs_horizon}, pred_horizon={self.pred_horizon}")
+            # Action mode 配置
+            self.action_mode = args.get('action_mode', 'full')
+            if self.action_mode == 'full':
+                self.action_dim = 13  # joint(6)+rel_pose(7), gripper is discrete
+                self.action_dim_full = 15  # Output dimension with gripper
+            else:  # ee_only
+                self.action_dim = 7  # rel_pose(7), gripper is discrete
+                self.action_dim_full = 8  # Output dimension with gripper
+            
+            # Discrete gripper 配置
+            self.gripper_threshold = args.get('gripper_threshold', self.gripper_threshold)
+            self.gripper_open_val = args.get('gripper_open_val', self.gripper_open_val)
+            self.gripper_close_val = args.get('gripper_close_val', self.gripper_close_val)
+            self.gripper_head_hidden_dim = args.get('gripper_head_hidden_dim', self.gripper_head_hidden_dim)
+            
+            # Action normalization 配置
+            self.normalize_actions = args.get('normalize_actions', False)
+            self.action_norm_mode = args.get('action_norm_mode', 'standard')
+            
+            print(f"Config: algorithm={self.algorithm}, action_dim={self.action_dim} (continuous)")
+            print(f"  obs_horizon={self.obs_horizon}, pred_horizon={self.pred_horizon}")
+            print(f"State mode: {self.state_mode}, state_dim={self.state_dim}")
+            print(f"Action mode: {self.action_mode}, action_dim_full={self.action_dim_full}")
+            print(f"Discrete gripper: threshold={self.gripper_threshold}, open={self.gripper_open_val}, close={self.gripper_close_val}")
+            print(f"Action normalization: {self.normalize_actions}, mode={self.action_norm_mode}")
             print(f"Visual encoder: {self.visual_encoder_type}, image_size={self.target_image_size}")
         
         # 创建 visual encoder (根据类型选择)
@@ -157,6 +200,13 @@ class OfflinePolicy:
         
         global_cond_dim = self.obs_horizon * (self.visual_feature_dim + encoded_state_dim)
         self.agent = self._create_agent(global_cond_dim)
+        
+        # 创建 GripperHead (discrete gripper classification)
+        self.gripper_head = GripperHead(
+            input_dim=global_cond_dim,
+            hidden_dim=self.gripper_head_hidden_dim,
+            pred_horizon=self.pred_horizon,
+        ).to(self.device)
         
         # 加载权重
         print(f"Loading checkpoint from: {self.model_path}")
@@ -184,11 +234,34 @@ class OfflinePolicy:
                 print("Warning: Regular agent not found, using EMA agent")
                 self.agent.load_state_dict(ckpt["ema_agent"])
         
+        # 加载 gripper_head
+        if "gripper_head" in ckpt:
+            self.gripper_head.load_state_dict(ckpt["gripper_head"])
+            print("Loaded gripper_head weights")
+        else:
+            print("Warning: gripper_head not in checkpoint! Using random initialization")
+        
+        # 加载 action normalizer（如果训练时使用了 normalize_actions）
+        if self.normalize_actions:
+            normalizer_path = os.path.join(checkpoint_dir, "action_normalizer.json")
+            if os.path.exists(normalizer_path):
+                self.action_normalizer = ActionNormalizer(mode=self.action_norm_mode)
+                self.action_normalizer.load(normalizer_path)
+                print(f"Loaded action normalizer from: {normalizer_path}")
+                print(f"  Mode: {self.action_normalizer.mode}")
+                if self.action_normalizer.mode == 'standard':
+                    print(f"  Mean: {self.action_normalizer.stats['mean'][:3]}...")
+                    print(f"  Std:  {self.action_normalizer.stats['std'][:3]}...")
+            else:
+                print(f"Warning: normalize_actions=True but action_normalizer.json not found!")
+                print(f"  Expected path: {normalizer_path}")
+        
         # 评估模式
         self.visual_encoder.eval()
         if self.state_encoder is not None:
             self.state_encoder.eval()
         self.agent.eval()
+        self.gripper_head.eval()
         
         print(f"Model loaded successfully! (use_ema={self.use_ema})")
     
@@ -235,7 +308,9 @@ class OfflinePolicy:
     
     def reset(self):
         """重置观测历史"""
+        from collections import deque
         self.obs_history = {'rgb': [], 'state': []}
+        self._gripper_history = deque(maxlen=5)  # Reset gripper hysteresis history
     
     def _preprocess_image(self, image: np.ndarray) -> np.ndarray:
         """预处理图像"""
@@ -289,12 +364,12 @@ class OfflinePolicy:
         
         Args:
             image: RGB 图像 [H, W, C]
-            qpos: 关节状态 [7]
+            qpos: 关节状态，根据 state_mode 维度不同
             num_steps: 推理步数 (None = 使用默认值)
             deterministic: 是否使用确定性推理 (从零开始而非噪声)
             
         Returns:
-            actions: 预测动作 [pred_horizon, action_dim]
+            actions: 预测动作 [pred_horizon, action_dim_full]
         """
         # 预处理
         image_processed = self._preprocess_image(image)
@@ -303,12 +378,103 @@ class OfflinePolicy:
         # 推理
         obs_features = self._encode_observations()
         
+        # 1. Get continuous actions (no gripper)
         if deterministic:
-            actions = self.agent.get_action_deterministic(obs_features, num_steps=num_steps)
+            actions_cont = self.agent.get_action_deterministic(obs_features, num_steps=num_steps)
         else:
-            actions = self.agent.get_action(obs_features, num_steps=num_steps)
+            actions_cont = self.agent.get_action(obs_features, num_steps=num_steps)
         
-        return actions.squeeze(0).cpu().numpy()
+        # 2. Apply inverse normalization if action_normalizer exists
+        if self.action_normalizer is not None:
+            actions_np = actions_cont.cpu().numpy()
+            batch_size, pred_horizon, action_dim = actions_np.shape
+            actions_flat = actions_np.reshape(-1, action_dim)
+            actions_denorm = self.action_normalizer.inverse_transform(actions_flat)
+            actions_cont = torch.from_numpy(actions_denorm.reshape(batch_size, pred_horizon, action_dim)).to(self.device).float()
+        
+        # 3. Get discrete gripper predictions
+        gripper_logits = self.gripper_head(obs_features)  # [1, pred_horizon, 2]
+        gripper_cls = gripper_logits.argmax(dim=-1)  # [1, pred_horizon], 0=open, 1=close
+        
+        # 4. Apply hysteresis (5-frame majority voting)
+        gripper_vals = self._apply_gripper_hysteresis(gripper_cls[0].cpu().numpy())  # [pred_horizon]
+        
+        # 5. Reconstruct full action with gripper
+        actions_full = self._reconstruct_full_action(actions_cont[0], gripper_vals)  # [pred_horizon, action_dim_full]
+        
+        return actions_full.cpu().numpy()
+    
+    def _apply_gripper_hysteresis(self, gripper_cls: np.ndarray) -> np.ndarray:
+        """
+        Apply hysteresis to gripper predictions.
+        
+        标准做法（对齐 Diffusion Policy / ACT）:
+        - 只使用第一帧的 gripper 预测
+        - 可选的滑窗多数投票用于防止抖动
+        
+        Args:
+            gripper_cls: [pred_horizon] array of gripper class predictions (0=open, 1=close)
+            
+        Returns:
+            [pred_horizon] array of gripper values
+        """
+        from collections import deque
+        # Ensure _gripper_history is a deque with maxlen=5
+        if not hasattr(self, '_gripper_history') or not isinstance(self._gripper_history, deque):
+            self._gripper_history = deque(maxlen=5)
+        
+        # 标准做法：只使用第一帧的 gripper 预测（对齐 Diffusion Policy / ACT）
+        current_vote = int(gripper_cls[0])
+        
+        # Add current vote to history
+        self._gripper_history.append(current_vote)
+        
+        # Majority voting over history (防止抖动)
+        if len(self._gripper_history) >= 3:
+            vote_result = sum(self._gripper_history) > len(self._gripper_history) / 2
+            new_state = 1 if vote_result else 0
+        else:
+            new_state = current_vote
+        
+        # Convert to gripper values
+        gripper_val = self.gripper_close_val if new_state == 1 else self.gripper_open_val
+        return np.full(len(gripper_cls), gripper_val)
+    
+    def _reconstruct_full_action(self, actions_cont: torch.Tensor, gripper_vals: np.ndarray) -> torch.Tensor:
+        """
+        Reconstruct full action array with gripper values.
+        
+        Args:
+            actions_cont: [pred_horizon, action_dim] continuous actions (13 for full, 7 for ee_only)
+            gripper_vals: [pred_horizon] gripper values
+            
+        Returns:
+            [pred_horizon, action_dim_full] full actions (15 for full, 8 for ee_only)
+        """
+        pred_horizon = actions_cont.shape[0]
+        gripper_tensor = torch.from_numpy(gripper_vals).to(self.device).float().unsqueeze(-1)  # [pred_horizon, 1]
+        
+        if self.action_mode == 'full':
+            # actions_cont: [pred_horizon, 13] = joint(6) + rel_pose(7), gripper is discrete
+            # output: [pred_horizon, 15] = joint(6) + gripper(1) + rel_pose(7) + ee_gripper(1)
+            joint_action = actions_cont[:, :6]  # [pred_horizon, 6]
+            rel_pose = actions_cont[:, 6:13]    # [pred_horizon, 7]
+            
+            actions_full = torch.cat([
+                joint_action,        # [pred_horizon, 6]
+                gripper_tensor,      # [pred_horizon, 1] - discrete gripper (joint channel)
+                rel_pose,            # [pred_horizon, 7]
+                gripper_tensor,      # [pred_horizon, 1] - discrete gripper (ee channel)
+            ], dim=-1)
+        else:  # ee_only
+            # actions_cont: [pred_horizon, 7] = rel_pose(7), gripper is discrete
+            # output: [pred_horizon, 8] = rel_pose(7) + gripper(1)
+            actions_full = torch.cat([
+                actions_cont,    # [pred_horizon, 7]
+                gripper_tensor,  # [pred_horizon, 1]
+            ], dim=-1)
+        
+        return actions_full
 
 
 class OfflineEvaluator:
@@ -373,42 +539,69 @@ class OfflineEvaluator:
         
         T = len(episode['qpos_joint'])
         
-        # ======== 关键修复：正确计算相对动作（对齐训练逻辑） ========
+        # ======== 正确计算相对动作（对齐训练逻辑） ========
         # 训练时，对于每个样本：
-        #   - 以观测帧的末端位姿为参考 (ref_pose)
-        #   - 所有 action horizon 内的末端位姿都相对于这个参考计算
-        # 离线测试时，我们对每一帧都做推理，每帧都以自己为参考
-        # 因此 GT action 中的相对位姿部分应该是该帧末端位姿相对于自身，即 identity
+        #   - ref_pose = qpos_end[t, :7]（当前帧末端位姿）
+        #   - target_pose = raw_actions[t+k, 7:14]（第 k 步的目标位姿）
+        #   - relative_pose = compute_relative_pose_transform(ref_pose, target_pose)
+        # 
+        # 离线测试时，对于每帧 t：
+        #   - 模型输出的 pred_actions[0] 是从当前位姿到 raw_actions[t, 7:14]（目标位姿）的相对变换
+        #   - GT 应该是：从 qpos_end[t] 到 raw_actions[t, 7:14] 的相对变换
+        #
+        # 注意：raw_actions[t, 7:14] 是目标位姿，qpos_end[t, :7] 是当前位姿
+        #      两者不相同！目标位姿是机械臂要去的地方，当前位姿是机械臂实际在的地方
         
-        raw_actions = episode['action']  # [T, 15] 原始动作
-        qpos_end = episode['qpos_end']   # [T, 8] 末端位姿 [x,y,z,qx,qy,qz,qw,gripper]
+        raw_actions = episode['action']  # [T, 15] 原始动作（包含目标位姿）
+        qpos_end = episode['qpos_end']   # [T, 8] 当前末端位姿 [x,y,z,qx,qy,qz,qw,gripper]
         
-        # 构建相对动作 (每帧相对于自身)
-        # relative = inv(ref_pose) @ target_pose
-        # 当 ref_pose == target_pose 时，relative = identity = [0,0,0, 0,0,0,1]
+        # 构建相对动作：计算从当前位姿到目标位姿的相对变换（与训练一致）
         relative_actions = np.zeros_like(raw_actions)
         for t in range(T):
-            relative_actions[t, :6] = raw_actions[t, :6]  # 关节角度不变
-            relative_actions[t, 6] = raw_actions[t, 6]    # 夹爪状态不变
-            # 相对位姿 = identity (因为是相对于自身)
-            relative_actions[t, 7:10] = 0.0  # position offset = 0
-            relative_actions[t, 10:14] = np.array([0.0, 0.0, 0.0, 1.0])  # quat identity
+            relative_actions[t, :6] = raw_actions[t, :6]  # 关节角度（绝对值）
+            relative_actions[t, 6] = raw_actions[t, 6]    # 夹爪状态
+            
+            # 计算相对位姿：从当前位姿到目标位姿（与训练时一致）
+            ref_pose = qpos_end[t, :7]           # 当前帧末端位姿
+            target_pose = raw_actions[t, 7:14]   # 目标位姿（来自 action）
+            relative_pose = compute_relative_pose_transform(ref_pose, target_pose)
+            relative_actions[t, 7:14] = relative_pose
+            
             relative_actions[t, 14] = raw_actions[t, 14]  # 末端夹爪
         
         iterator = tqdm(range(T), desc=f"Episode {ep_idx}") if verbose else range(T)
         
+        # 获取 state_mode 和 action_mode
+        state_mode = self.policy.state_mode
+        action_mode = self.policy.action_mode
+        
         for t in iterator:
             # 获取当前帧数据
             image = episode['images'][t]  # [H, W, C]
-            qpos = episode['qpos_joint'][t]  # [7]
-            gt_action = relative_actions[t]  # [15] 相对位姿动作
+            
+            # 根据 state_mode 构建状态向量
+            if state_mode == 'joint_only':
+                qpos = episode['qpos_joint'][t]  # [7]
+            elif state_mode == 'ee_only':
+                qpos = episode['qpos_end'][t]    # [8]
+            else:  # both
+                qpos = np.concatenate([
+                    episode['qpos_joint'][t][:6],  # [6] joint (no gripper)
+                    episode['qpos_end'][t]          # [8] ee pose
+                ])  # [14]
+            
+            # 根据 action_mode 构建 GT action
+            if action_mode == 'full':
+                gt_action = relative_actions[t]  # [15]
+            else:  # ee_only
+                gt_action = relative_actions[t, 7:15]  # [8] rel_pose(7) + gripper(1)
             
             # 推理
             pred_actions = self.policy.predict(
                 image, qpos, 
                 num_steps=num_steps,
                 deterministic=deterministic
-            )  # [pred_horizon, action_dim]
+            )  # [pred_horizon, action_dim_full]
             pred_action = pred_actions[0]  # 取第一个预测动作
             
             predicted_actions.append(pred_action)
@@ -429,61 +622,98 @@ class OfflineEvaluator:
         }
     
     def _compute_metrics(self, pred: np.ndarray, gt: np.ndarray) -> Dict:
-        """计算评估指标"""
-        # full mode: [joint(6), gripper(1), relative_end_pose(7), gripper(1)]
-        joint_pred = pred[:, :6]
-        joint_gt = gt[:, :6]
-        gripper_joint_pred = pred[:, 6]
-        gripper_joint_gt = gt[:, 6]
-        pose_pred = pred[:, 7:14]
-        pose_gt = gt[:, 7:14]
-        gripper_pose_pred = pred[:, 14]
-        gripper_pose_gt = gt[:, 14]
+        """计算评估指标（支持 full 和 ee_only 两种 action_mode）"""
+        action_mode = self.policy.action_mode
+        
+        if action_mode == 'full':
+            # full mode: [joint(6), gripper(1), relative_end_pose(7), gripper(1)]
+            joint_pred = pred[:, :6]
+            joint_gt = gt[:, :6]
+            gripper_joint_pred = pred[:, 6]
+            gripper_joint_gt = gt[:, 6]
+            pose_pred = pred[:, 7:14]
+            pose_gt = gt[:, 7:14]
+            gripper_pose_pred = pred[:, 14]
+            gripper_pose_gt = gt[:, 14]
 
-        # 推理实际使用: relative_end_pose + gripper(6)
-        ee_pred = np.concatenate([pred[:, 6:7], pred[:, 7:14]], axis=1)
-        ee_gt = np.concatenate([gt[:, 6:7], gt[:, 7:14]], axis=1)
+            # 推理实际使用: relative_end_pose + gripper
+            ee_pred = np.concatenate([pred[:, 6:7], pred[:, 7:14]], axis=1)
+            ee_gt = np.concatenate([gt[:, 6:7], gt[:, 7:14]], axis=1)
 
-        # 计算 MSE
-        joint_mse = np.mean((joint_pred - joint_gt) ** 2)
-        gripper_joint_mse = np.mean((gripper_joint_pred - gripper_joint_gt) ** 2)
-        gripper_pose_mse = np.mean((gripper_pose_pred - gripper_pose_gt) ** 2)
-        pose_mse = np.mean((pose_pred - pose_gt) ** 2)
-        ee_mse = np.mean((ee_pred - ee_gt) ** 2)
-        total_mse = np.mean((pred - gt) ** 2)
+            # 计算 MSE
+            joint_mse = np.mean((joint_pred - joint_gt) ** 2)
+            gripper_joint_mse = np.mean((gripper_joint_pred - gripper_joint_gt) ** 2)
+            gripper_pose_mse = np.mean((gripper_pose_pred - gripper_pose_gt) ** 2)
+            pose_mse = np.mean((pose_pred - pose_gt) ** 2)
+            ee_mse = np.mean((ee_pred - ee_gt) ** 2)
+            total_mse = np.mean((pred - gt) ** 2)
 
-        # 计算 MAE
-        joint_mae = np.mean(np.abs(joint_pred - joint_gt))
-        gripper_joint_mae = np.mean(np.abs(gripper_joint_pred - gripper_joint_gt))
-        gripper_pose_mae = np.mean(np.abs(gripper_pose_pred - gripper_pose_gt))
-        pose_mae = np.mean(np.abs(pose_pred - pose_gt))
-        ee_mae = np.mean(np.abs(ee_pred - ee_gt))
-        total_mae = np.mean(np.abs(pred - gt))
+            # 计算 MAE
+            joint_mae = np.mean(np.abs(joint_pred - joint_gt))
+            gripper_joint_mae = np.mean(np.abs(gripper_joint_pred - gripper_joint_gt))
+            gripper_pose_mae = np.mean(np.abs(gripper_pose_pred - gripper_pose_gt))
+            pose_mae = np.mean(np.abs(pose_pred - pose_gt))
+            ee_mae = np.mean(np.abs(ee_pred - ee_gt))
+            total_mae = np.mean(np.abs(pred - gt))
 
-        # 计算各关节的误差
-        joint_errors = []
-        for i in range(6):
-            joint_errors.append({
-                'mse': np.mean((joint_pred[:, i] - joint_gt[:, i]) ** 2),
-                'mae': np.mean(np.abs(joint_pred[:, i] - joint_gt[:, i])),
-                'max': np.max(np.abs(joint_pred[:, i] - joint_gt[:, i])),
-            })
+            # 计算各关节的误差
+            joint_errors = []
+            for i in range(6):
+                joint_errors.append({
+                    'mse': np.mean((joint_pred[:, i] - joint_gt[:, i]) ** 2),
+                    'mae': np.mean(np.abs(joint_pred[:, i] - joint_gt[:, i])),
+                    'max': np.max(np.abs(joint_pred[:, i] - joint_gt[:, i])),
+                })
 
-        return {
-            'joint_mse': joint_mse,
-            'joint_mae': joint_mae,
-            'gripper_joint_mse': gripper_joint_mse,
-            'gripper_joint_mae': gripper_joint_mae,
-            'gripper_pose_mse': gripper_pose_mse,
-            'gripper_pose_mae': gripper_pose_mae,
-            'pose_mse': pose_mse,
-            'pose_mae': pose_mae,
-            'ee_mse': ee_mse,
-            'ee_mae': ee_mae,
-            'total_mse': total_mse,
-            'total_mae': total_mae,
-            'joint_errors': joint_errors,
-        }
+            return {
+                'joint_mse': joint_mse,
+                'joint_mae': joint_mae,
+                'gripper_joint_mse': gripper_joint_mse,
+                'gripper_joint_mae': gripper_joint_mae,
+                'gripper_pose_mse': gripper_pose_mse,
+                'gripper_pose_mae': gripper_pose_mae,
+                'pose_mse': pose_mse,
+                'pose_mae': pose_mae,
+                'ee_mse': ee_mse,
+                'ee_mae': ee_mae,
+                'total_mse': total_mse,
+                'total_mae': total_mae,
+                'joint_errors': joint_errors,
+            }
+        else:  # ee_only
+            # ee_only mode: [relative_end_pose(7), gripper(1)]
+            pose_pred = pred[:, :7]
+            pose_gt = gt[:, :7]
+            gripper_pred = pred[:, 7]
+            gripper_gt = gt[:, 7]
+
+            # 计算 MSE/MAE
+            pose_mse = np.mean((pose_pred - pose_gt) ** 2)
+            pose_mae = np.mean(np.abs(pose_pred - pose_gt))
+            gripper_mse = np.mean((gripper_pred - gripper_gt) ** 2)
+            gripper_mae = np.mean(np.abs(gripper_pred - gripper_gt))
+            total_mse = np.mean((pred - gt) ** 2)
+            total_mae = np.mean(np.abs(pred - gt))
+
+            # EE = pose + gripper
+            ee_mse = total_mse
+            ee_mae = total_mae
+
+            return {
+                'joint_mse': 0.0,  # N/A for ee_only
+                'joint_mae': 0.0,
+                'gripper_joint_mse': gripper_mse,
+                'gripper_joint_mae': gripper_mae,
+                'gripper_pose_mse': gripper_mse,
+                'gripper_pose_mae': gripper_mae,
+                'pose_mse': pose_mse,
+                'pose_mae': pose_mae,
+                'ee_mse': ee_mse,
+                'ee_mae': ee_mae,
+                'total_mse': total_mse,
+                'total_mae': total_mae,
+                'joint_errors': [],  # N/A for ee_only
+            }
     
     def plot_episode_comparison(self, result: Dict, ep_idx: int, save: bool = True):
         """绘制单个 episode 的对比曲线"""
@@ -673,6 +903,83 @@ class OfflineEvaluator:
         
         plt.close()
     
+    def plot_ee_pose_detailed(self, result: Dict, ep_idx: int, save: bool = True):
+        """详细绘制 EE Relative Pose 的每个维度"""
+        pred = result['predicted_actions']
+        gt = result['gt_actions']
+        num_steps = len(pred)
+        time_steps = np.arange(num_steps)
+        
+        # 创建 2x4 的图形：上排是位置 x,y,z + 位置MAE，下排是四元数 qx,qy,qz,qw
+        fig, axes = plt.subplots(2, 4, figsize=(20, 10))
+        fig.suptitle(f'Episode {ep_idx}: EE Relative Pose Detailed Comparison', fontsize=14)
+        
+        # 位置维度
+        pos_labels = ['Rel X', 'Rel Y', 'Rel Z']
+        for i, label in enumerate(pos_labels):
+            ax = axes[0, i]
+            gt_val = gt[:, 7+i]
+            pred_val = pred[:, 7+i]
+            
+            ax.plot(time_steps, gt_val, 'b-', label='Ground Truth', alpha=0.7, linewidth=1.5)
+            ax.plot(time_steps, pred_val, 'r--', label='Predicted', alpha=0.7, linewidth=1.5)
+            ax.set_xlabel('Time Step')
+            ax.set_ylabel('Position (m)')
+            ax.legend()
+            ax.grid(True, alpha=0.3)
+            ax.set_title(f'{label}\nGT range: [{gt_val.min():.4f}, {gt_val.max():.4f}]\n'
+                        f'Pred range: [{pred_val.min():.4f}, {pred_val.max():.4f}]')
+            
+            # 计算并显示误差统计
+            err = np.abs(gt_val - pred_val)
+            ax.text(0.02, 0.98, f'MAE: {err.mean():.4f}\nMax: {err.max():.4f}', 
+                   transform=ax.transAxes, fontsize=9, verticalalignment='top',
+                   bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+        
+        # 位置 MAE
+        ax = axes[0, 3]
+        pos_err = np.abs(gt[:, 7:10] - pred[:, 7:10])
+        ax.plot(time_steps, pos_err[:, 0], 'r-', label='X error', alpha=0.7)
+        ax.plot(time_steps, pos_err[:, 1], 'g-', label='Y error', alpha=0.7)
+        ax.plot(time_steps, pos_err[:, 2], 'b-', label='Z error', alpha=0.7)
+        ax.plot(time_steps, pos_err.mean(axis=1), 'k--', label='Mean', alpha=0.9, linewidth=2)
+        ax.set_xlabel('Time Step')
+        ax.set_ylabel('Absolute Error (m)')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        ax.set_title('Position Error per Dimension')
+        
+        # 四元数维度
+        quat_labels = ['Rel qx', 'Rel qy', 'Rel qz', 'Rel qw']
+        for i, label in enumerate(quat_labels):
+            ax = axes[1, i]
+            gt_val = gt[:, 10+i]
+            pred_val = pred[:, 10+i]
+            
+            ax.plot(time_steps, gt_val, 'b-', label='Ground Truth', alpha=0.7, linewidth=1.5)
+            ax.plot(time_steps, pred_val, 'r--', label='Predicted', alpha=0.7, linewidth=1.5)
+            ax.set_xlabel('Time Step')
+            ax.set_ylabel('Quaternion')
+            ax.legend()
+            ax.grid(True, alpha=0.3)
+            ax.set_title(f'{label}\nGT range: [{gt_val.min():.4f}, {gt_val.max():.4f}]\n'
+                        f'Pred range: [{pred_val.min():.4f}, {pred_val.max():.4f}]')
+            
+            # 计算并显示误差统计
+            err = np.abs(gt_val - pred_val)
+            ax.text(0.02, 0.98, f'MAE: {err.mean():.4f}\nMax: {err.max():.4f}', 
+                   transform=ax.transAxes, fontsize=9, verticalalignment='top',
+                   bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+        
+        plt.tight_layout()
+        
+        if save:
+            save_path = os.path.join(self.output_dir, f'ee_pose_detailed_ep{ep_idx:03d}.png')
+            plt.savefig(save_path, dpi=150, bbox_inches='tight')
+            print(f"Saved: {save_path}")
+        
+        plt.close()
+    
     def run_evaluation(self, num_episodes: Optional[int] = None, 
                        plot_individual: bool = True,
                        verbose: bool = True,
@@ -712,6 +1019,7 @@ class OfflineEvaluator:
             if plot_individual:
                 self.plot_episode_comparison(result, ep_idx)
                 self.plot_cumulative_error(result, ep_idx)
+                self.plot_ee_pose_detailed(result, ep_idx)  # 添加详细 EE Pose 绘图
             
             # 打印当前 episode 指标
             m = result['metrics']

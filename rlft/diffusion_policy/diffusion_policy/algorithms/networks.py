@@ -185,3 +185,59 @@ def soft_update(target: nn.Module, source: nn.Module, tau: float):
     with torch.no_grad():
         for target_param, source_param in zip(target.parameters(), source.parameters()):
             target_param.data.mul_(1.0 - tau).add_(source_param.data, alpha=tau)
+
+
+class GripperHead(nn.Module):
+    """
+    Gripper classification head for discrete gripper control.
+    
+    Takes encoded observation features and predicts open/close for each timestep
+    in the prediction horizon.
+    
+    Input: obs_features [B, obs_horizon, obs_dim]
+    Output: logits [B, pred_horizon, 2]
+    """
+    
+    def __init__(
+        self,
+        input_dim: int,
+        hidden_dim: int = 256,
+        pred_horizon: int = 16,
+        num_classes: int = 2,
+    ):
+        """
+        Args:
+            input_dim: Total input dimension (obs_horizon * obs_dim, flattened)
+            hidden_dim: Hidden layer dimension
+            pred_horizon: Number of timesteps to predict
+            num_classes: Number of gripper classes (2 for open/close)
+        """
+        super().__init__()
+        self.pred_horizon = pred_horizon
+        self.num_classes = num_classes
+        
+        self.net = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, pred_horizon * num_classes),
+        )
+    
+    def forward(self, obs_features: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            obs_features: [B, obs_horizon, obs_dim] or [B, input_dim] (flattened)
+        Returns:
+            logits: [B, pred_horizon, num_classes]
+        """
+        B = obs_features.shape[0]
+        # Flatten if needed: [B, obs_horizon * obs_dim]
+        if obs_features.dim() == 3:
+            x = obs_features.view(B, -1)
+        else:
+            x = obs_features
+        # Forward: [B, pred_horizon * num_classes]
+        x = self.net(x)
+        # Reshape: [B, pred_horizon, num_classes]
+        return x.view(B, self.pred_horizon, self.num_classes)

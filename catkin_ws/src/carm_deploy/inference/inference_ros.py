@@ -67,6 +67,72 @@ from utils.timeline_logger import TimelineLogger
 from utils.keyboard_intervention import KeyboardInterventionHandler, InterventionApplier
 
 
+# ============================================================================
+# Joystick-style delta scaling functions (for teleop alignment)
+# ============================================================================
+
+def quaternion_slerp(q0, q1, t):
+    """
+    球面线性插值 (Slerp) - 用于旋转缩放
+    从 pose_diff.py 复制，用于 teleop_scale 功能
+    
+    Args:
+        q0: 起始四元数 [qx, qy, qz, qw]
+        q1: 目标四元数 [qx, qy, qz, qw]
+        t: 插值因子 [0, 1]
+        
+    Returns:
+        插值后的四元数 [qx, qy, qz, qw]
+    """
+    q0 = q0 / np.linalg.norm(q0)
+    q1 = q1 / np.linalg.norm(q1)
+    
+    dot = np.dot(q0, q1)
+    if dot < 0.0:
+        q1 = -q1
+        dot = -dot
+    
+    dot = np.clip(dot, -1.0, 1.0)
+    theta = np.arccos(dot)
+
+    if theta < 1e-7:
+        return (1 - t) * q0 + t * q1
+    
+    return (np.sin((1 - t) * theta) * q0 + np.sin(t * theta) * q1) / np.sin(theta)
+
+
+def apply_teleop_scale(delta_pose, scale):
+    """
+    对 ee_delta_pose 应用 joystick-style 缩放
+    
+    遥操作中 scale 的作用：
+    - 平移：线性缩放 delta_pos *= scale
+    - 旋转：使用 slerp 缩放角度 delta_quat = slerp(identity, delta_quat, scale)
+    
+    Args:
+        delta_pose: 相对位姿变换 [x, y, z, qx, qy, qz, qw] (7D)
+        scale: 缩放因子 (0, 1]，1.0 表示不缩放
+        
+    Returns:
+        缩放后的相对位姿 [x, y, z, qx, qy, qz, qw]
+    """
+    if scale >= 1.0:
+        return delta_pose.copy()
+    
+    scaled_pose = delta_pose.copy()
+    
+    # 平移线性缩放
+    scaled_pose[:3] = delta_pose[:3] * scale
+    
+    # 旋转使用 slerp 缩放（从单位四元数插值到目标四元数）
+    identity_quat = np.array([0.0, 0.0, 0.0, 1.0])
+    delta_quat = delta_pose[3:7]
+    scaled_quat = quaternion_slerp(identity_quat, delta_quat, scale)
+    scaled_pose[3:7] = scaled_quat
+    
+    return scaled_pose
+
+
 def pose_to_transform_matrix(position, quaternion):
     """
     将位姿 (xyz + 四元数) 转换为 4x4 变换矩阵
@@ -201,8 +267,9 @@ class RealPolicy(PolicyInterface):
         self.gripper_close_val = config.get('gripper_close_val', 0.04)
         self.gripper_head_hidden_dim = config.get('gripper_head_hidden_dim', 256)
         
-        # Hysteresis for gripper: 5-frame majority voting
-        self.gripper_hysteresis_window = 5
+        # Hysteresis for gripper: configurable window for majority voting
+        # 默认 window=1 (无 hysteresis，对齐 teleop 模式)
+        self.gripper_hysteresis_window = config.get('gripper_hysteresis_window', 1)
         self._gripper_history = deque(maxlen=self.gripper_hysteresis_window)
         self._last_gripper_state = 0  # 0=open, 1=close
         
@@ -361,7 +428,7 @@ class RealPolicy(PolicyInterface):
                 out_dim=self.visual_feature_dim,
                 pool_feature_map=True,
             ).to(self.device)
-        elif visual_encoder_type in ['resnet18', 'resnet34', 'resnet50']:
+        elif visual_encoder_type in ['resnet10', 'resnet18', 'resnet34', 'resnet50']:
             # 导入 ResNet 编码器
             from diffusion_policy.resnet_encoder import ResNetEncoder
             self.visual_encoder = ResNetEncoder(
@@ -398,15 +465,15 @@ class RealPolicy(PolicyInterface):
         self.agent = self._create_agent(global_cond_dim)
         
         # GripperHead (discrete classification)
-        from train_carm import GripperHead
+        from diffusion_policy.algorithms.networks import GripperHead
+        gripper_input_dim = self.obs_horizon * (self.visual_feature_dim + encoded_state_dim)
         self.gripper_head = GripperHead(
-            obs_dim=self.visual_feature_dim + encoded_state_dim,
-            obs_horizon=self.obs_horizon,
-            pred_horizon=self.pred_horizon,
+            input_dim=gripper_input_dim,
             hidden_dim=self.gripper_head_hidden_dim,
+            pred_horizon=self.pred_horizon,
             num_classes=2,
         ).to(self.device)
-        rospy.loginfo(f"Created GripperHead: hidden_dim={self.gripper_head_hidden_dim}")
+        rospy.loginfo(f"Created GripperHead: input_dim={gripper_input_dim}, hidden_dim={self.gripper_head_hidden_dim}")
         
         # 3. 加载权重
         rospy.loginfo(f"Loading checkpoint from: {model_path}")
@@ -671,51 +738,113 @@ class RealPolicy(PolicyInterface):
             gripper_logits = self.gripper_head(obs_features)  # [1, pred_horizon, 2]
             gripper_cls = gripper_logits.argmax(dim=-1)  # [1, pred_horizon], 0=open, 1=close
             
-            # 3. Apply hysteresis (5-frame majority voting)
-            gripper_vals = self._apply_gripper_hysteresis(gripper_cls[0].cpu().numpy())  # [pred_horizon]
+            # 调试日志：每 50 步打印一次 gripper 详细信息
+            if hasattr(self, '_gripper_debug_counter'):
+                self._gripper_debug_counter += 1
+            else:
+                self._gripper_debug_counter = 0
+            
+            should_debug = (self._gripper_debug_counter % 50 == 0)
+            
+            if should_debug:
+                cls_np = gripper_cls[0].cpu().numpy()
+                close_count = np.sum(cls_np == 1)
+                open_count = np.sum(cls_np == 0)
+                
+                # 原始 logits 值 (未经 softmax)
+                raw_logits = gripper_logits[0].cpu().numpy()  # [pred_horizon, 2]
+                logits_open = raw_logits[:, 0]   # logit for class 0 (open)
+                logits_close = raw_logits[:, 1]  # logit for class 1 (close)
+                
+                # 计算 softmax 概率
+                probs = torch.softmax(gripper_logits[0], dim=-1).cpu().numpy()  # [pred_horizon, 2]
+                avg_close_prob = probs[:, 1].mean()
+                
+                # 将预测序列转换为可读字符串 (O=open, C=close)
+                seq_str = ''.join(['C' if c == 1 else 'O' for c in cls_np])
+                
+                rospy.loginfo(f"[Gripper Debug] step={self._gripper_debug_counter}:")
+                rospy.loginfo(f"  Prediction seq: [{seq_str}] (open={open_count}, close={close_count})")
+                rospy.loginfo(f"  Raw logits (open):  [{', '.join([f'{l:.3f}' for l in logits_open])}]")
+                rospy.loginfo(f"  Raw logits (close): [{', '.join([f'{l:.3f}' for l in logits_close])}]")
+                rospy.loginfo(f"  Softmax probs (open):  [{', '.join([f'{p:.3f}' for p in probs[:, 0]])}]")
+                rospy.loginfo(f"  Softmax probs (close): [{', '.join([f'{p:.3f}' for p in probs[:, 1]])}]")
+                rospy.loginfo(f"  Avg close prob: {avg_close_prob:.3f}, First frame logits: open={logits_open[0]:.3f}, close={logits_close[0]:.3f}")
+                rospy.loginfo(f"  First frame decision: {'CLOSE' if cls_np[0]==1 else 'OPEN'} (argmax of logits)")
+            
+            # 3. Apply hysteresis (with debug info)
+            gripper_vals = self._apply_gripper_hysteresis(gripper_cls[0].cpu().numpy(), debug=should_debug)  # [pred_horizon]
             
             # 4. Reconstruct full action with gripper
             actions_full = self._reconstruct_full_action(actions_cont[0], gripper_vals)  # [pred_horizon, action_dim_full]
         
         return {'a_hat': actions_full.unsqueeze(0)}  # [1, pred_horizon, action_dim_full]
     
-    def _apply_gripper_hysteresis(self, gripper_cls: np.ndarray) -> np.ndarray:
+    def _apply_gripper_hysteresis(self, gripper_cls: np.ndarray, debug: bool = False) -> np.ndarray:
         """
-        Apply hysteresis to gripper predictions to prevent rapid switching.
-        Uses 5-frame majority voting with "any close in act_horizon" logic.
+        Apply hysteresis to gripper predictions.
         
-        The key insight: if ANY timestep in the action horizon predicts close,
-        we should close the gripper (safety-first for grasping).
+        改进版做法：
+        - 使用前 N 帧的多数投票（而不是只看 first frame）
+        - 解决状态过渡边界时 first frame 不可靠的问题
+        - 可选的时间滑窗用于防止抖动
         
         Args:
             gripper_cls: [pred_horizon] array of gripper class predictions (0=open, 1=close)
+            debug: 是否打印详细调试信息
             
         Returns:
             [pred_horizon] array of gripper values
         """
-        # Use "any close in act_horizon" logic:
-        # If any timestep in the chunk predicts close, treat as close intent
-        # This handles the case where model predicts close at later timesteps
-        act_horizon = min(8, len(gripper_cls))  # Typically act_horizon=8
-        chunk_has_close = np.any(gripper_cls[:act_horizon] == 1)
-        current_vote = 1 if chunk_has_close else 0
+        # 改进：使用前 N 帧的多数投票，而不是只看 first frame
+        # 这样可以解决状态过渡边界时 first frame 不可靠的问题
+        # 例如：[COOOOOOO...] 时，first frame 是 C，但整体应该是 O
+        horizon_vote_frames = min(8, len(gripper_cls))  # 使用前4帧进行投票
+        horizon_votes = gripper_cls[:horizon_vote_frames]
+        close_in_horizon = np.sum(horizon_votes == 1)
+        current_vote = 1 if close_in_horizon > horizon_vote_frames / 2 else 0
         
-        # Add current vote to history
+        # Add current vote to history (for optional temporal smoothing)
         self._gripper_history.append(current_vote)
         
-        # Majority voting over history (5-frame window)
-        if len(self._gripper_history) >= 3:  # Need at least 3 frames for voting
-            vote_result = sum(self._gripper_history) > len(self._gripper_history) / 2
+        # 记录 hysteresis 计算过程
+        history_list = list(self._gripper_history)
+        history_str = ''.join(['C' if h == 1 else 'O' for h in history_list])
+        horizon_str = ''.join(['C' if c == 1 else 'O' for c in horizon_votes])
+        
+        # Majority voting over history window (防止抖动)
+        if self.gripper_hysteresis_window == 1:
+            # No temporal hysteresis: use current horizon vote directly
+            new_state = current_vote
+            hysteresis_mode = "horizon_vote_only"
+            vote_detail = f"前{horizon_vote_frames}帧投票=[{horizon_str}], close={close_in_horizon}/{horizon_vote_frames}, result={'CLOSE' if current_vote==1 else 'OPEN'}"
+        elif len(self._gripper_history) >= max(1, self.gripper_hysteresis_window // 2):
+            # Majority voting over recent predictions (temporal smoothing)
+            close_votes = sum(self._gripper_history)
+            total_votes = len(self._gripper_history)
+            vote_result = close_votes > total_votes / 2
             new_state = 1 if vote_result else 0
+            hysteresis_mode = "temporal_majority_voting"
+            vote_detail = f"前{horizon_vote_frames}帧=[{horizon_str}], 时间窗口: close_votes={close_votes}/{total_votes}, result={'CLOSE' if new_state==1 else 'OPEN'}"
         else:
             # Not enough history, use current vote
             new_state = current_vote
+            hysteresis_mode = "insufficient_history"
+            vote_detail = f"history_len={len(self._gripper_history)} < {max(1, self.gripper_hysteresis_window // 2)}, 使用 horizon_vote={current_vote}"
+        
+        # Debug 日志
+        if debug:
+            rospy.loginfo(f"  Hysteresis: window={self.gripper_hysteresis_window}, mode={hysteresis_mode}")
+            rospy.loginfo(f"  Horizon vote: [{horizon_str}] -> {'CLOSE' if current_vote==1 else 'OPEN'} (first_frame={gripper_cls[0]})")
+            rospy.loginfo(f"  History: [{history_str}] (len={len(history_list)})")
+            rospy.loginfo(f"  Vote: {vote_detail}")
+            rospy.loginfo(f"  Last state: {'CLOSE' if self._last_gripper_state==1 else 'OPEN'} -> Final state: {'CLOSE' if new_state==1 else 'OPEN'}")
         
         # Log state change
         if new_state != self._last_gripper_state:
             old_str = "OPEN" if self._last_gripper_state == 0 else "CLOSE"
             new_str = "OPEN" if new_state == 0 else "CLOSE"
-            rospy.loginfo(f"Gripper state changed: {old_str} -> {new_str} (chunk_has_close={chunk_has_close})")
+            rospy.loginfo(f"Gripper state changed: {old_str} -> {new_str} (horizon_vote=[{horizon_str}], first_frame={gripper_cls[0]}, history=[{history_str}], window={self.gripper_hysteresis_window})")
             self._last_gripper_state = new_state
         
         # Map class to continuous value for the entire horizon
@@ -779,6 +908,10 @@ class InferenceNode:
         self.joint_cmd_mode = config.get('joint_cmd_mode', False)
         self.check_workspace = True  # 默认开启 workspace 检测
         
+        # Teleop 对齐模式参数 (直接使用 teleop 默认值)
+        self.teleop_scale = config.get('teleop_scale', 0.4)  # 默认 0.4 对齐遥操
+        self.control_freq = config.get('control_freq', 50)   # 默认 50Hz 对齐遥操
+        
         # Action Chunk 执行模式参数
         # execution_mode: 'temporal_ensemble' (原始) 或 'receding_horizon' (标准 action chunking)
         self.execution_mode = config.get('execution_mode', 'temporal_ensemble')
@@ -824,7 +957,8 @@ class InferenceNode:
             if not timeline_path:
                 timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
                 timeline_path = os.path.join(self.logger.log_dir, f'timeline_{timestamp}.jsonl')
-            self.timeline_logger = TimelineLogger(timeline_path)
+            self.timeline_logger = TimelineLogger(timeline_path, control_log_interval=self.timeline_control_stride * 10)
+            self._timeline_path = timeline_path  # 保存供 logger 使用
             self.timeline_logger.log(
                 'init',
                 desire_inference_freq=self.desire_inference_freq,
@@ -835,12 +969,21 @@ class InferenceNode:
                 act_horizon=self._act_horizon,
                 pred_horizon=self._pred_horizon,
                 obs_horizon=self._obs_horizon,
-                # 新增: 执行模式参数
+                # 执行模式参数
                 execution_mode=self.execution_mode,
                 max_active_chunks=self.max_active_chunks,
                 crossfade_steps=self.crossfade_steps,
                 truncate_at_act_horizon=self.truncate_at_act_horizon,
+                # 新增：关键控制参数
+                teleop_scale=self.teleop_scale,
+                control_freq=self.control_freq,
+                joint_cmd_mode=self.joint_cmd_mode,
             )
+        else:
+            self._timeline_path = None
+        
+        # 设置 logger metadata（包含完整的运行配置）
+        self._setup_logger_metadata(config)
         
         # 动作管理器
         self.action_manager = ActionChunkManager(
@@ -987,6 +1130,11 @@ class InferenceNode:
         with self.lock_tfs:
             self.action_manager.clear()
         
+        # 重置策略状态（观测历史、gripper 历史等）
+        if hasattr(self, 'policy') and self.policy is not None:
+            self.policy.reset()
+            rospy.loginfo("Policy state reset")
+        
         # 开始录制
         if self.inference_recorder:
             self.inference_recorder.start_recording()
@@ -1100,6 +1248,80 @@ class InferenceNode:
             default_log_dir = ensure_dir(get_inference_logs_dir())
             return InferenceLogger(log_dir=default_log_dir)
     
+    def _setup_logger_metadata(self, config):
+        """
+        设置 logger 的完整 metadata（用于生成 run_info.json）
+        """
+        pretrain_path = config.get('pretrain', '')
+        
+        # 模型配置
+        model_config = {
+            'path': pretrain_path,
+            'algorithm': getattr(self.policy, 'algorithm', 'unknown'),
+            'action_mode': 'full' if getattr(self.policy, 'action_dim_full', 15) == 15 else 'ee_only',
+            'state_mode': getattr(self.policy, 'state_mode', 'joint_only'),
+            'obs_horizon': getattr(self.policy, 'obs_horizon', 2),
+            'pred_horizon': getattr(self.policy, 'pred_horizon', 16),
+            'action_dim': getattr(self.policy, 'action_dim', 13),
+            'action_dim_full': getattr(self.policy, 'action_dim_full', 15),
+            'visual_encoder_type': config.get('visual_encoder_type', 'unknown'),
+            'use_ema': getattr(self.policy, 'use_ema', False),
+            'num_inference_steps': getattr(self.policy, 'num_inference_steps', 10),
+        }
+        
+        # Normalizer 配置
+        normalizer_config = {
+            'enabled': getattr(self.policy, 'normalize_actions', False),
+            'mode': getattr(self.policy, 'action_norm_mode', 'standard'),
+        }
+        if hasattr(self.policy, 'action_normalizer') and self.policy.action_normalizer is not None:
+            normalizer = self.policy.action_normalizer
+            if hasattr(normalizer, 'stats') and normalizer.stats:
+                normalizer_config['action_stats'] = {
+                    'mean': normalizer.stats.get('mean', []),
+                    'std': normalizer.stats.get('std', []),
+                }
+        
+        # 控制配置
+        control_config = {
+            'control_freq': self.control_freq,
+            'teleop_scale': self.teleop_scale,
+            'joint_cmd_mode': self.joint_cmd_mode,
+            'gripper_hysteresis_window': getattr(self.policy, 'gripper_hysteresis_window', 1),
+        }
+        
+        # 执行配置
+        execution_config = {
+            'mode': self.execution_mode,
+            'act_horizon': self._act_horizon,
+            'max_active_chunks': self.max_active_chunks,
+            'crossfade_steps': self.crossfade_steps,
+            'truncate_at_act_horizon': self.truncate_at_act_horizon,
+            'temporal_factor_k': self.temporal_factor_k,
+            'pos_lookahead_step': self.pos_lookahead_step,
+            'chunk_time_base': self.chunk_time_base,
+            'desire_inference_freq': self.desire_inference_freq,
+        }
+        
+        # 安全配置
+        safety_config = {
+            'config_path': config.get('safety_config', ''),
+            'check_workspace': self.check_workspace,
+            'max_relative_translation': 0.1,  # 硬编码在代码中的值
+        }
+        
+        # 调用 logger 的 set_metadata
+        self.logger.set_metadata(
+            model_path=pretrain_path,
+            model_config=model_config,
+            normalizer_config=normalizer_config,
+            control_config=control_config,
+            execution_config=execution_config,
+            safety_config=safety_config,
+        )
+        
+        rospy.loginfo("Logger metadata configured for run_info.json")
+    
     def _preprocess_image(self, image: np.ndarray, target_size=(128, 128)) -> np.ndarray:
         """
         预处理单张图像: resize
@@ -1140,6 +1362,11 @@ class InferenceNode:
         """推理线程主循环"""
         rospy.loginfo("Inference thread started")
         
+        # 初始化时 reset 策略状态
+        if hasattr(self, 'policy') and self.policy is not None:
+            self.policy.reset()
+            rospy.loginfo("Policy state initialized (reset)")
+        
         desire_period = 1.0 / self.desire_inference_freq
         
         with torch.inference_mode():
@@ -1171,7 +1398,7 @@ class InferenceNode:
                 
                 # 启动 episode（如果尚未启动）
                 if not self.episode_started:
-                    self.logger.start_episode()
+                    self.logger.start_episode(timeline_path=self._timeline_path)
                     self.episode_started = True
                     rospy.loginfo("Episode started, logging enabled")
                 
@@ -1222,6 +1449,25 @@ class InferenceNode:
                         )
                     
                     all_actions = ret["a_hat"].squeeze(0).cpu().numpy()  # [pred_horizon, action_dim]
+                    
+                    # ============================================================
+                    # 对齐顺序: 1) inverse-normalize (模型内部已做)
+                    #          2) teleop_scale (模拟遥操调速)
+                    #          3) safety clip (安全层)
+                    # ============================================================
+                    
+                    # 应用 teleop_scale 缩放 (joystick-style delta scaling)
+                    if self.teleop_scale != 1.0 and not self.joint_cmd_mode:
+                        # 只对 ee_delta_pose 模式应用 teleop_scale
+                        is_full_mode = (self._action_dim_full == 15)
+                        rel_pose_start = 7 if is_full_mode else 0
+                        rel_pose_end = 14 if is_full_mode else 7
+                        
+                        for i in range(len(all_actions)):
+                            # 提取 rel_pose [7]，应用缩放，写回
+                            rel_pose = all_actions[i, rel_pose_start:rel_pose_end].copy()
+                            scaled_rel_pose = apply_teleop_scale(rel_pose, self.teleop_scale)
+                            all_actions[i, rel_pose_start:rel_pose_end] = scaled_rel_pose
                     
                     # 安全检查和裁剪
                     safety_events = []
@@ -1359,15 +1605,8 @@ class InferenceNode:
                     # 记录第一个动作用于下一次参考
                     self.last_action = all_actions[0].copy()
                     
-                    # 记录日志
-                    self.logger.log_step(
-                        timestamp=time.time(),
-                        obs=self.latest_obs,  # 包含 images, qpos_joint, qpos_end
-                        raw_action=all_actions[0],
-                        inference_time=inference_time,
-                        safety_clipped=safety_clipped,
-                        safety_warnings=safety_events if safety_events else None,
-                    )
+                    # 保存 raw_action（模型输出，相对位姿）用于后续日志记录
+                    raw_action_for_log = all_actions[0].copy()
                     
                     # 转换动作空间
                     # full mode (15D): [joint(6), gripper(1), relative_end_pose(7), gripper(1)]
@@ -1402,8 +1641,8 @@ class InferenceNode:
                         chunk_base_time = time.time()
                     tf = VecTF({})
                     
-                    # 使用固定的动作执行间隔 (0.033s ≈ 30Hz)
-                    action_interval = 1.0 / 30.0  # 30Hz 的动作执行频率
+                    # 动作执行间隔: 使用 control_freq (默认 50Hz 对齐 teleop)
+                    action_interval = 1.0 / self.control_freq
                     
                     # 根据 truncate_at_act_horizon 决定添加多少步动作到 chunk
                     # 标准 action chunking: 只添加前 act_horizon 步
@@ -1454,6 +1693,17 @@ class InferenceNode:
                             chunk_targets=chunk_targets,
                         )
                     
+                    # 记录步骤日志（在动作转换后，包含 raw_action 和 executed_action）
+                    self.logger.log_step(
+                        timestamp=time.time(),
+                        obs=self.latest_obs,  # 包含 images, qpos_joint, qpos_end
+                        raw_action=raw_action_for_log,  # 模型输出的相对位姿
+                        executed_action=all_actions[0],  # 转换后的绝对位姿/关节角度
+                        inference_time=inference_time,
+                        safety_clipped=safety_clipped,
+                        safety_warnings=safety_events if safety_events else None,
+                    )
+                    
                     self.step_count += 1
                     rospy.loginfo_throttle(5.0, 
                         f"Step {self.step_count}, Inference: {inference_time:.4f}s, "
@@ -1478,7 +1728,9 @@ class InferenceNode:
         """控制主循环"""
         rospy.loginfo("Control loop started")
         
-        control_period = 0.005  # 200Hz
+        # 控制频率: 默认 200Hz，teleop 模式 50Hz
+        control_period = 1.0 / self.control_freq
+        rospy.loginfo(f"Control frequency: {self.control_freq}Hz (period={control_period:.4f}s)")
         
         while self.running and not rospy.is_shutdown():
             # 如果 episode 暂停，不执行控制
@@ -1644,7 +1896,7 @@ def parse_args():
                         help='Use EMA model for inference (recommended only for 1-step inference, otherwise Non-EMA is better)')
     
     # Action Chunk 执行模式参数
-    parser.add_argument('--execution_mode', type=str, default='temporal_ensemble',
+    parser.add_argument('--execution_mode', type=str, default='receding_horizon',
                         choices=['temporal_ensemble', 'receding_horizon'],
                         help='Action chunk execution mode: '
                              'temporal_ensemble (original, multi-chunk time-weighted fusion) or '
@@ -1655,7 +1907,7 @@ def parse_args():
                         help='Number of steps for crossfade smoothing when switching chunks (receding_horizon mode only)')
     parser.add_argument('--truncate_at_act_horizon', action='store_true', default=True,
                         help='Truncate action chunk at act_horizon (standard action chunking behavior)')
-    parser.add_argument('--act_horizon', type=int, default=10,
+    parser.add_argument('--act_horizon', type=int, default=8,
                         help='Action horizon for chunk truncation (default: same as pred_horizon)')
     
     # 控制参数
@@ -1665,6 +1917,14 @@ def parse_args():
                         help='Position lookahead duration')
     parser.add_argument('--joint_cmd_mode', action='store_true',
                         help='Use joint command mode instead of end-effector pose')
+    
+    # Teleop 对齐模式参数 (使推理行为更接近手柄遥控，默认使用 teleop 参数)
+    parser.add_argument('--teleop_scale', type=float, default=1.0,
+                        help='Scale factor for delta pose (default: 0.4, aligned with joystick)')
+    parser.add_argument('--control_freq', type=int, default=50,
+                        help='Control loop frequency in Hz (default: 50, aligned with joystick)')
+    parser.add_argument('--gripper_hysteresis_window', type=int, default=16,
+                        help='Gripper hysteresis window size for voting (default: 1 = no hysteresis)')
     
     # 安全控制参数
     parser.add_argument('--safety_config', type=str, default='',
@@ -1728,6 +1988,8 @@ def main():
         # Action chunk 执行模式参数
         'execution_mode', 'max_active_chunks', 'crossfade_steps', 
         'truncate_at_act_horizon', 'act_horizon',
+        # Teleop 对齐模式参数
+        'teleop_scale', 'control_freq', 'gripper_hysteresis_window',
         # 干预和采集参数
         'record_inference', 'intervention', 'intervention_mode',
         'intervention_xyz_scale', 'intervention_gripper_open', 'intervention_gripper_close',
@@ -1779,6 +2041,11 @@ def main():
     rospy.loginfo(f"  crossfade_steps: {config.get('crossfade_steps', 0)}")
     rospy.loginfo(f"  truncate_at_act_horizon: {config.get('truncate_at_act_horizon', False)}")
     rospy.loginfo(f"  act_horizon: {config.get('act_horizon', 'same as pred_horizon')}")
+    rospy.loginfo("-" * 60)
+    rospy.loginfo("Teleop Alignment Parameters:")
+    rospy.loginfo(f"  teleop_scale: {config.get('teleop_scale', 0.4)} (delta pose scaling)")
+    rospy.loginfo(f"  control_freq: {config.get('control_freq', 50)}Hz")
+    rospy.loginfo(f"  gripper_hysteresis_window: {config.get('gripper_hysteresis_window', 1)}")
     rospy.loginfo("-" * 60)
     rospy.loginfo(f"  log_dir: {config['log_dir'] or '~/rl-vla/inference_logs'}")
     rospy.loginfo("-" * 60)

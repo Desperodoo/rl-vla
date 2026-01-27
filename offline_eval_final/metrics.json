@@ -1,0 +1,20 @@
+{
+  "avg_metrics": {
+    "joint_mse": 3.7181647903129336e-05,
+    "joint_mae": 0.0035293163083202988,
+    "gripper_joint_mse": 4.3327285160541895e-05,
+    "gripper_joint_mae": 0.0038140011054221476,
+    "gripper_pose_mse": 4.3327285160541895e-05,
+    "gripper_pose_mae": 0.0038140011054221476,
+    "pose_mse": 4.302947060869479e-06,
+    "pose_mae": 0.0009579151401975027,
+    "ee_mse": 9.180989323328533e-06,
+    "ee_mae": 0.0013149258858505834,
+    "total_mse": 2.2657672477729745e-05,
+    "total_mae": 0.0023672870694765743
+  },
+  "model_path": "/home/lizh/rl-vla/rlft/diffusion_policy/runs/consistency_flow_resnet18_discrete_gripper_weight_0.02_state_joint_action_full_norm/checkpoints/latest.pt",
+  "data_dir": "/home/lizh/rl-vla/recorded_data/mix",
+  "num_episodes": 3,
+  "timestamp": "2026-01-25T16:41:16.157033"
+}

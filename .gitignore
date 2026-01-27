@@ -2,6 +2,9 @@ __pycache__/
 *.pyc
 .venv
 *.npz
+catkin_ws/devel/
+catkin_ws/build/
+catkin_ws/install/
 
 # 子仓库和第三方库
 rlft/dsrl_ajwagen/

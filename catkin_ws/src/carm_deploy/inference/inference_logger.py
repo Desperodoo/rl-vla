@@ -28,6 +28,9 @@ from datetime import datetime
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass, field
 
+# 日志格式版本
+LOG_FORMAT_VERSION = "2.0"
+
 
 @dataclass
 class StepData:
@@ -40,13 +43,11 @@ class StepData:
     qpos_end: Optional[np.ndarray] = None  # [8]
     
     # 动作
-    raw_action: Optional[np.ndarray] = None  # 模型原始输出
-    processed_action: Optional[np.ndarray] = None  # 处理后的动作 (融合、平滑)
-    executed_action: Optional[np.ndarray] = None  # 实际执行的动作
+    raw_action: Optional[np.ndarray] = None  # 模型原始输出（反归一化后）
+    executed_action: Optional[np.ndarray] = None  # 实际发送给机械臂的动作
     
     # 时间
     inference_time: float = 0.0
-    control_time: float = 0.0
     
     # 安全
     safety_clipped: bool = False
@@ -55,9 +56,13 @@ class StepData:
 
 class InferenceLogger:
     """
-    推理日志记录器
+    推理日志记录器 (v2.0)
     
-    记录推理过程中的所有数据，支持实时保存和后续分析
+    记录推理过程中的所有数据，支持实时保存和后续分析。
+    生成三类文件：
+        - run_info_*.json: 运行配置和元数据
+        - inference_*.hdf5: 详细数值数据
+        - timeline_*.jsonl: 时间线事件（由 TimelineLogger 生成）
     """
     
     def __init__(
@@ -79,7 +84,19 @@ class InferenceLogger:
         self.episode_count = 0
         self.step_count = 0
         
-        # 元数据
+        # 运行配置（用于生成 run_info.json）
+        self.run_info = {
+            'version': LOG_FORMAT_VERSION,
+            'created_at': None,
+            'model': {},
+            'normalizer': {},
+            'control': {},
+            'execution': {},
+            'safety': {},
+            'files': {},
+        }
+        
+        # 元数据（兼容旧版本）
         self.metadata = {
             'start_time': None,
             'end_time': None,
@@ -90,24 +107,68 @@ class InferenceLogger:
         # 当前 episode 文件
         self.current_file: Optional[h5py.File] = None
         self.current_file_path: Optional[str] = None
+        self._timestamp_suffix: Optional[str] = None
     
-    def set_metadata(self, model_path: str = None, config: Dict = None):
-        """设置元数据"""
+    def set_metadata(
+        self,
+        model_path: str = None,
+        config: Dict = None,
+        # 新增：详细配置
+        model_config: Dict = None,
+        normalizer_config: Dict = None,
+        control_config: Dict = None,
+        execution_config: Dict = None,
+        safety_config: Dict = None,
+    ):
+        """
+        设置元数据和运行配置
+        
+        Args:
+            model_path: 模型路径（兼容旧版本）
+            config: 配置字典（兼容旧版本）
+            model_config: 模型配置 (algorithm, action_mode, state_mode, etc.)
+            normalizer_config: 归一化器配置 (enabled, mode, action_stats)
+            control_config: 控制配置 (control_freq, teleop_scale, etc.)
+            execution_config: 执行配置 (mode, act_horizon, etc.)
+            safety_config: 安全配置 (config_path, check_workspace, etc.)
+        """
         if model_path:
             self.metadata['model_path'] = model_path
+            self.run_info['model']['path'] = model_path
         if config:
             self.metadata['config'] = config
+        
+        # 新增配置
+        if model_config:
+            self.run_info['model'].update(model_config)
+        if normalizer_config:
+            self.run_info['normalizer'].update(normalizer_config)
+        if control_config:
+            self.run_info['control'].update(control_config)
+        if execution_config:
+            self.run_info['execution'].update(execution_config)
+        if safety_config:
+            self.run_info['safety'].update(safety_config)
     
-    def start_episode(self, episode_name: str = None):
-        """开始新的 episode"""
+    def start_episode(self, episode_name: str = None, timeline_path: str = None):
+        """
+        开始新的 episode
+        
+        Args:
+            episode_name: episode 名称（可选）
+            timeline_path: timeline 文件路径（用于记录到 run_info）
+        """
         self.current_episode = []
         self.step_count = 0
         self.metadata['start_time'] = datetime.now().isoformat()
+        self.run_info['created_at'] = datetime.now().isoformat()
         
         # 创建文件
         if episode_name is None:
-            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-            episode_name = f'inference_{timestamp}'
+            self._timestamp_suffix = datetime.now().strftime('%Y%m%d_%H%M%S')
+            episode_name = f'inference_{self._timestamp_suffix}'
+        else:
+            self._timestamp_suffix = episode_name.replace('inference_', '')
         
         self.current_file_path = os.path.join(self.log_dir, f'{episode_name}.hdf5')
         self.current_file = h5py.File(self.current_file_path, 'w')
@@ -118,6 +179,11 @@ class InferenceLogger:
         self.current_file.create_group('timing')
         self.current_file.create_group('safety')
         
+        # 记录文件名到 run_info
+        self.run_info['files']['hdf5'] = os.path.basename(self.current_file_path)
+        if timeline_path:
+            self.run_info['files']['timeline'] = os.path.basename(timeline_path)
+        
         print(f"Started logging episode: {self.current_file_path}")
     
     def log_step(
@@ -125,10 +191,8 @@ class InferenceLogger:
         timestamp: float,
         obs: Optional[Dict] = None,
         raw_action: Optional[np.ndarray] = None,
-        processed_action: Optional[np.ndarray] = None,
         executed_action: Optional[np.ndarray] = None,
         inference_time: float = 0.0,
-        control_time: float = 0.0,
         safety_clipped: bool = False,
         safety_warnings: List[str] = None,
     ):
@@ -138,25 +202,29 @@ class InferenceLogger:
         Args:
             timestamp: 时间戳
             obs: 观测字典 (包含 images, qpos_joint, qpos_end)
-            raw_action: 模型原始输出
-            processed_action: 处理后的动作
-            executed_action: 实际执行的动作
+            raw_action: 模型原始输出（反归一化后，相对位姿）
+            executed_action: 实际发送给机械臂的动作（绝对位姿）
             inference_time: 推理时间
-            control_time: 控制时间
             safety_clipped: 是否被安全裁剪
             safety_warnings: 安全警告列表
         """
         step = StepData(
             timestamp=timestamp,
             inference_time=inference_time,
-            control_time=control_time,
             safety_clipped=safety_clipped,
             safety_warnings=safety_warnings or [],
         )
         
         if obs is not None:
-            if 'images' in obs and len(obs['images']) > 0:
-                step.image = obs['images'][0]  # 取第一个相机
+            if 'images' in obs and obs['images']:
+                # images 可能是 dict (按相机名) 或 list/array
+                images = obs['images']
+                if isinstance(images, dict):
+                    # 取第一个相机的图像
+                    first_key = next(iter(images.keys()))
+                    step.image = images[first_key]
+                elif len(images) > 0:
+                    step.image = images[0]  # 取第一个相机
             if 'qpos_joint' in obs:
                 step.qpos_joint = np.array(obs['qpos_joint'])
             if 'qpos_end' in obs:
@@ -164,8 +232,6 @@ class InferenceLogger:
         
         if raw_action is not None:
             step.raw_action = np.array(raw_action)
-        if processed_action is not None:
-            step.processed_action = np.array(processed_action)
         if executed_action is not None:
             step.executed_action = np.array(executed_action)
         
@@ -202,8 +268,6 @@ class InferenceLogger:
             pred_grp = self.current_file['predictions']
             if step.raw_action is not None:
                 pred_grp.create_dataset(f'{prefix}/raw_action', data=step.raw_action)
-            if step.processed_action is not None:
-                pred_grp.create_dataset(f'{prefix}/processed_action', data=step.processed_action)
             if step.executed_action is not None:
                 pred_grp.create_dataset(f'{prefix}/executed_action', data=step.executed_action)
             
@@ -211,7 +275,6 @@ class InferenceLogger:
             time_grp = self.current_file['timing']
             time_grp.create_dataset(f'{prefix}/timestamp', data=step.timestamp)
             time_grp.create_dataset(f'{prefix}/inference_time', data=step.inference_time)
-            time_grp.create_dataset(f'{prefix}/control_time', data=step.control_time)
             
             # 安全
             safety_grp = self.current_file['safety']
@@ -247,6 +310,43 @@ class InferenceLogger:
             self.current_file = None
             
             print(f"Episode saved: {self.current_file_path} ({self.step_count} steps)")
+        
+        # 保存 run_info.json
+        self._save_run_info()
+        
+        self.episode_count += 1
+        return self.current_file_path
+    
+    def _save_run_info(self):
+        """保存 run_info.json 文件"""
+        if self._timestamp_suffix is None:
+            return
+        
+        run_info_path = os.path.join(
+            self.log_dir, 
+            f'run_info_{self._timestamp_suffix}.json'
+        )
+        
+        # 添加结束信息
+        self.run_info['ended_at'] = datetime.now().isoformat()
+        self.run_info['total_steps'] = self.step_count
+        
+        # 转换 numpy 数组为列表
+        def convert_numpy(obj):
+            if isinstance(obj, np.ndarray):
+                return obj.tolist()
+            elif isinstance(obj, dict):
+                return {k: convert_numpy(v) for k, v in obj.items()}
+            elif isinstance(obj, list):
+                return [convert_numpy(v) for v in obj]
+            return obj
+        
+        run_info_serializable = convert_numpy(self.run_info)
+        
+        with open(run_info_path, 'w') as f:
+            json.dump(run_info_serializable, f, indent=2, ensure_ascii=False)
+        
+        print(f"Run info saved: {run_info_path}")
         
         self.episode_count += 1
         return self.current_file_path

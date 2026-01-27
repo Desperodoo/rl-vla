@@ -1,5 +1,0 @@
-torchvision
-diffusers
-tensorboard
-wandb
-mani_skill

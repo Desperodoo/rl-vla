@@ -1,8 +1,11 @@
 """
 ResNet-based Visual Encoder for Robot Imitation Learning
 
-Supports pretrained ResNet18/34/50 with configurable freezing options.
+Supports pretrained ResNet10/18/34/50 with configurable freezing options.
 Automatically handles ImageNet normalization internally.
+
+ResNet10 is loaded from HuggingFace: https://huggingface.co/helper2424/resnet10
+(A lightweight 4.9M parameter model optimized for robotics tasks)
 
 Usage:
     encoder = ResNetEncoder(
@@ -19,6 +22,7 @@ import torch
 import torch.nn as nn
 import torchvision.models as models
 from typing import Literal, Optional, Tuple
+import warnings
 
 
 # ImageNet normalization constants
@@ -105,19 +109,40 @@ def _convert_bn_to_frozen_bn(module: nn.Module) -> nn.Module:
     return module_output
 
 
+class HuggingFaceResNet10Wrapper(nn.Module):
+    """
+    Wrapper for HuggingFace ResNet10 model to extract tensor features.
+    
+    HuggingFace's encoder returns a BaseModelOutputWithNoAttention object,
+    we need to extract the last_hidden_state tensor from it.
+    """
+    def __init__(self, embedder: nn.Module, encoder: nn.Module):
+        super().__init__()
+        self.embedder = embedder
+        self.encoder = encoder
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Embedder outputs a tensor
+        x = self.embedder(x)
+        # Encoder outputs a BaseModelOutputWithNoAttention
+        encoder_output = self.encoder(x)
+        # Extract the tensor from the output object
+        return encoder_output.last_hidden_state
+
+
 class ResNetEncoder(nn.Module):
     """
     ResNet-based visual encoder with pretrained weights.
     
     Features:
-        - Supports ResNet18, ResNet34, ResNet50
+        - Supports ResNet10 (from HuggingFace), ResNet18, ResNet34, ResNet50
         - Optional backbone freezing for few-shot learning
         - Optional BatchNorm freezing (recommended for small batch sizes)
         - Automatic ImageNet normalization (expects input in [0, 1])
         - Configurable output dimension via projection layer
     
     Args:
-        backbone_name: One of 'resnet18', 'resnet34', 'resnet50'
+        backbone_name: One of 'resnet10', 'resnet18', 'resnet34', 'resnet50'
         out_dim: Output feature dimension (default: 256)
         pretrained: Whether to use ImageNet pretrained weights
         freeze_backbone: Whether to freeze all backbone parameters
@@ -126,7 +151,7 @@ class ResNetEncoder(nn.Module):
     
     Input:
         x: [B, 3, H, W] RGB images in [0, 1] range (or [0, 255] if normalize_input=False)
-        Recommended size: 224x224 for best performance, but works with any size >= 32
+        Recommended size: 224x224 for ResNet18/34/50, 128x128 for ResNet10
     
     Output:
         features: [B, out_dim] feature vectors
@@ -134,6 +159,7 @@ class ResNetEncoder(nn.Module):
     
     # Recommended input sizes for different backbones
     RECOMMENDED_INPUT_SIZE = {
+        'resnet10': (128, 128),  # ResNet10 from HuggingFace is optimized for 128x128
         'resnet18': (224, 224),
         'resnet34': (224, 224),
         'resnet50': (224, 224),
@@ -141,6 +167,7 @@ class ResNetEncoder(nn.Module):
     
     # Output channels before pooling for each backbone
     BACKBONE_CHANNELS = {
+        'resnet10': 512,  # ResNet10 from HuggingFace: hidden_sizes=[64, 128, 256, 512]
         'resnet18': 512,
         'resnet34': 512,
         'resnet50': 2048,
@@ -148,7 +175,7 @@ class ResNetEncoder(nn.Module):
     
     def __init__(
         self,
-        backbone_name: Literal['resnet18', 'resnet34', 'resnet50'] = 'resnet18',
+        backbone_name: Literal['resnet10', 'resnet18', 'resnet34', 'resnet50'] = 'resnet18',
         out_dim: int = 256,
         pretrained: bool = True,
         freeze_backbone: bool = False,
@@ -170,25 +197,14 @@ class ResNetEncoder(nn.Module):
         # ImageNet normalization layer
         self.normalize = ImageNetNormalize()
         
-        # Load pretrained backbone
-        weights = 'IMAGENET1K_V1' if pretrained else None
-        backbone = getattr(models, backbone_name)(weights=weights)
-        
         # Get backbone channel count
         self.backbone_channels = self.BACKBONE_CHANNELS[backbone_name]
         
-        # Remove classification head (avgpool and fc)
-        # Keep: conv1, bn1, relu, maxpool, layer1, layer2, layer3, layer4
-        self.features = nn.Sequential(
-            backbone.conv1,
-            backbone.bn1,
-            backbone.relu,
-            backbone.maxpool,
-            backbone.layer1,
-            backbone.layer2,
-            backbone.layer3,
-            backbone.layer4,
-        )
+        # Load backbone based on type
+        if backbone_name == 'resnet10':
+            self._load_resnet10_backbone(pretrained)
+        else:
+            self._load_torchvision_backbone(backbone_name, pretrained)
         
         # Freeze BatchNorm layers if requested
         if freeze_bn:
@@ -213,6 +229,97 @@ class ResNetEncoder(nn.Module):
         
         # Initialize projection layer
         self._init_projection()
+    
+    def _load_resnet10_backbone(self, pretrained: bool):
+        """Load ResNet10 from HuggingFace helper2424/resnet10."""
+        if pretrained:
+            try:
+                from transformers import AutoModel
+                print("Loading ResNet10 from HuggingFace: helper2424/resnet10")
+                hf_model = AutoModel.from_pretrained(
+                    "helper2424/resnet10", 
+                    trust_remote_code=True
+                )
+                # Use wrapper to handle HuggingFace's special output format
+                # The encoder returns BaseModelOutputWithNoAttention, not a tensor
+                self.features = HuggingFaceResNet10Wrapper(
+                    embedder=hf_model.embedder,
+                    encoder=hf_model.encoder,
+                )
+                print("ResNet10 loaded successfully from HuggingFace!")
+            except ImportError:
+                warnings.warn(
+                    "transformers package not found. "
+                    "Install with: pip install transformers\n"
+                    "Falling back to random initialization for ResNet10."
+                )
+                self._create_resnet10_from_scratch()
+            except Exception as e:
+                warnings.warn(
+                    f"Failed to load ResNet10 from HuggingFace: {e}\n"
+                    "Falling back to random initialization."
+                )
+                self._create_resnet10_from_scratch()
+        else:
+            self._create_resnet10_from_scratch()
+    
+    def _create_resnet10_from_scratch(self):
+        """Create ResNet10 architecture from scratch (no pretrained weights)."""
+        # ResNet10: 4 stages with [1, 1, 1, 1] blocks, hidden_sizes=[64, 128, 256, 512]
+        # This is a simplified version matching the HuggingFace model architecture
+        from torchvision.models.resnet import BasicBlock
+        
+        # Initial convolution (like ResNet but adjusted for 128x128 input)
+        self.features = nn.Sequential(
+            # Embedder: conv + bn + relu + maxpool
+            nn.Conv2d(3, 64, kernel_size=7, stride=2, padding=3, bias=False),
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=3, stride=2, padding=1),
+            # Stage 0: 64 -> 64
+            self._make_layer(BasicBlock, 64, 64, 1, stride=1),
+            # Stage 1: 64 -> 128
+            self._make_layer(BasicBlock, 64, 128, 1, stride=2),
+            # Stage 2: 128 -> 256
+            self._make_layer(BasicBlock, 128, 256, 1, stride=2),
+            # Stage 3: 256 -> 512
+            self._make_layer(BasicBlock, 256, 512, 1, stride=2),
+        )
+    
+    def _make_layer(self, block, in_channels, out_channels, num_blocks, stride):
+        """Create a ResNet layer with given parameters."""
+        from torchvision.models.resnet import BasicBlock
+        
+        downsample = None
+        if stride != 1 or in_channels != out_channels:
+            downsample = nn.Sequential(
+                nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=stride, bias=False),
+                nn.BatchNorm2d(out_channels),
+            )
+        
+        layers = [block(in_channels, out_channels, stride, downsample)]
+        for _ in range(1, num_blocks):
+            layers.append(block(out_channels, out_channels))
+        
+        return nn.Sequential(*layers)
+    
+    def _load_torchvision_backbone(self, backbone_name: str, pretrained: bool):
+        """Load ResNet18/34/50 from torchvision."""
+        weights = 'IMAGENET1K_V1' if pretrained else None
+        backbone = getattr(models, backbone_name)(weights=weights)
+        
+        # Remove classification head (avgpool and fc)
+        # Keep: conv1, bn1, relu, maxpool, layer1, layer2, layer3, layer4
+        self.features = nn.Sequential(
+            backbone.conv1,
+            backbone.bn1,
+            backbone.relu,
+            backbone.maxpool,
+            backbone.layer1,
+            backbone.layer2,
+            backbone.layer3,
+            backbone.layer4,
+        )
     
     def _init_projection(self):
         """Initialize projection layer weights."""
@@ -303,7 +410,7 @@ def create_visual_encoder(
     Factory function to create visual encoders.
     
     Args:
-        encoder_type: One of 'plain_conv', 'resnet18', 'resnet34', 'resnet50'
+        encoder_type: One of 'plain_conv', 'resnet10', 'resnet18', 'resnet34', 'resnet50'
         out_dim: Output feature dimension
         pretrained: Whether to use pretrained weights (ResNet only)
         freeze_backbone: Whether to freeze backbone (ResNet only)
@@ -321,7 +428,7 @@ def create_visual_encoder(
             out_dim=out_dim,
             pool_feature_map=pool_feature_map,
         )
-    elif encoder_type in ['resnet18', 'resnet34', 'resnet50']:
+    elif encoder_type in ['resnet10', 'resnet18', 'resnet34', 'resnet50']:
         return ResNetEncoder(
             backbone_name=encoder_type,
             out_dim=out_dim,
@@ -331,7 +438,7 @@ def create_visual_encoder(
         )
     else:
         raise ValueError(f"Unknown encoder type: {encoder_type}. "
-                        f"Choose from: plain_conv, resnet18, resnet34, resnet50")
+                        f"Choose from: plain_conv, resnet10, resnet18, resnet34, resnet50")
 
 
 def get_encoder_input_size(encoder_type: str, default_size: Tuple[int, int] = (128, 128)) -> Tuple[int, int]:
@@ -364,6 +471,7 @@ if __name__ == '__main__':
     
     # Test different configurations
     configs = [
+        {'backbone_name': 'resnet10', 'pretrained': True, 'freeze_backbone': False, 'freeze_bn': True},
         {'backbone_name': 'resnet18', 'pretrained': True, 'freeze_backbone': False, 'freeze_bn': True},
         {'backbone_name': 'resnet18', 'pretrained': True, 'freeze_backbone': True, 'freeze_bn': True},
         {'backbone_name': 'resnet34', 'pretrained': True, 'freeze_backbone': False, 'freeze_bn': True},
@@ -386,8 +494,9 @@ if __name__ == '__main__':
         print(f"Total params: {total_params/1e6:.2f}M")
         print(f"Trainable params: {trainable_params/1e6:.2f}M")
         
-        # Test forward pass
-        x = torch.randn(4, 3, 224, 224).to(device)
+        # Test forward pass with appropriate input size
+        input_size = ResNetEncoder.RECOMMENDED_INPUT_SIZE[config['backbone_name']]
+        x = torch.randn(4, 3, input_size[0], input_size[1]).to(device)
         
         # Warmup
         with torch.no_grad():
@@ -406,13 +515,14 @@ if __name__ == '__main__':
             torch.cuda.synchronize()
         elapsed = time.time() - start
         
+        print(f"Input size: {input_size}")
         print(f"Output shape: {out.shape}")
         print(f"Forward time: {elapsed/10*1000:.2f}ms per batch")
     
     print("\n" + "="*60)
     print("Testing factory function...")
     
-    for enc_type in ['plain_conv', 'resnet18', 'resnet34', 'resnet50']:
+    for enc_type in ['plain_conv', 'resnet10', 'resnet18', 'resnet34', 'resnet50']:
         encoder = create_visual_encoder(enc_type, out_dim=256)
         input_size = get_encoder_input_size(enc_type)
         print(f"{enc_type}: input_size={input_size}, out_dim=256")
