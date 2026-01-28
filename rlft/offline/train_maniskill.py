@@ -510,7 +510,15 @@ def main():
     # Get state dimension from env observation space
     # CRITICAL: Use shape[-1] to get feature dim, not shape[0] (which is obs_horizon)
     sample_obs = envs.single_observation_space
-    state_dim = sample_obs["state"].shape[-1]
+    
+    # In RGB mode with FlattenRGBDObservationWrapper: observation_space is a Dict with "state" key
+    # In state mode without wrapper: observation_space is a simple Box
+    if include_rgb:
+        # Dict observation space: {"state": Box, "rgb": Box, ...}
+        state_dim = sample_obs["state"].shape[-1]
+    else:
+        # Simple Box observation space
+        state_dim = sample_obs.shape[-1]
     
     # =========================================================================
     # Visual Encoder and Observation Dimension
