@@ -71,21 +71,107 @@ rlft/
 
 ## 🚀 快速开始
 
-### 安装依赖
+### 方式一：一键运行（推荐）
+
+我们提供了完整的自动化脚本，一键完成环境配置、数据下载、数据预处理和训练：
+
+```bash
+# 快速验证 (5000 步，验证全流程)
+bash scripts/run_full_pipeline.sh --quick
+
+# 完整训练 (100万步)
+bash scripts/run_full_pipeline.sh --full
+
+# 指定任务
+bash scripts/run_full_pipeline.sh --quick --task PickCube-v1
+
+# 跳过已完成的步骤
+bash scripts/run_full_pipeline.sh --full --skip-env --skip-download
+```
+
+### 方式二：分步运行
+
+#### Step 1: 配置环境
+
+```bash
+# 创建名为 'maniskill' 的 conda 环境
+bash scripts/setup_maniskill_env.sh
+
+# 激活环境
+conda activate maniskill
+```
+
+#### Step 2: 下载演示数据
+
+```bash
+# 下载 LiftPegUpright-v1 任务的演示
+bash scripts/download_demos.sh LiftPegUpright-v1
+
+# 下载多个任务
+bash scripts/download_demos.sh LiftPegUpright-v1 PickCube-v1 PushCube-v1
+```
+
+#### Step 3: Replay 生成训练数据
+
+```bash
+# Replay 生成 RGB 和 State 两种观测模式的数据集
+# 使用 physx_cuda 后端，保存 sparse 奖励
+bash scripts/replay_demos.sh LiftPegUpright-v1
+
+# 指定控制模式和并行环境数
+bash scripts/replay_demos.sh LiftPegUpright-v1 pd_ee_delta_pose 64
+```
+
+#### Step 4: 批量训练
+
+```bash
+# 快速验证所有算法 (5000 步)
+bash scripts/run_all_algorithms.sh --quick
+
+# 完整训练所有算法 (100万步)
+bash scripts/run_all_algorithms.sh --full
+
+# 指定 GPU 和算法
+bash scripts/run_all_algorithms.sh --quick --gpus 0,1,2,3 --algorithms flow_matching,cpql
+
+# 只训练 RGB 观测
+bash scripts/run_all_algorithms.sh --quick --obs-mode rgb
+
+# 预览命令（不执行）
+bash scripts/run_all_algorithms.sh --quick --dry-run
+```
+
+#### Step 5: 监控训练
+
+```bash
+# 启动监控界面
+bash scripts/monitor_training.sh logs/training_<timestamp>
+
+# 查看 GPU 使用
+watch -n 1 nvidia-smi
+
+# 查看单个任务日志
+tail -f logs/training_<timestamp>/LiftPegUpright-v1_flow_matching_rgb.log
+
+# 终止所有训练
+pkill -f 'rlft.offline.train_maniskill'
+```
+
+### 手动安装依赖
 
 ```bash
 # 创建 conda 环境
-conda create -n rlft python=3.10
-conda activate rlft
+conda create -n maniskill python=3.10
+conda activate maniskill
 
-# 安装 PyTorch
-conda install pytorch torchvision pytorch-cuda=12.1 -c pytorch -c nvidia
+# 安装 PyTorch (CUDA 12.1)
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
 
 # 安装 ManiSkill3
 pip install mani-skill
 
 # 安装其他依赖
-pip install tyro diffusers wandb tensorboard h5py
+pip install tyro diffusers wandb tensorboard h5py einops scikit-learn opencv-python
 ```
 
 ### 环境变量
