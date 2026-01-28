@@ -325,6 +325,7 @@ class ShortCutFlowAgent(nn.Module):
         num_steps: Optional[int] = None,
         adaptive: Optional[bool] = None,
         use_ema: bool = True,
+        **kwargs,  # Accept extra kwargs for API compatibility
     ) -> torch.Tensor:
         """
         Generate action using ShortCut flow with adaptive step sizes.

@@ -147,30 +147,47 @@ class AgentWrapper(nn.Module):
         self.act_horizon = act_horizon if act_horizon else agent.act_horizon if hasattr(agent, 'act_horizon') else 8
 
     def get_action(self, obs, deterministic=False, **kwargs):
-        """Get action from observation."""
-        B = obs["state"].shape[0]
-        T = self.obs_horizon
+        """Get action from observation.
         
-        features_list = []
+        Handles both RGB mode (Dict obs with 'state' and 'rgb' keys) and
+        State mode (direct tensor observation).
+        """
+        # Handle different observation formats
+        # RGB mode: obs is Dict with 'state' and 'rgb' keys
+        # State mode: obs is directly a tensor
+        if self.include_rgb:
+            # RGB mode: Dict observation
+            state = obs["state"]
+            B = state.shape[0]
+            T = self.obs_horizon
+            
+            features_list = []
+            
+            if self.visual_encoder is not None:
+                rgb = obs["rgb"]
+                if rgb.dim() == 5 and rgb.shape[-1] in [1, 3, 4, 6, 9, 12]:
+                    rgb = rgb.permute(0, 1, 4, 2, 3)
+                rgb_flat = rgb.reshape(B * T, *rgb.shape[2:]).float()
+                if rgb_flat.max() > 1.0:
+                    rgb_flat = rgb_flat / 255.0
+                visual_feat = self.visual_encoder(rgb_flat)
+                visual_feat = visual_feat.view(B, T, -1)
+                features_list.append(visual_feat)
+            
+            features_list.append(state.float())
+            obs_features = torch.cat(features_list, dim=-1)
+        else:
+            # State mode: direct tensor observation
+            # obs shape: (B, obs_horizon, state_dim) from FrameStack
+            state = obs
+            B = state.shape[0]
+            obs_features = state.float()
         
-        if self.include_rgb and self.visual_encoder is not None:
-            rgb = obs["rgb"]
-            if rgb.dim() == 5 and rgb.shape[-1] in [1, 3, 4, 6, 9, 12]:
-                rgb = rgb.permute(0, 1, 4, 2, 3)
-            rgb_flat = rgb.reshape(B * T, *rgb.shape[2:]).float()
-            if rgb_flat.max() > 1.0:
-                rgb_flat = rgb_flat / 255.0
-            visual_feat = self.visual_encoder(rgb_flat)
-            visual_feat = visual_feat.view(B, T, -1)
-            features_list.append(visual_feat)
-        
-        state = obs["state"].float()
-        features_list.append(state)
-        
-        obs_features = torch.cat(features_list, dim=-1)
         obs_cond = obs_features.reshape(B, -1)
         
-        actions = self.agent.get_action(obs_cond, deterministic=deterministic, **kwargs)
+        # Note: not all agents support 'deterministic' kwarg, so we don't pass it
+        # The wrapper handles determinism at the wrapper level if needed
+        actions = self.agent.get_action(obs_cond, **kwargs)
         
         return actions[:, :self.act_horizon]
 

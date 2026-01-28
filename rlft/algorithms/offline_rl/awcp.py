@@ -350,6 +350,7 @@ class AWCPAgent(nn.Module):
         self,
         obs_features: torch.Tensor,
         use_ema: bool = True,
+        **kwargs,  # Accept extra kwargs for API compatibility
     ) -> torch.Tensor:
         """Sample action sequence for evaluation."""
         self.velocity_net.eval()

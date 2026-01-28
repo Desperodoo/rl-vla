@@ -108,6 +108,7 @@ class DiffusionPolicyAgent(nn.Module):
     def get_action(
         self,
         obs_features: torch.Tensor,
+        **kwargs,  # Accept extra kwargs for API compatibility
     ) -> torch.Tensor:
         """Sample action sequence by iterative denoising.
         

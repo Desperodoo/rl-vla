@@ -170,6 +170,7 @@ class ReflectedFlowAgent(nn.Module):
         self,
         obs_features: torch.Tensor,
         integration_method: Literal["euler", "rk4"] = "euler",
+        **kwargs,  # Accept extra kwargs for API compatibility
     ) -> torch.Tensor:
         """
         Generate action using reflected flow ODE integration.
