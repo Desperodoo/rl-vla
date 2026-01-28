@@ -24,6 +24,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import wandb
 from tqdm import tqdm
 import tyro
 from diffusers.optimization import get_scheduler
@@ -407,7 +408,6 @@ def main():
     
     # Set up logging
     if args.track:
-        import wandb
         wandb.init(
             project=args.wandb_project_name,
             entity=args.wandb_entity,
@@ -713,6 +713,13 @@ def main():
             for k, v in losses.items():
                 writer.add_scalar(f"losses/{k}", v, iteration)
             writer.add_scalar("charts/learning_rate", optimizer.param_groups[0]["lr"], iteration)
+            
+            # WandB logging
+            if args.track:
+                wandb_log = {f"losses/{k}": v for k, v in losses.items()}
+                wandb_log["charts/learning_rate"] = optimizer.param_groups[0]["lr"]
+                wandb_log["charts/iteration"] = iteration
+                wandb.log(wandb_log, step=iteration)
         
         # Evaluation
         if iteration % args.eval_freq == 0 and iteration > 0:
@@ -724,6 +731,11 @@ def main():
             for k in eval_metrics.keys():
                 eval_metrics[k] = np.mean(eval_metrics[k])
                 writer.add_scalar(f"eval/{k}", eval_metrics[k], iteration)
+            
+            # WandB logging for evaluation
+            if args.track:
+                wandb_eval = {f"eval/{k}": v for k, v in eval_metrics.items()}
+                wandb.log(wandb_eval, step=iteration)
             
             for k in ["success_once", "success_at_end"]:
                 if k in eval_metrics and eval_metrics[k] > best_eval_metrics[k]:
@@ -741,6 +753,22 @@ def main():
     
     envs.close()
     writer.close()
+    
+    # Close WandB
+    if args.track:
+        # Log final best metrics
+        wandb.log({
+            "final/best_success_once": best_eval_metrics.get("success_once", 0.0),
+            "final/best_success_at_end": best_eval_metrics.get("success_at_end", 0.0),
+        })
+        wandb.finish()
+    
+    # Print completion message for monitoring scripts
+    print("\n" + "=" * 50)
+    print("Training completed successfully!")
+    print(f"Run: {run_name}")
+    print(f"Total iterations: {args.total_iters}")
+    print("=" * 50)
 
 
 if __name__ == "__main__":

@@ -130,7 +130,15 @@ while true; do
             else
                 # 检查是否成功完成
                 log_file="${LOG_DIR}/${name}.log"
-                if [ -f "${log_file}" ] && grep -q "Training completed\|训练完成" "${log_file}" 2>/dev/null; then
+                # 检测多种完成标志：
+                # 1. 显式的完成信息
+                # 2. wandb 的 "View run" 信息（表示 wandb 正常结束）
+                # 3. 100% 进度条完成
+                if [ -f "${log_file}" ] && ( \
+                    grep -q "Training completed\|训练完成" "${log_file}" 2>/dev/null || \
+                    grep -q "View run.*at:" "${log_file}" 2>/dev/null || \
+                    grep -qE "100%\|██████████\|.*\[.*<.*,.*it/s" "${log_file}" 2>/dev/null \
+                ); then
                     print_status "completed" "${name}"
                     completed_tasks=$((completed_tasks + 1))
                 else

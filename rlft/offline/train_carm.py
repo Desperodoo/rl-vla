@@ -22,6 +22,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
+import wandb
 from tqdm import tqdm
 import tyro
 from diffusers.optimization import get_scheduler
@@ -356,7 +357,6 @@ def main():
     
     # Set up logging
     if args.track:
-        import wandb
         wandb.init(
             project=args.wandb_project_name,
             entity=args.wandb_entity,
@@ -603,6 +603,17 @@ def main():
                 gripper_pred = gripper_logits.argmax(dim=-1)
                 gripper_acc = (gripper_pred == gripper_labels).float().mean()
                 writer.add_scalar("metrics/gripper_accuracy", gripper_acc.item(), iteration)
+            
+            # WandB logging
+            if args.track:
+                wandb.log({
+                    "losses/policy_loss": policy_loss.item(),
+                    "losses/gripper_loss": gripper_loss.item(),
+                    "losses/total_loss": total_loss.item(),
+                    "charts/learning_rate": optimizer.param_groups[0]["lr"],
+                    "metrics/gripper_accuracy": gripper_acc.item(),
+                    "charts/iteration": iteration,
+                }, step=iteration)
         
         # Save checkpoint
         if iteration % args.save_freq == 0 and iteration > 0:
@@ -628,6 +639,16 @@ def main():
     )
     
     writer.close()
+    
+    # Close WandB
+    if args.track:
+        wandb.finish()
+    
+    print("\n" + "=" * 50)
+    print("Training completed successfully!")
+    print(f"Run: {run_name}")
+    print(f"Total iterations: {args.total_iters}")
+    print("=" * 50)
 
 
 if __name__ == "__main__":

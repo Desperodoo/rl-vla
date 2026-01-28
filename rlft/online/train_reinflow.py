@@ -23,6 +23,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import wandb
 from tqdm import tqdm
 import tyro
 from diffusers.training_utils import EMAModel
@@ -360,7 +361,6 @@ def main():
     
     # Set up logging
     if args.track:
-        import wandb
         wandb.init(
             project=args.wandb_project_name,
             entity=args.wandb_entity,
@@ -830,6 +830,11 @@ def main():
             for k in eval_metrics.keys():
                 eval_metrics[k] = np.mean(eval_metrics[k])
                 writer.add_scalar(f"eval/{k}", eval_metrics[k], num_updates)
+            
+            # WandB logging for evaluation
+            if args.track:
+                wandb_eval = {f"eval/{k}": v for k, v in eval_metrics.items()}
+                wandb.log(wandb_eval, step=num_updates)
             
             for k in ["success_once", "success_at_end"]:
                 if k in eval_metrics and eval_metrics[k] > best_eval_metrics[k]:
