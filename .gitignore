@@ -5,6 +5,8 @@ __pycache__/
 catkin_ws/devel/
 catkin_ws/build/
 catkin_ws/install/
+runs/
+wandb/
 
 # 子仓库和第三方库
 rlft/dsrl_ajwagen/
