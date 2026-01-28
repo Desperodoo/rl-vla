@@ -473,7 +473,12 @@ def main():
     other_kwargs = dict(obs_horizon=args.obs_horizon)
     
     # Environment wrapper pipeline:
-    # gym.make() -> FlattenRGBDObservationWrapper -> FrameStack -> ManiSkillVectorEnv
+    # gym.make() -> [FlattenRGBDObservationWrapper if RGB] -> FrameStack -> ManiSkillVectorEnv
+    # NOTE: FlattenRGBDObservationWrapper is ONLY for RGB mode. It flattens nested obs to {state, rgb, depth}
+    # In state mode, the observation is already flat, so we don't need this wrapper.
+    include_rgb = "rgb" in args.obs_mode
+    wrappers = [FlattenRGBDObservationWrapper] if include_rgb else []
+    
     envs = make_eval_envs(
         env_id=args.env_id,
         num_envs=args.num_eval_envs,
@@ -481,7 +486,7 @@ def main():
         env_kwargs=env_kwargs,
         other_kwargs=other_kwargs,
         video_dir=f"runs/{run_name}/videos" if args.capture_video else None,
-        wrappers=[FlattenRGBDObservationWrapper],  # Flattens nested obs to {state, rgb, depth}
+        wrappers=wrappers,
     )
     
     # =========================================================================
@@ -497,7 +502,6 @@ def main():
     # =========================================================================
     
     act_dim = envs.single_action_space.shape[0]
-    include_rgb = "rgb" in args.obs_mode
     
     # Build state extractor (used for processing demo data, not env obs)
     # This extracts agent + extra values from raw ManiSkill obs format
@@ -544,7 +548,7 @@ def main():
     # Create dataset and dataloader
     obs_process_fn = create_obs_process_fn(args.env_id, output_format="NCHW")
     
-    il_algorithms = ["diffusion_policy", "flow_matching", "shortcut_flow"]
+    il_algorithms = ["diffusion_policy", "flow_matching", "shortcut_flow", "consistency_flow", "reflected_flow"]
     
     if args.algorithm in il_algorithms:
         from rlft.datasets import ManiSkillDataset
@@ -657,6 +661,8 @@ def main():
             # Offline RL
             next_obs_seq = data_batch["next_observations"]
             actions_for_q = data_batch["actions_for_q"]
+            rewards = data_batch["rewards"]
+            dones = data_batch["dones"]
             cumulative_reward = data_batch["cumulative_reward"]
             chunk_done = data_batch["chunk_done"]
             discount_factor = data_batch["discount_factor"]
@@ -666,8 +672,10 @@ def main():
             loss_dict = agent.compute_loss(
                 obs_features=obs_features,
                 actions=action_seq,
-                actions_for_q=actions_for_q,
+                rewards=rewards,
                 next_obs_features=next_obs_features,
+                dones=dones,
+                actions_for_q=actions_for_q,
                 cumulative_reward=cumulative_reward,
                 chunk_done=chunk_done,
                 discount_factor=discount_factor,
