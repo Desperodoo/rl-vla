@@ -1,0 +1,16 @@
+1224651|LiftPegUpright-v1_flow_matching_rgb|0|1769609552
+1224654|LiftPegUpright-v1_shortcut_flow_rgb|1|1769609552
+1224657|LiftPegUpright-v1_consistency_flow_rgb|2|1769609552
+1224660|LiftPegUpright-v1_diffusion_policy_rgb|3|1769609552
+1224663|LiftPegUpright-v1_reflected_flow_rgb|4|1769609552
+1224666|LiftPegUpright-v1_cpql_rgb|5|1769609552
+1224669|LiftPegUpright-v1_awcp_rgb|6|1769609552
+1224672|LiftPegUpright-v1_aw_shortcut_flow_rgb|7|1769609552
+1224675|LiftPegUpright-v1_flow_matching_state|8|1769609552
+1224678|LiftPegUpright-v1_shortcut_flow_state|9|1769609552
+1229817|LiftPegUpright-v1_consistency_flow_state|0|1769609573
+1229820|LiftPegUpright-v1_diffusion_policy_state|1|1769609573
+1229823|LiftPegUpright-v1_reflected_flow_state|2|1769609573
+1229826|LiftPegUpright-v1_cpql_state|3|1769609573
+1229829|LiftPegUpright-v1_awcp_state|4|1769609573
+1229832|LiftPegUpright-v1_aw_shortcut_flow_state|5|1769609573
