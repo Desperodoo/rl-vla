@@ -63,6 +63,7 @@ class SACAgent(nn.Module):
         target_entropy: Optional[float] = None,
         backup_entropy: bool = False,
         reward_scale: float = 1.0,
+        action_bounds: Optional[tuple] = None,
         device: str = "cuda",
     ):
         super().__init__()
@@ -74,6 +75,7 @@ class SACAgent(nn.Module):
         self.tau = tau
         self.backup_entropy = backup_entropy
         self.reward_scale = reward_scale
+        self.action_bounds = action_bounds
         self.device = device
         
         if target_entropy is None:
@@ -126,6 +128,11 @@ class SACAgent(nn.Module):
             squeeze = True
         
         action, _ = self.get_action(obs_features, deterministic=deterministic)
+        
+        # Note: DiagGaussianActor uses tanh squashing, output is already in [-1, 1]
+        # Additional clamp if action_bounds is explicitly set
+        if self.action_bounds is not None:
+            action = torch.clamp(action, self.action_bounds[0], self.action_bounds[1])
         
         if squeeze:
             action = action.squeeze(0)

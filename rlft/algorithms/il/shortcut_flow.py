@@ -67,6 +67,7 @@ class ShortCutFlowAgent(nn.Module):
         # Inference hyperparameters (sweep: uniform avoids solver mismatch)
         inference_mode: Literal["adaptive", "uniform"] = "uniform",
         num_inference_steps: int = 8,
+        action_bounds: Optional[tuple] = None,
         device: str = "cuda",
     ):
         super().__init__()
@@ -100,6 +101,7 @@ class ShortCutFlowAgent(nn.Module):
         # Inference config
         self.inference_mode = inference_mode
         self.num_inference_steps = num_inference_steps
+        self.action_bounds = action_bounds
         
         # EMA velocity network for stable shortcut targets
         self.velocity_net_ema = copy.deepcopy(velocity_net)
@@ -390,6 +392,10 @@ class ShortCutFlowAgent(nn.Module):
                 v = net(x, t, d, obs_features)
                 x = x + dt * v
         
+        # Only clamp if action_bounds is explicitly set
+        if self.action_bounds is not None:
+            x = torch.clamp(x, self.action_bounds[0], self.action_bounds[1])
+        
         self.velocity_net.train()
         return x
 
@@ -457,5 +463,7 @@ class ShortCutFlowAgent(nn.Module):
                 v = net(x, t, d, obs_features)
                 x = x + dt * v
         
-        self.velocity_net.train()
-        return x
+        # Only clamp if action_bounds is explicitly set
+        if self.action_bounds is not None:
+            x = torch.clamp(x, self.action_bounds[0], self.action_bounds[1])
+        

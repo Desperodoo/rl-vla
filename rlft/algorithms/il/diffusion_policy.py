@@ -41,6 +41,7 @@ class DiffusionPolicyAgent(nn.Module):
         obs_horizon: int = 2,
         pred_horizon: int = 16,
         num_diffusion_iters: int = 100,
+        action_bounds: Optional[tuple] = None,
         device: str = "cuda",
     ):
         super().__init__()
@@ -49,6 +50,7 @@ class DiffusionPolicyAgent(nn.Module):
         self.obs_horizon = obs_horizon
         self.pred_horizon = pred_horizon
         self.num_diffusion_iters = num_diffusion_iters
+        self.action_bounds = action_bounds
         self.device = device
         
         # DDPM noise scheduler
@@ -152,7 +154,10 @@ class DiffusionPolicyAgent(nn.Module):
                 sample=noisy_action_seq,
             ).prev_sample
         
-        # Note: DDPM scheduler already has clip_sample=True, no additional clamp needed
+        # Note: DDPM scheduler already has clip_sample=True
+        # Additional clamp if action_bounds is explicitly set
+        if self.action_bounds is not None:
+            noisy_action_seq = torch.clamp(noisy_action_seq, self.action_bounds[0], self.action_bounds[1])
         
         self.noise_pred_net.train()
         return noisy_action_seq
@@ -205,7 +210,10 @@ class DiffusionPolicyAgent(nn.Module):
                 sample=action_seq,
             ).prev_sample
         
-        # Note: DDPM scheduler already has clip_sample=True, no additional clamp needed
+        # Note: DDPM scheduler already has clip_sample=True
+        # Additional clamp if action_bounds is explicitly set
+        if self.action_bounds is not None:
+            action_seq = torch.clamp(action_seq, self.action_bounds[0], self.action_bounds[1])
         
         self.noise_pred_net.train()
         return action_seq

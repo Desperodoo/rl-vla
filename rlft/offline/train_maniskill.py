@@ -185,6 +185,9 @@ class Args:
     """Whether to normalize actions during training"""
     action_norm_mode: Literal["standard", "minmax"] = "standard"
     """Action normalization mode: 'standard' (zero mean, unit var) or 'minmax' (scale to [-1, 1])"""
+    action_bounds: Optional[tuple] = (-1.0, 1.0)
+    """Action bounds for clamping during inference. Set to None to disable clamping.
+    ManiSkill environments have action space [-1, 1], so we clamp by default."""
 
     # Logging settings
     log_freq: int = 1000
@@ -298,6 +301,7 @@ def create_agent(algorithm: str, action_dim: int, global_cond_dim: int, args):
             obs_horizon=args.obs_horizon,
             pred_horizon=args.pred_horizon,
             num_diffusion_iters=args.num_diffusion_iters,
+            action_bounds=args.action_bounds,
             device=device,
         )
     
@@ -315,6 +319,7 @@ def create_agent(algorithm: str, action_dim: int, global_cond_dim: int, args):
             obs_horizon=args.obs_horizon,
             pred_horizon=args.pred_horizon,
             num_flow_steps=args.num_flow_steps,
+            action_bounds=args.action_bounds,
             device=device,
         )
     
@@ -352,6 +357,7 @@ def create_agent(algorithm: str, action_dim: int, global_cond_dim: int, args):
             # Inference
             inference_mode=args.sc_inference_mode,
             num_inference_steps=args.sc_num_inference_steps,
+            action_bounds=args.action_bounds,
             device=device,
         )
     
@@ -389,6 +395,7 @@ def create_agent(algorithm: str, action_dim: int, global_cond_dim: int, args):
             teacher_from=args.cons_teacher_from,
             student_point=args.cons_student_point,
             consistency_loss_space=args.cons_loss_space,
+            action_bounds=args.action_bounds,
             device=device,
         )
     
@@ -439,6 +446,7 @@ def create_agent(algorithm: str, action_dim: int, global_cond_dim: int, args):
             reward_scale=args.reward_scale,
             q_target_clip=args.q_target_clip,
             ema_decay=args.ema_decay,
+            action_bounds=args.action_bounds,
             device=device,
         )
     
@@ -471,6 +479,7 @@ def create_agent(algorithm: str, action_dim: int, global_cond_dim: int, args):
             q_target_clip=args.q_target_clip,
             ema_decay=args.ema_decay,
             weight_clip=args.weight_clip,
+            action_bounds=args.action_bounds,
             device=device,
         )
     
@@ -515,6 +524,7 @@ def create_agent(algorithm: str, action_dim: int, global_cond_dim: int, args):
             weight_clip=args.weight_clip,
             fixed_step_size=args.sc_fixed_step_size,
             num_inference_steps=args.sc_num_inference_steps,
+            action_bounds=args.action_bounds,
             device=device,
         )
     
