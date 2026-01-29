@@ -46,7 +46,7 @@ from rlft.algorithms import (
     ConsistencyFlowAgent, ReflectedFlowAgent,
     CPQLAgent, AWCPAgent, AWShortCutFlowAgent,
 )
-from rlft.datasets import OfflineRLDataset, IterationBasedBatchSampler, worker_init_fn
+from rlft.datasets import OfflineRLDataset, IterationBasedBatchSampler, worker_init_fn, ActionNormalizer
 from rlft.datasets.data_utils import build_state_obs_extractor, create_obs_process_fn
 
 
@@ -125,6 +125,12 @@ class Args:
     num_qs: int = 10
     num_min_qs: int = 2
     q_hidden_dims: List[int] = field(default_factory=lambda: [256, 256, 256])
+    
+    # Action normalization settings
+    normalize_actions: bool = True
+    """Whether to normalize actions during training"""
+    action_norm_mode: Literal["standard", "minmax"] = "standard"
+    """Action normalization mode: 'standard' (zero mean, unit var) or 'minmax' (scale to [-1, 1])"""
 
     # Logging settings
     log_freq: int = 1000
@@ -138,13 +144,14 @@ class Args:
 class AgentWrapper(nn.Module):
     """Wrapper for agent with visual encoder for evaluation."""
     
-    def __init__(self, agent, visual_encoder, include_rgb, obs_horizon, act_horizon=None):
+    def __init__(self, agent, visual_encoder, include_rgb, obs_horizon, act_horizon=None, action_normalizer=None):
         super().__init__()
         self.agent = agent
         self.visual_encoder = visual_encoder
         self.include_rgb = include_rgb
         self.obs_horizon = obs_horizon
         self.act_horizon = act_horizon if act_horizon else agent.act_horizon if hasattr(agent, 'act_horizon') else 8
+        self.action_normalizer = action_normalizer
 
     def get_action(self, obs, deterministic=False, **kwargs):
         """Get action from observation.
@@ -189,7 +196,34 @@ class AgentWrapper(nn.Module):
         # The wrapper handles determinism at the wrapper level if needed
         actions = self.agent.get_action(obs_cond, **kwargs)
         
-        return actions[:, :self.act_horizon]
+        # Slice action sequence with temporal alignment
+        # Use obs_horizon-1 as start offset to align with training data
+        # This matches the original diffusion_policy implementation
+        start = self.obs_horizon - 1
+        end = start + self.act_horizon
+        action_seq = actions[:, start:end]
+        
+        # Denormalize actions if normalizer is provided
+        if self.action_normalizer is not None:
+            actions_np = action_seq.cpu().numpy()
+            actions_denorm = self.action_normalizer.inverse_transform(actions_np)
+            return torch.from_numpy(actions_denorm).float().to(actions.device)
+        
+        return action_seq
+    
+    def eval(self):
+        """Set agent and visual encoder to evaluation mode."""
+        self.agent.eval()
+        if self.visual_encoder is not None:
+            self.visual_encoder.eval()
+        return self
+    
+    def train(self, mode=True):
+        """Set agent and visual encoder to training mode."""
+        self.agent.train(mode)
+        if self.visual_encoder is not None:
+            self.visual_encoder.train(mode)
+        return self
 
 
 def create_agent(algorithm: str, action_dim: int, global_cond_dim: int, args):
@@ -402,7 +436,7 @@ def create_agent(algorithm: str, action_dim: int, global_cond_dim: int, args):
         raise ValueError(f"Unknown algorithm: {algorithm}")
 
 
-def save_ckpt(run_name, tag, agent, ema_agent, visual_encoder):
+def save_ckpt(run_name, tag, agent, ema_agent, visual_encoder, action_normalizer=None):
     """Save checkpoint."""
     os.makedirs(f"runs/{run_name}/checkpoints", exist_ok=True)
     checkpoint = {
@@ -411,6 +445,11 @@ def save_ckpt(run_name, tag, agent, ema_agent, visual_encoder):
     }
     if visual_encoder is not None:
         checkpoint["visual_encoder"] = visual_encoder.state_dict()
+    if action_normalizer is not None and action_normalizer.stats is not None:
+        checkpoint["action_normalizer"] = {
+            "mode": action_normalizer.mode,
+            "stats": {k: v.tolist() for k, v in action_normalizer.stats.items()},
+        }
     torch.save(checkpoint, f"runs/{run_name}/checkpoints/{tag}.pt")
 
 
@@ -570,6 +609,9 @@ def main():
     agent = create_agent(args.algorithm, act_dim, obs_dim, args).to(device)
     ema_agent = create_agent(args.algorithm, act_dim, obs_dim, args).to(device)
     
+    # Create action normalizer if needed
+    action_normalizer = ActionNormalizer(mode=args.action_norm_mode) if args.normalize_actions else None
+    
     # Create dataset and dataloader
     obs_process_fn = create_obs_process_fn(args.env_id, output_format="NCHW")
     
@@ -587,6 +629,7 @@ def main():
             control_mode=args.control_mode,
             env_id=args.env_id,
             obs_process_fn=obs_process_fn,
+            action_normalizer=action_normalizer,
         )
     else:
         dataset = OfflineRLDataset(
@@ -601,6 +644,7 @@ def main():
             env_id=args.env_id,
             obs_process_fn=obs_process_fn,
             gamma=args.gamma,
+            action_normalizer=action_normalizer,
         )
     
     sampler = RandomSampler(dataset, replacement=False)
@@ -631,8 +675,8 @@ def main():
     ema = EMAModel(parameters=agent.parameters(), power=0.75)
     
     # Agent wrapper for evaluation
-    agent_wrapper = AgentWrapper(agent, visual_encoder, include_rgb, args.obs_horizon, args.act_horizon).to(device)
-    ema_agent_wrapper = AgentWrapper(ema_agent, visual_encoder, include_rgb, args.obs_horizon, args.act_horizon).to(device)
+    agent_wrapper = AgentWrapper(agent, visual_encoder, include_rgb, args.obs_horizon, args.act_horizon, action_normalizer).to(device)
+    ema_agent_wrapper = AgentWrapper(ema_agent, visual_encoder, include_rgb, args.obs_horizon, args.act_horizon, action_normalizer).to(device)
     
     best_eval_metrics = defaultdict(float)
     
@@ -757,12 +801,12 @@ def main():
             for k in ["success_once", "success_at_end"]:
                 if k in eval_metrics and eval_metrics[k] > best_eval_metrics[k]:
                     best_eval_metrics[k] = eval_metrics[k]
-                    save_ckpt(run_name, f"best_eval_{k}", agent, ema_agent, visual_encoder)
+                    save_ckpt(run_name, f"best_eval_{k}", agent, ema_agent, visual_encoder, action_normalizer)
         
         # Checkpoint
         if args.save_freq is not None and iteration % args.save_freq == 0:
             ema.copy_to(ema_agent.parameters())
-            save_ckpt(run_name, str(iteration), agent, ema_agent, visual_encoder)
+            save_ckpt(run_name, str(iteration), agent, ema_agent, visual_encoder, action_normalizer)
         
         pbar.update(1)
         if isinstance(loss_dict, dict):

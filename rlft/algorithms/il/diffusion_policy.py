@@ -152,8 +152,7 @@ class DiffusionPolicyAgent(nn.Module):
                 sample=noisy_action_seq,
             ).prev_sample
         
-        # Clamp to valid action range
-        noisy_action_seq = torch.clamp(noisy_action_seq, -1.0, 1.0)
+        # Note: DDPM scheduler already has clip_sample=True, no additional clamp needed
         
         self.noise_pred_net.train()
         return noisy_action_seq
@@ -206,7 +205,7 @@ class DiffusionPolicyAgent(nn.Module):
                 sample=action_seq,
             ).prev_sample
         
-        action_seq = torch.clamp(action_seq, -1.0, 1.0)
+        # Note: DDPM scheduler already has clip_sample=True, no additional clamp needed
         
         self.noise_pred_net.train()
         return action_seq

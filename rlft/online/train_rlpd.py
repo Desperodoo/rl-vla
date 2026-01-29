@@ -44,7 +44,7 @@ from rlft.networks import PlainConv, ShortCutVelocityUNet1D
 from rlft.algorithms.online_rl import SACAgent, AWSCAgent
 from rlft.buffers import OnlineReplayBuffer, OnlineReplayBufferRaw, SMDPChunkCollector
 from rlft.envs import make_eval_envs, evaluate
-from rlft.datasets import ManiSkillDataset, OfflineRLDataset
+from rlft.datasets import ManiSkillDataset, OfflineRLDataset, ActionNormalizer
 from rlft.datasets.data_utils import ObservationStacker
 
 
@@ -158,6 +158,12 @@ class Args:
     """U-Net group norm groups"""
     diffusion_step_embed_dim: int = 256
     """Diffusion step embedding dimension"""
+    
+    # Action normalization settings
+    normalize_actions: bool = True
+    """Whether to normalize actions during training (for offline data)"""
+    action_norm_mode: Literal["standard", "minmax"] = "standard"
+    """Action normalization mode: 'standard' (zero mean, unit var) or 'minmax' (scale to [-1, 1])"""
 
 
 class AgentWrapper:
@@ -166,13 +172,14 @@ class AgentWrapper:
     Note: eval_envs already applies FrameStack, so obs comes in as
     (num_envs, obs_horizon, state_dim) format - no additional stacking needed.
     """
-    def __init__(self, agent, visual_encoder, include_rgb, obs_horizon, act_horizon, device):
+    def __init__(self, agent, visual_encoder, include_rgb, obs_horizon, act_horizon, device, action_normalizer=None):
         self.agent = agent
         self.visual_encoder = visual_encoder
         self.include_rgb = include_rgb
         self.obs_horizon = obs_horizon
         self.act_horizon = act_horizon
         self.device = device
+        self.action_normalizer = action_normalizer
     
     def reset(self, obs):
         """Reset is a no-op for eval since FrameStack handles history."""
@@ -235,7 +242,28 @@ class AgentWrapper:
         """
         obs_cond = self.encode_obs(obs)
         actions = self.agent.select_action(obs_cond, deterministic=deterministic)
+        
+        # Denormalize actions if normalizer is provided
+        if self.action_normalizer is not None:
+            actions_np = actions.cpu().numpy()
+            actions_denorm = self.action_normalizer.inverse_transform(actions_np)
+            return torch.from_numpy(actions_denorm).float().to(actions.device)
+        
         return actions
+    
+    def eval(self):
+        """Set agent and visual encoder to evaluation mode."""
+        self.agent.eval()
+        if self.visual_encoder is not None:
+            self.visual_encoder.eval()
+        return self
+    
+    def train(self, mode=True):
+        """Set agent and visual encoder to training mode."""
+        self.agent.train(mode)
+        if self.visual_encoder is not None:
+            self.visual_encoder.train(mode)
+        return self
 
 
 def make_train_envs(args):
@@ -435,16 +463,6 @@ def main():
     else:
         raise ValueError(f"Unknown algorithm: {args.algorithm}")
     
-    # Agent wrapper for evaluation
-    agent_wrapper = AgentWrapper(
-        agent=agent,
-        visual_encoder=visual_encoder,
-        include_rgb=include_rgb,
-        obs_horizon=args.obs_horizon,
-        act_horizon=args.act_horizon,
-        device=device,
-    )
-    
     # Optimizers - different setup based on algorithm
     if args.algorithm == "sac":
         actor_params = list(agent.actor.parameters())
@@ -481,6 +499,9 @@ def main():
         device=device,
     )
     
+    # Create action normalizer if needed (for offline data)
+    action_normalizer = ActionNormalizer(mode=args.action_norm_mode) if args.normalize_actions else None
+    
     # Offline dataset for RLPD (use OfflineRLDataset for SMDP formulation)
     offline_dataset = None
     if args.demo_path:
@@ -496,8 +517,20 @@ def main():
             rgb_format="NCHW",
             gamma=args.gamma,
             device=device,
+            action_normalizer=action_normalizer,
         )
         print(f"Offline dataset size: {len(offline_dataset)}")
+    
+    # Agent wrapper for evaluation (created after action_normalizer is fitted)
+    agent_wrapper = AgentWrapper(
+        agent=agent,
+        visual_encoder=visual_encoder,
+        include_rgb=include_rgb,
+        obs_horizon=args.obs_horizon,
+        act_horizon=args.act_horizon,
+        device=device,
+        action_normalizer=action_normalizer,
+    )
     
     # Training loop
     print("\n" + "=" * 50)
@@ -734,6 +767,11 @@ def main():
                     "visual_encoder": visual_encoder.state_dict() if visual_encoder else None,
                     "config": vars(args),
                 }
+                if action_normalizer is not None and action_normalizer.stats is not None:
+                    checkpoint["action_normalizer"] = {
+                        "mode": action_normalizer.mode,
+                        "stats": {k: v.tolist() for k, v in action_normalizer.stats.items()},
+                    }
                 torch.save(checkpoint, f"{log_dir}/checkpoints/best.pt")
                 print(f"  New best! Saved checkpoint.")
         
@@ -747,6 +785,11 @@ def main():
                 "total_steps": total_steps,
                 "config": vars(args),
             }
+            if action_normalizer is not None and action_normalizer.stats is not None:
+                checkpoint["action_normalizer"] = {
+                    "mode": action_normalizer.mode,
+                    "stats": {k: v.tolist() for k, v in action_normalizer.stats.items()},
+                }
             torch.save(checkpoint, f"{log_dir}/checkpoints/step_{total_steps}.pt")
         
         pbar.set_postfix({
@@ -762,6 +805,11 @@ def main():
         "visual_encoder": visual_encoder.state_dict() if visual_encoder else None,
         "config": vars(args),
     }
+    if action_normalizer is not None and action_normalizer.stats is not None:
+        checkpoint["action_normalizer"] = {
+            "mode": action_normalizer.mode,
+            "stats": {k: v.tolist() for k, v in action_normalizer.stats.items()},
+        }
     torch.save(checkpoint, f"{log_dir}/checkpoints/final.pt")
     
     train_envs.close()

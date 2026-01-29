@@ -119,11 +119,9 @@ class FlowMatchingAgent(nn.Module):
         else:
             x = self._euler_integrate(x, obs_features)
         
-        # Clamp to valid action range (optional)
+        # Clamp to valid action range only if bounds are specified
         if self.action_bounds is not None:
             x = torch.clamp(x, self.action_bounds[0], self.action_bounds[1])
-        else:
-            x = torch.clamp(x, -1.0, 1.0)
         
         self.velocity_net.train()
         return x
@@ -193,11 +191,9 @@ class FlowMatchingAgent(nn.Module):
         else:
             x = self._euler_integrate(x, obs_features)
         
-        # Clamp to valid action range
+        # Clamp to valid action range only if bounds are specified
         if self.action_bounds is not None:
             x = torch.clamp(x, self.action_bounds[0], self.action_bounds[1])
-        else:
-            x = torch.clamp(x, -1.0, 1.0)
         
         self.velocity_net.train()
         return x

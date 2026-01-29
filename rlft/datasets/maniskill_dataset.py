@@ -56,10 +56,13 @@ Data Flow Overview
 import numpy as np
 import torch
 from torch.utils.data import Dataset
-from typing import Dict, Optional, Callable
+from typing import Dict, Optional, Callable, TYPE_CHECKING
 from gymnasium import spaces
 
 from .data_utils import load_traj_hdf5, create_obs_process_fn
+
+if TYPE_CHECKING:
+    from .carm_dataset import ActionNormalizer
 
 
 def reorder_keys(d, ref_dict):
@@ -107,6 +110,7 @@ class ManiSkillDataset(Dataset):
         env_id: Environment ID for state extraction
         obs_process_fn: Optional custom observation processing function
         obs_space: Optional observation space for reordering keys
+        action_normalizer: Optional action normalizer for training stability
     """
     
     def __init__(
@@ -122,12 +126,14 @@ class ManiSkillDataset(Dataset):
         obs_process_fn: Optional[Callable] = None,
         obs_space=None,
         rgb_format: str = "NCHW",
+        action_normalizer: Optional["ActionNormalizer"] = None,
     ):
         self.include_rgb = include_rgb
         self.obs_horizon = obs_horizon
         self.pred_horizon = pred_horizon
         self.device = device
         self.rgb_format = rgb_format
+        self.action_normalizer = action_normalizer
         
         # Load demo dataset
         raw_data = load_traj_hdf5(data_path, num_traj=num_traj)
@@ -171,6 +177,20 @@ class ManiSkillDataset(Dataset):
         
         self.obs_keys = list(processed_obs.keys())
         print("Obs/action pre-processing done, computing slice indices...")
+        
+        # Fit action normalizer if provided
+        if self.action_normalizer is not None:
+            all_actions = np.concatenate([
+                traj["actions"] for traj in raw_data.values()
+            ], axis=0)
+            self.action_normalizer.fit(all_actions)
+            print(f"Action normalizer fitted with {len(all_actions)} samples, mode: {self.action_normalizer.mode}")
+            
+            # Normalize stored actions
+            for i in range(len(trajectories["actions"])):
+                actions_np = trajectories["actions"][i].cpu().numpy()
+                normalized = self.action_normalizer.transform(actions_np)
+                trajectories["actions"][i] = torch.from_numpy(normalized).float().to(device)
         
         # Action padding for delta controllers
         if "delta_pos" in control_mode or control_mode == "base_pd_joint_vel_arm_pd_joint_vel":
@@ -266,6 +286,7 @@ class OfflineRLDataset(Dataset):
         obs_space: Optional observation space for key reordering
         rgb_format: RGB output format ("NCHW" or "NHWC")
         gamma: Discount factor for SMDP
+        action_normalizer: Optional action normalizer for training stability
     """
     
     def __init__(
@@ -283,6 +304,7 @@ class OfflineRLDataset(Dataset):
         obs_space=None,
         rgb_format: str = "NCHW",
         gamma: float = 0.99,
+        action_normalizer: Optional["ActionNormalizer"] = None,
     ):
         self.include_rgb = include_rgb
         self.obs_horizon = obs_horizon
@@ -291,6 +313,7 @@ class OfflineRLDataset(Dataset):
         self.gamma = gamma
         self.device = device
         self.rgb_format = rgb_format
+        self.action_normalizer = action_normalizer
         
         # Load demo dataset
         raw_data = load_traj_hdf5(data_path, num_traj=num_traj)
@@ -357,6 +380,20 @@ class OfflineRLDataset(Dataset):
         
         self.obs_keys = list(processed_obs.keys())
         print("Obs/action pre-processing done, computing slice indices...")
+        
+        # Fit action normalizer if provided
+        if self.action_normalizer is not None:
+            all_actions = np.concatenate([
+                traj["actions"] for traj in raw_data.values()
+            ], axis=0)
+            self.action_normalizer.fit(all_actions)
+            print(f"Action normalizer fitted with {len(all_actions)} samples, mode: {self.action_normalizer.mode}")
+            
+            # Normalize stored actions
+            for i in range(len(trajectories["actions"])):
+                actions_np = trajectories["actions"][i].cpu().numpy()
+                normalized = self.action_normalizer.transform(actions_np)
+                trajectories["actions"][i] = torch.from_numpy(normalized).float().to(device)
         
         # Action padding
         if "delta_pos" in control_mode or control_mode == "base_pd_joint_vel_arm_pd_joint_vel":

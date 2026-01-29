@@ -215,3 +215,55 @@ class ReflectedFlowAgent(nn.Module):
         
         self.velocity_net.train()
         return x
+
+    @torch.no_grad()
+    def get_action_deterministic(
+        self,
+        obs_features: torch.Tensor,
+        integration_method: Literal["euler", "rk4"] = "euler",
+        **kwargs,
+    ) -> torch.Tensor:
+        """
+        Generate action deterministically using reflected flow ODE integration.
+        Starts from zero instead of random noise for reproducible results.
+        
+        Args:
+            obs_features: Encoded observation [B, obs_horizon, obs_dim] or [B, cond_dim]
+            integration_method: ODE solver to use
+            
+        Returns:
+            actions: Generated action sequence [B, pred_horizon, action_dim]
+        """
+        self.velocity_net.eval()
+        batch_size = obs_features.shape[0]
+        
+        # Start from zeros (deterministic)
+        x = torch.zeros(
+            batch_size, self.pred_horizon, self.action_dim,
+            device=obs_features.device
+        )
+        
+        dt = 1.0 / self.num_flow_steps
+        
+        for i in range(self.num_flow_steps):
+            t = torch.full((batch_size,), i * dt, device=obs_features.device)
+            
+            if integration_method == "euler":
+                v = self.velocity_net(x, t, obs_features)
+                x = x + v * dt
+            else:  # RK4
+                t_mid = t + 0.5 * dt
+                t_end = t + dt
+                
+                k1 = self.velocity_net(x, t, obs_features)
+                k2 = self.velocity_net(x + 0.5 * dt * k1, t_mid, obs_features)
+                k3 = self.velocity_net(x + 0.5 * dt * k2, t_mid, obs_features)
+                k4 = self.velocity_net(x + dt * k3, t_end, obs_features)
+                
+                x = x + (dt / 6.0) * (k1 + 2*k2 + 2*k3 + k4)
+            
+            # Apply reflection after each step
+            x = self._reflect_trajectory(x, self.action_low, self.action_high)
+        
+        self.velocity_net.train()
+        return x

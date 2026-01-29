@@ -4,7 +4,9 @@ Advantage-Weighted Consistency Policy (AWCP) Agent
 Combines Consistency Flow Matching with AWAC-style Q-weighted BC for stable offline RL.
 Instead of maximizing Q directly (which causes distribution shift), uses Q to weight BC samples.
 
-Key difference from CPQL:
+Key Algorithm Design:
+=====================
+AWCP uses Q-values to reweight BC samples rather than directly maximizing Q:
 - CPQL: policy_loss = bc_loss + alpha * (-Q(s, π(s)))  [direct Q maximization]
 - AWCP: policy_loss = weighted_bc_loss where weights = exp(β * advantage)  [Q-weighted BC]
 
@@ -13,9 +15,28 @@ This approach is more stable in offline settings because:
 2. Q is only used to distinguish "better vs worse" samples in the dataset
 3. No gradient from Q to policy, avoiding Q-value explosion
 
+The total policy loss is:
+    policy_loss = bc_weight * Σ w_i * flow_loss_i + consistency_weight * Σ w_i * cons_loss_i
+    
+where w_i = normalize(exp(β * (Q(s_i, a_i) - baseline)))
+
+Consistency Loss Design (optimized from sweep):
+- Full t range [0, 1] for temporal diversity
+- Small fixed delta (0.01) for stable teacher target  
+- Teacher integrates from t_cons, student from t_plus (endpoint consistency)
+- Endpoint loss space (not velocity-space) for better convergence
+- 2-step teacher for accurate target prediction
+
+Hyperparameter Recommendations:
+- beta: 10.0 (advantage temperature, higher = more aggressive weighting)
+- bc_weight: 1.0 (flow matching loss weight)
+- consistency_weight: 1.0 (consistency loss weight)
+- weight_clip: 100.0 (prevent outlier dominance)
+- use_advantage: True (use Q - baseline instead of raw Q)
+
 References:
-- AWAC: https://arxiv.org/abs/2006.09359
-- IQL: https://arxiv.org/abs/2110.06169
+- AWAC: https://arxiv.org/abs/2006.09359 (Advantage Weighted Actor-Critic)
+- IQL: https://arxiv.org/abs/2110.06169 (Implicit Q-Learning)
 - CPQL: https://github.com/cccedric/cpql
 """
 
@@ -34,6 +55,26 @@ class AWCPAgent(nn.Module):
     Uses Q-values to weight BC samples instead of directly maximizing Q.
     This is more stable for offline RL with expert demonstrations.
     
+    Algorithm Overview:
+    ------------------
+    Unlike CPQL which has a -Q term in the loss, AWCP only uses Q to compute
+    sample weights. This keeps the policy close to the data distribution while
+    still benefiting from Q-value guidance.
+    
+    Weight computation:
+        advantage_i = Q(s_i, a_i) - mean(Q)  # baseline subtraction
+        weight_i = exp(β * advantage_i)      # exponential weighting
+        weight_i = clamp(weight_i, max=weight_clip)  # prevent outliers
+        weight_i = weight_i / mean(weight)   # normalize to mean=1
+    
+    Hyperparameter Recommendations (from sweep):
+    - beta: 10.0 (temperature, higher = more aggressive weighting)
+    - bc_weight: 1.0 (flow matching loss weight)
+    - consistency_weight: 1.0 (self-consistency loss weight)
+    - reward_scale: 0.1 (scale rewards for stable Q-learning)
+    - weight_clip: 100.0 (max weight to prevent outlier dominance)
+    - use_advantage: True (subtract baseline for reduced variance)
+    
     Args:
         velocity_net: VelocityUNet1D for velocity prediction (flow policy)
         q_network: DoubleQNetwork for Q-value estimation (critic)
@@ -43,6 +84,7 @@ class AWCPAgent(nn.Module):
         act_horizon: Length of action sequence for Q-learning (default: 8)
         num_flow_steps: Number of ODE integration steps (default: 10)
         beta: Temperature for advantage weighting (default: 10.0)
+            Higher values make the weighting more aggressive (sharper)
         bc_weight: Weight for flow matching loss (default: 1.0)
         consistency_weight: Weight for consistency loss (default: 1.0)
         gamma: Discount factor (default: 0.99)
@@ -52,6 +94,8 @@ class AWCPAgent(nn.Module):
         ema_decay: Decay rate for EMA velocity network (default: 0.999)
         weight_clip: Maximum weight to prevent outliers (default: 100.0)
         use_advantage: Whether to use advantage (Q - baseline) or raw Q (default: True)
+            True: w = exp(β * (Q - mean(Q))) - reduces variance
+            False: w = exp(β * Q) - can be unstable with large Q values
         device: Device to run on (default: "cuda")
     """
     
@@ -97,11 +141,14 @@ class AWCPAgent(nn.Module):
         self.use_advantage = use_advantage
         self.device = device
         
-        # Consistency loss hyperparameters
+        # Consistency loss hyperparameters (optimized from sweep: endpoint consistency style)
+        # Full t range [0, 1] for temporal diversity
+        # Small fixed delta for stable teacher target (not random range)
+        # 2-step teacher for accurate target prediction
         self.t_min = 0.0
         self.t_max = 1.0
         self.delta_min = 0.01
-        self.delta_max = 0.01
+        self.delta_max = 0.01  # Fixed delta (not random range)
         self.teacher_steps = 2
         
         # EMA velocity network for consistency loss
@@ -126,7 +173,25 @@ class AWCPAgent(nn.Module):
         chunk_done: Optional[torch.Tensor] = None,
         discount_factor: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
-        """Compute combined policy and critic loss."""
+        """Compute combined policy and critic loss.
+        
+        Note: Unlike CPQL, the policy loss here does NOT include a direct Q maximization
+        term. Instead, Q-values are used to compute sample weights for the BC loss.
+        
+        Args:
+            obs_features: Encoded observation features [B, obs_horizon, obs_dim] or [B, global_cond_dim]
+            actions: (B, pred_horizon, action_dim) expert action sequence for BC training
+            rewards: (B,) or (B, 1) single-step rewards
+            next_obs_features: Next observation features
+            dones: (B,) or (B, 1) done flags
+            actions_for_q: (B, act_horizon, action_dim) action sequence for Q-learning
+            cumulative_reward: (B,) or (B, 1) SMDP cumulative discounted reward
+            chunk_done: (B,) or (B, 1) SMDP done flag
+            discount_factor: (B,) or (B, 1) SMDP discount
+            
+        Returns:
+            Dict with loss components including weight statistics for monitoring
+        """
         if actions_for_q is None:
             actions_for_q = actions
         
@@ -182,7 +247,34 @@ class AWCPAgent(nn.Module):
         action_seq: torch.Tensor,
         actions_for_q_input: torch.Tensor,
     ) -> Dict[str, torch.Tensor]:
-        """Compute policy loss: Q-weighted Flow BC + Consistency."""
+        """Compute policy loss: Q-weighted Flow BC + Endpoint Consistency.
+        
+        Key differences from CPQL:
+        - No direct Q maximization term (no gradient from Q to policy)
+        - Q-values only used to compute per-sample weights
+        - Both flow loss and consistency loss are weighted by Q-derived weights
+        
+        Weight computation (AWAC-style):
+            1. Q_data = min(Q1, Q2)  for conservative estimate
+            2. advantage = Q_data - mean(Q_data)  if use_advantage else Q_data
+            3. weights = exp(β * advantage)
+            4. weights = clamp(weights, max=weight_clip)
+            5. weights = weights / mean(weights)  normalize to mean=1
+        
+        Consistency Loss (endpoint style):
+        - Teacher (EMA): Multi-step integration from t_cons to t=1
+        - Student: Multi-step integration from t_plus to t=1
+        - Loss: ||student_endpoint - teacher_endpoint||^2
+        
+        Args:
+            obs_cond: Observation conditioning [B, global_cond_dim]
+            action_seq: Full pred_horizon actions for BC training [B, pred_horizon, action_dim]
+            actions_for_q_input: act_horizon actions for Q-learning [B, act_horizon, action_dim]
+            
+        Returns:
+            Dict with policy_loss, flow_loss, consistency_loss, q_policy_loss (always 0),
+            q_mean, weight_mean, weight_std, advantage_mean
+        """
         B = action_seq.shape[0]
         device = action_seq.device
         
@@ -282,7 +374,29 @@ class AWCPAgent(nn.Module):
         chunk_done: Optional[torch.Tensor] = None,
         discount_factor: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        """Compute critic loss using SMDP Bellman equation."""
+        """Compute critic loss using SMDP Bellman equation (same as CPQL).
+        
+        Standard TD target (when SMDP fields not provided):
+            y = r * reward_scale + (1 - d) * γ * min Q_target(s', π(s'))
+        
+        SMDP TD target (for action chunking):
+            y = R^(τ) * reward_scale + (1 - d^(τ)) * γ^τ * min Q_target(s_{t+τ}, π(s_{t+τ}))
+        
+        Next actions are sampled using the EMA policy network for stability.
+        
+        Args:
+            obs_cond: Current observation conditioning [B, global_cond_dim]
+            next_obs_cond: Next observation conditioning [B, global_cond_dim]
+            action_seq: Actions taken [B, act_horizon, action_dim]
+            rewards: Immediate rewards [B] or [B, 1]
+            dones: Done flags [B] or [B, 1]
+            cumulative_reward: SMDP cumulative reward (optional)
+            chunk_done: SMDP done flag (optional)
+            discount_factor: SMDP discount γ^τ (optional)
+            
+        Returns:
+            critic_loss: Combined MSE loss for both Q-networks
+        """
         if cumulative_reward is not None:
             r = cumulative_reward
             d = chunk_done if chunk_done is not None else dones
@@ -322,7 +436,15 @@ class AWCPAgent(nn.Module):
         obs_cond: torch.Tensor,
         use_ema: bool = False
     ) -> torch.Tensor:
-        """Sample actions using flow ODE."""
+        """Sample actions using flow ODE integration (Euler method).
+        
+        Args:
+            obs_cond: Observation conditioning [B, global_cond_dim]
+            use_ema: Whether to use EMA velocity network (for stable evaluation)
+            
+        Returns:
+            actions: Generated action sequence [B, pred_horizon, action_dim], clamped to [-1, 1]
+        """
         B = obs_cond.shape[0]
         device = obs_cond.device
         net = self.velocity_net_ema if use_ema else self.velocity_net
@@ -338,11 +460,17 @@ class AWCPAgent(nn.Module):
         return torch.clamp(x, -1.0, 1.0)
     
     def update_ema(self):
-        """Update EMA velocity network."""
+        """Update EMA velocity network.
+        
+        Formula: θ_ema = ema_decay * θ_ema + (1 - ema_decay) * θ
+        """
         soft_update(self.velocity_net_ema, self.velocity_net, 1 - self.ema_decay)
     
     def update_target(self):
-        """Soft update target critic network."""
+        """Soft update target critic network.
+        
+        Formula: θ_target = tau * θ + (1 - tau) * θ_target
+        """
         soft_update(self.critic_target, self.critic, self.tau)
     
     @torch.no_grad()
@@ -352,7 +480,15 @@ class AWCPAgent(nn.Module):
         use_ema: bool = True,
         **kwargs,  # Accept extra kwargs for API compatibility
     ) -> torch.Tensor:
-        """Sample action sequence for evaluation."""
+        """Sample action sequence for evaluation (stochastic from noise).
+        
+        Args:
+            obs_features: Encoded observation features [B, obs_horizon, obs_dim] or [B, global_cond_dim]
+            use_ema: Whether to use EMA network for sampling (recommended for evaluation)
+            
+        Returns:
+            actions: Generated action sequence [B, pred_horizon, action_dim]
+        """
         self.velocity_net.eval()
         
         if obs_features.dim() == 3:
@@ -364,3 +500,47 @@ class AWCPAgent(nn.Module):
         
         self.velocity_net.train()
         return action_seq
+
+    @torch.no_grad()
+    def get_action_deterministic(
+        self,
+        obs_features: torch.Tensor,
+        use_ema: bool = True,
+        **kwargs,
+    ) -> torch.Tensor:
+        """Sample action sequence deterministically (starting from zero instead of noise).
+        
+        Useful for reproducible evaluation. Starts ODE integration from zeros
+        instead of random noise, producing deterministic outputs.
+        
+        Args:
+            obs_features: Encoded observation features [B, obs_horizon, obs_dim] or [B, global_cond_dim]
+            use_ema: Whether to use EMA network for sampling (recommended)
+            
+        Returns:
+            actions: Generated action sequence [B, pred_horizon, action_dim]
+        """
+        self.velocity_net.eval()
+        
+        if obs_features.dim() == 3:
+            obs_cond = obs_features.reshape(obs_features.shape[0], -1)
+        else:
+            obs_cond = obs_features
+        
+        B = obs_cond.shape[0]
+        device = obs_cond.device
+        net = self.velocity_net_ema if use_ema else self.velocity_net
+        
+        # Start from zeros (deterministic)
+        x = torch.zeros(B, self.pred_horizon, self.action_dim, device=device)
+        dt = 1.0 / self.num_flow_steps
+        
+        for i in range(self.num_flow_steps):
+            t = torch.full((B,), i * dt, device=device)
+            v = net(x, t, global_cond=obs_cond)
+            x = x + v * dt
+        
+        x = torch.clamp(x, -1.0, 1.0)
+        
+        self.velocity_net.train()
+        return x

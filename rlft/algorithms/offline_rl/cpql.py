@@ -4,9 +4,32 @@ Consistency Policy Q-Learning (CPQL) Agent
 Combines Consistency Flow Matching with Q-Learning for efficient offline RL.
 Uses 1D U-Net architecture aligned with the official diffusion_policy implementation.
 
+Key Algorithm Design:
+=====================
+CPQL uses three loss terms to train the policy:
+1. Flow Matching Loss (BC): Standard CFM loss to match expert actions
+2. Consistency Loss: Self-consistency regularization for faster inference
+3. Q-Value Maximization: Direct policy gradient through Q-network
+
+The total policy loss is:
+    policy_loss = bc_weight * flow_loss + consistency_weight * consistency_loss + alpha * q_loss
+
+Key Implementation Details:
+- Q-loss normalization trick: Randomly select Q1 or Q2 and normalize by the other's magnitude
+  to prevent Q-value explosion in offline RL
+- Configurable gradient chain: "single_step" (fastest), "last_few", or "whole_grad"
+- SMDP support: For action chunking with cumulative rewards and discount factors
+
+Consistency Loss Design (from sweep best practices):
+- t_min=0.05, t_max=0.95: Avoid boundary instability
+- delta_min=0.02, delta_max=0.15: Random delta for temporal diversity
+- teacher_steps=2: Multi-step teacher for accurate targets
+- velocity-space loss: Better gradient flow than endpoint-space
+
 References:
 - CPQL: https://github.com/cccedric/cpql
-- Diffusion-QL
+- Diffusion-QL: https://arxiv.org/abs/2208.06193
+- Consistency Flow Matching: consistency_flow.py
 """
 
 import torch
@@ -24,14 +47,23 @@ class CPQLAgent(nn.Module):
     Combines Consistency Flow Matching with Q-Learning.
     Uses self-consistency loss to enable single-step generation.
     
-    Hyperparameters inherited from toy_diffusion_rl:
-    - alpha: 0.01 (Q-value weight, reduced for stability)
+    Algorithm Overview:
+    ------------------
+    Unlike AWCP which weights BC samples by Q-values, CPQL directly maximizes Q:
+    - CPQL: policy_loss = bc_loss + alpha * (-Q(s, π(s)))  [direct Q maximization]
+    - AWCP: policy_loss = weighted_bc_loss where weights = exp(β * advantage)  [Q-weighted BC]
+    
+    This makes CPQL more aggressive in policy improvement but potentially less stable.
+    
+    Hyperparameter Recommendations (from sweep):
+    - alpha: 0.01 (Q-value weight, reduced for stability in offline RL)
     - bc_weight: 1.0 (flow matching loss weight)
     - consistency_weight: 1.0 (self-consistency loss weight)
-    - reward_scale: 0.1
-    - tau: 0.005
-    - gamma: 0.99
+    - reward_scale: 0.1 (scale rewards to prevent Q-value explosion)
+    - tau: 0.005 (soft update coefficient for target networks)
+    - gamma: 0.99 (discount factor)
     - num_flow_steps: 10 (ODE integration steps)
+    - q_grad_mode: "single_step" (fastest, works well in practice)
     
     Args:
         velocity_net: VelocityUNet1D for velocity prediction (flow policy)
@@ -49,7 +81,10 @@ class CPQLAgent(nn.Module):
         reward_scale: Scale factor for rewards (default: 0.1)
         q_target_clip: Clip range for Q target (default: 100.0)
         ema_decay: Decay rate for EMA velocity network (default: 0.999)
-        q_grad_mode: Gradient mode for Q-loss ("whole_grad", "last_few", "single_step")
+        q_grad_mode: Gradient mode for Q-loss:
+            - "single_step": Predict x_1 = x_0 + v(x_0, 0) in one step (fastest)
+            - "last_few": Gradient through last q_grad_steps flow steps
+            - "whole_grad": Full gradient chain through all flow steps
         q_grad_steps: Number of steps with gradient when q_grad_mode="last_few"
         device: Device to run on (default: "cuda")
     """
@@ -99,7 +134,10 @@ class CPQLAgent(nn.Module):
         assert q_grad_mode in ["whole_grad", "last_few", "single_step"], \
             f"q_grad_mode must be 'whole_grad', 'last_few', or 'single_step', got {q_grad_mode}"
         
-        # Consistency loss hyperparameters
+        # Consistency loss hyperparameters (aligned with best practices from sweep)
+        # t_min=0.05, t_max=0.95: Avoid boundary instability at t≈0 and t≈1
+        # delta_min=0.02, delta_max=0.15: Random delta for diversity
+        # teacher_steps=2: Multi-step teacher for accurate targets
         self.t_min = 0.05
         self.t_max = 0.95
         self.delta_min = 0.02
@@ -128,7 +166,39 @@ class CPQLAgent(nn.Module):
         chunk_done: Optional[torch.Tensor] = None,
         discount_factor: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
-        """Compute combined policy and critic loss."""
+        """Compute combined policy and critic loss.
+        
+        Supports both standard TD learning and SMDP formulation for action chunking.
+        For SMDP (action chunking), the Bellman target is:
+            y_t = R_t^(τ) + (1 - d_t^(τ)) * γ^τ * min Q(s_{t+τ}, a')
+        
+        where:
+            - R_t^(τ) = Σ_{i=0}^{τ-1} γ^i r_{t+i} (cumulative discounted reward)
+            - d_t^(τ) = 1 if episode ends within chunk
+            - γ^τ = discount factor over τ steps
+            - s_{t+τ} = state after chunk execution
+        
+        Args:
+            obs_features: Encoded observation features [B, obs_horizon, obs_dim] or [B, global_cond_dim]
+            actions: (B, pred_horizon, action_dim) expert action sequence for BC training
+            rewards: (B,) or (B, 1) single-step rewards (used if cumulative_reward not provided)
+            next_obs_features: Next observation features (s_{t+τ} for SMDP)
+            dones: (B,) or (B, 1) done flags (used if chunk_done not provided)
+            actions_for_q: (B, act_horizon, action_dim) action sequence for Q-learning (matches reward)
+            cumulative_reward: (B,) or (B, 1) SMDP cumulative discounted reward R_t^(τ)
+            chunk_done: (B,) or (B, 1) SMDP done flag (1 if episode ends within chunk)
+            discount_factor: (B,) or (B, 1) SMDP discount γ^τ
+            
+        Returns:
+            Dict with loss components:
+                - loss: Total loss (policy_loss + critic_loss) for logging
+                - actor_loss / policy_loss: Policy loss for actor backward
+                - flow_loss: Flow matching (BC) loss component
+                - consistency_loss: Self-consistency loss component
+                - q_policy_loss: Q-value maximization loss component
+                - critic_loss: Critic (Q-network) loss for critic backward
+                - q_mean: Mean Q-value for logging
+        """
         if actions_for_q is None:
             actions_for_q = actions
         
@@ -181,7 +251,30 @@ class CPQLAgent(nn.Module):
         action_seq: torch.Tensor,
         actions_for_q_input: torch.Tensor,
     ) -> Dict[str, torch.Tensor]:
-        """Compute policy loss: Flow BC + Consistency + Q-value."""
+        """Compute policy loss: Flow BC + Consistency + Q-value maximization.
+        
+        The policy loss consists of three components:
+        1. Flow Matching Loss: Standard CFM objective ||v_pred - v_target||^2
+           where v_target = x_1 - x_0 (straight-line velocity)
+        
+        2. Consistency Loss: Self-consistency regularization
+           - Teacher (EMA): Multi-step integration from t_plus to 1
+           - Student: Predict velocity at t_plus to match teacher's endpoint
+           - Uses velocity-space loss: ||v_student - (target_x1 - x_0)||^2
+        
+        3. Q-Value Maximization: Direct policy gradient
+           - Generate actions using flow sampling
+           - Maximize Q(s, generated_actions)
+           - Uses normalization trick: q_loss = -Q1 / |Q2| (or vice versa)
+        
+        Args:
+            obs_cond: Observation conditioning [B, global_cond_dim]
+            action_seq: Full pred_horizon actions for BC training [B, pred_horizon, action_dim]
+            actions_for_q_input: act_horizon actions for Q-learning [B, act_horizon, action_dim]
+            
+        Returns:
+            Dict with policy_loss, flow_loss, consistency_loss, q_policy_loss, q_mean
+        """
         B = action_seq.shape[0]
         device = action_seq.device
         act_horizon = actions_for_q_input.shape[1]
@@ -277,7 +370,30 @@ class CPQLAgent(nn.Module):
         chunk_done: Optional[torch.Tensor] = None,
         discount_factor: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        """Compute critic loss using SMDP Bellman equation."""
+        """Compute critic loss using SMDP Bellman equation.
+        
+        Standard TD target (when SMDP fields not provided):
+            y = r + (1 - d) * γ * min Q_target(s', a')
+        
+        SMDP TD target (for action chunking):
+            y = R^(τ) + (1 - d^(τ)) * γ^τ * min Q_target(s_{t+τ}, a')
+        
+        The critic loss is MSE over both Q-networks:
+            critic_loss = MSE(Q1, y) + MSE(Q2, y)
+        
+        Args:
+            obs_cond: Current observation conditioning [B, global_cond_dim]
+            next_obs_cond: Next observation conditioning [B, global_cond_dim]
+            action_seq: Actions taken [B, act_horizon, action_dim]
+            rewards: Immediate rewards [B] or [B, 1]
+            dones: Done flags [B] or [B, 1]
+            cumulative_reward: SMDP cumulative reward (optional)
+            chunk_done: SMDP done flag (optional)
+            discount_factor: SMDP discount γ^τ (optional)
+            
+        Returns:
+            critic_loss: Combined MSE loss for both Q-networks
+        """
         if cumulative_reward is not None:
             r = cumulative_reward
             d = chunk_done if chunk_done is not None else dones
@@ -317,7 +433,15 @@ class CPQLAgent(nn.Module):
         obs_cond: torch.Tensor,
         use_ema: bool = False
     ) -> torch.Tensor:
-        """Sample actions using flow ODE."""
+        """Sample actions using flow ODE integration (Euler method).
+        
+        Args:
+            obs_cond: Observation conditioning [B, global_cond_dim]
+            use_ema: Whether to use EMA velocity network (for stable evaluation)
+            
+        Returns:
+            actions: Generated action sequence [B, pred_horizon, action_dim], clamped to [-1, 1]
+        """
         B = obs_cond.shape[0]
         device = obs_cond.device
         net = self.velocity_net_ema if use_ema else self.velocity_net
@@ -337,13 +461,26 @@ class CPQLAgent(nn.Module):
         obs_cond: torch.Tensor,
         grad_steps: int,
     ) -> torch.Tensor:
-        """Sample actions with gradient flowing through the last `grad_steps` flow steps."""
+        """Sample actions with gradient flowing through the last `grad_steps` flow steps.
+        
+        This implements configurable gradient chain length for Q-loss backpropagation.
+        Shorter chains are faster but may have higher variance; longer chains are
+        more accurate but slower.
+        
+        Args:
+            obs_cond: Observation conditioning [B, global_cond_dim]
+            grad_steps: Number of steps to keep gradients (from the end)
+            
+        Returns:
+            actions: Generated actions with gradient [B, pred_horizon, action_dim]
+        """
         B = obs_cond.shape[0]
         device = obs_cond.device
         
         x = torch.randn(B, self.pred_horizon, self.action_dim, device=device)
         dt = 1.0 / self.num_flow_steps
         
+        # Steps without gradient (first num_flow_steps - grad_steps)
         no_grad_steps = self.num_flow_steps - grad_steps
         
         if no_grad_steps > 0:
@@ -353,6 +490,7 @@ class CPQLAgent(nn.Module):
                     v = self.velocity_net(x, t, global_cond=obs_cond)
                     x = x + v * dt
         
+        # Steps with gradient (last grad_steps)
         for i in range(no_grad_steps, self.num_flow_steps):
             t = torch.full((B,), i * dt, device=device)
             v = self.velocity_net(x, t, global_cond=obs_cond)
@@ -364,7 +502,20 @@ class CPQLAgent(nn.Module):
         self,
         obs_cond: torch.Tensor,
     ) -> torch.Tensor:
-        """Single-step flow sampling for fast Q-loss computation."""
+        """Single-step flow sampling for fast Q-loss computation.
+        
+        Directly predict velocity at t=0 and step to t=1 in one step:
+            x_1 = x_0 + v(x_0, 0) * 1.0
+        
+        This is the fastest method but assumes the velocity field is accurate
+        enough for single-step prediction (which consistency training helps with).
+        
+        Args:
+            obs_cond: Observation conditioning [B, global_cond_dim]
+            
+        Returns:
+            actions: Generated actions [B, pred_horizon, action_dim]
+        """
         B = obs_cond.shape[0]
         device = obs_cond.device
         
@@ -376,11 +527,18 @@ class CPQLAgent(nn.Module):
         return x_1
     
     def update_ema(self):
-        """Update EMA velocity network."""
+        """Update EMA velocity network.
+        
+        Formula: θ_ema = ema_decay * θ_ema + (1 - ema_decay) * θ
+        Equivalent to: soft_update(ema, source, tau=1-ema_decay)
+        """
         soft_update(self.velocity_net_ema, self.velocity_net, 1 - self.ema_decay)
     
     def update_target(self):
-        """Soft update target critic network."""
+        """Soft update target critic network.
+        
+        Formula: θ_target = tau * θ + (1 - tau) * θ_target
+        """
         soft_update(self.critic_target, self.critic, self.tau)
     
     @torch.no_grad()
@@ -390,7 +548,15 @@ class CPQLAgent(nn.Module):
         use_ema: bool = True,
         **kwargs,  # Accept extra kwargs for API compatibility
     ) -> torch.Tensor:
-        """Sample action sequence for evaluation."""
+        """Sample action sequence for evaluation.
+        
+        Args:
+            obs_features: Encoded observation features [B, obs_horizon, obs_dim] or [B, global_cond_dim]
+            use_ema: Whether to use EMA network for sampling (recommended for evaluation)
+            
+        Returns:
+            actions: Generated action sequence [B, pred_horizon, action_dim]
+        """
         self.velocity_net.eval()
         
         if obs_features.dim() == 3:
@@ -402,3 +568,47 @@ class CPQLAgent(nn.Module):
         
         self.velocity_net.train()
         return action_seq
+    
+    @torch.no_grad()
+    def get_action_deterministic(
+        self,
+        obs_features: torch.Tensor,
+        use_ema: bool = True,
+        **kwargs,
+    ) -> torch.Tensor:
+        """Sample action sequence deterministically (starting from zero instead of noise).
+        
+        Useful for reproducible evaluation. Starts ODE integration from zeros
+        instead of random noise, producing deterministic outputs.
+        
+        Args:
+            obs_features: Encoded observation features [B, obs_horizon, obs_dim] or [B, global_cond_dim]
+            use_ema: Whether to use EMA network for sampling (recommended)
+            
+        Returns:
+            actions: Generated action sequence [B, pred_horizon, action_dim]
+        """
+        self.velocity_net.eval()
+        
+        if obs_features.dim() == 3:
+            obs_cond = obs_features.reshape(obs_features.shape[0], -1)
+        else:
+            obs_cond = obs_features
+        
+        B = obs_cond.shape[0]
+        device = obs_cond.device
+        net = self.velocity_net_ema if use_ema else self.velocity_net
+        
+        # Start from zeros (deterministic)
+        x = torch.zeros(B, self.pred_horizon, self.action_dim, device=device)
+        dt = 1.0 / self.num_flow_steps
+        
+        for i in range(self.num_flow_steps):
+            t = torch.full((B,), i * dt, device=device)
+            v = net(x, t, global_cond=obs_cond)
+            x = x + v * dt
+        
+        x = torch.clamp(x, -1.0, 1.0)
+        
+        self.velocity_net.train()
+        return x

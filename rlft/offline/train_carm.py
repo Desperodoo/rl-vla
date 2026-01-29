@@ -68,7 +68,7 @@ class Args:
     action_mode: Literal["full", "ee_only"] = "full"
     state_mode: Literal["joint_only", "ee_only", "both"] = "joint_only"
     precompute_actions: bool = False
-    normalize_actions: bool = False
+    normalize_actions: bool = True
     action_norm_mode: Literal["standard", "minmax"] = "standard"
     
     # Discrete gripper settings
