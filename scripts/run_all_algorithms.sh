@@ -23,12 +23,12 @@ AVAILABLE_GPUS=(${GPUS:-0 1 2 3 4 5 6 7 8 9})
 NUM_GPUS=${#AVAILABLE_GPUS[@]}
 
 # 训练配置
-TOTAL_ITERS=${TOTAL_ITERS:-100000}        # 完整训练
+TOTAL_ITERS=${TOTAL_ITERS:-25000}        # 完整训练
 QUICK_TEST_ITERS=${QUICK_TEST_ITERS:-1000}  # 快速验证
 
 # 是否使用 WandB
 USE_WANDB=${USE_WANDB:-true}
-WANDB_PROJECT=${WANDB_PROJECT:-"ManiSkill-RLFT"}
+WANDB_PROJECT=${WANDB_PROJECT:-"ManiSkill-RLFT-Dense-Success"}
 
 # 日志目录
 LOG_DIR="logs/training_$(date +%Y%m%d_%H%M%S)"
@@ -57,7 +57,7 @@ OFFLINE_RL_ALGORITHMS=(
 ALL_ALGORITHMS=("${IL_ALGORITHMS[@]}" "${OFFLINE_RL_ALGORITHMS[@]}")
 
 # 观测模式
-OBS_MODES=("rgb" "state")
+OBS_MODES=("rgb")
 
 # =============================================================================
 # 辅助函数

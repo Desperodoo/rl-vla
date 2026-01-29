@@ -79,7 +79,7 @@ rlft/
 # 快速验证 (5000 步，验证全流程)
 bash scripts/run_full_pipeline.sh --quick
 
-# 完整训练 (100万步)
+# 完整训练 (4万步)
 bash scripts/run_full_pipeline.sh --full
 
 # 指定任务

@@ -181,7 +181,7 @@ class Args:
     q_hidden_dims: List[int] = field(default_factory=lambda: [256, 256, 256])
     
     # Action normalization settings
-    normalize_actions: bool = True
+    normalize_actions: bool = False
     """Whether to normalize actions during training"""
     action_norm_mode: Literal["standard", "minmax"] = "standard"
     """Action normalization mode: 'standard' (zero mean, unit var) or 'minmax' (scale to [-1, 1])"""
@@ -191,10 +191,10 @@ class Args:
 
     # Logging settings
     log_freq: int = 1000
-    eval_freq: int = 5000
+    eval_freq: int = 2500
     save_freq: Optional[int] = None
     num_eval_episodes: int = 100
-    num_eval_envs: int = 10
+    num_eval_envs: int = 25
     num_dataload_workers: int = 0
 
 

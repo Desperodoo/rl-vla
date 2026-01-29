@@ -2,7 +2,7 @@
 # =============================================================================
 # ManiSkill Demo Replay 脚本
 # 将原始轨迹数据 replay 成带观测 (RGB/State) 的训练数据集
-# 使用 physx_cuda 后端，保存奖励（sparse）
+# 使用 physx_cuda 后端，保存奖励（dense）
 # =============================================================================
 
 set -e
@@ -59,23 +59,22 @@ replay_trajectory() {
         --record-rewards \
         --reward-mode "${reward_mode}" \
         --use-first-env-state \
-        --save-traj \
-        --allow-failure
+        --save-traj 
 }
 
-# Replay RGB 观测 + sparse 奖励
+# Replay RGB 观测 + dense 奖励
 echo ""
 echo "=========================================="
-echo "1. Replay RGB 观测 (sparse 奖励)"
+echo "1. Replay RGB 观测 (dense 奖励)"
 echo "=========================================="
-replay_trajectory "rgb" "sparse"
+replay_trajectory "rgb" "dense"
 
-# Replay State 观测 + sparse 奖励
+# Replay State 观测 + dense 奖励
 echo ""
 echo "=========================================="
-echo "2. Replay State 观测 (sparse 奖励)"
+echo "2. Replay State 观测 (dense 奖励)"
 echo "=========================================="
-replay_trajectory "state" "sparse"
+replay_trajectory "state" "dense"
 
 echo ""
 echo "=========================================="
