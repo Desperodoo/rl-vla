@@ -162,6 +162,7 @@ class AWShortCutFlowAgent(nn.Module):
         t_min: float = 0.0,
         t_max: float = 1.0,
         inference_mode: Literal["adaptive", "uniform"] = "uniform",
+        action_bounds: Optional[tuple] = None,
         device: str = "cuda",
     ):
         super().__init__()
@@ -200,6 +201,7 @@ class AWShortCutFlowAgent(nn.Module):
         self.t_min = t_min
         self.t_max = t_max
         self.inference_mode = inference_mode
+        self.action_bounds = action_bounds
         
         self.log_max_steps = int(math.log2(max_denoising_steps))
         
@@ -626,7 +628,10 @@ class AWShortCutFlowAgent(nn.Module):
             v = net(x, t, d, obs_cond)
             x = x + dt * v
         
-        return torch.clamp(x, -1.0, 1.0)
+        # Only clamp if action_bounds is explicitly set
+        if self.action_bounds is not None:
+            x = torch.clamp(x, self.action_bounds[0], self.action_bounds[1])
+        return x
     
     def update_ema(self):
         """Update EMA velocity network.
@@ -702,7 +707,9 @@ class AWShortCutFlowAgent(nn.Module):
                 v = net(x, t, d, obs_cond)
                 x = x + dt * v
         
-        x = torch.clamp(x, -1.0, 1.0)
+        # Only clamp if action_bounds is explicitly set
+        if self.action_bounds is not None:
+            x = torch.clamp(x, self.action_bounds[0], self.action_bounds[1])
         
         self.velocity_net.train()
         return x
@@ -777,7 +784,7 @@ class AWShortCutFlowAgent(nn.Module):
                 v = net(x, t, d, obs_cond)
                 x = x + dt * v
         
-        x = torch.clamp(x, -1.0, 1.0)
-        
-        self.velocity_net.train()
+        # Only clamp if action_bounds is explicitly set
+        if self.action_bounds is not None:
+            x = torch.clamp(x, self.action_bounds[0], self.action_bounds[1])
         return x

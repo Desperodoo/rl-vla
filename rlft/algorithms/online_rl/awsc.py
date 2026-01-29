@@ -118,6 +118,7 @@ class AWSCAgent(nn.Module):
         # Policy-Critic data separation
         filter_policy_data: bool = False,
         advantage_threshold: float = 0.0,
+        action_bounds: Optional[tuple] = None,
         device: str = "cuda",
     ):
         super().__init__()
@@ -162,6 +163,7 @@ class AWSCAgent(nn.Module):
         # Policy-Critic data separation parameters
         self.filter_policy_data = filter_policy_data
         self.advantage_threshold = advantage_threshold
+        self.action_bounds = action_bounds
         
         # Log2 of max steps for power2 mode
         self.log_max_steps = int(math.log2(max_denoising_steps))
@@ -351,7 +353,9 @@ class AWSCAgent(nn.Module):
         # Add exploration noise if not deterministic
         if not deterministic and self.exploration_noise_std > 0:
             noise = torch.randn_like(actions) * self.exploration_noise_std
-            actions = torch.clamp(actions + noise, -1.0, 1.0)
+            actions = actions + noise
+            if self.action_bounds is not None:
+                actions = torch.clamp(actions, self.action_bounds[0], self.action_bounds[1])
         
         if squeeze:
             actions = actions.squeeze(0)
@@ -383,7 +387,9 @@ class AWSCAgent(nn.Module):
             v = net(x, t, d, obs_cond)
             x = x + dt * v
         
-        return torch.clamp(x, -1.0, 1.0)
+        if self.action_bounds is not None:
+            x = torch.clamp(x, self.action_bounds[0], self.action_bounds[1])
+        return x
     
     def compute_actor_loss(
         self,

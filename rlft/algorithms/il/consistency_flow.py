@@ -281,8 +281,6 @@ class ConsistencyFlowAgent(nn.Module):
         
         if self.action_bounds is not None:
             x = torch.clamp(x, self.action_bounds[0], self.action_bounds[1])
-        else:
-            x = torch.clamp(x, -1.0, 1.0)
         
         self.velocity_net.train()
         return x
@@ -325,10 +323,9 @@ class ConsistencyFlowAgent(nn.Module):
                 
                 x = x + (dt / 6.0) * (k1 + 2*k2 + 2*k3 + k4)
         
+        # Only clamp if action_bounds is explicitly set
         if self.action_bounds is not None:
             x = torch.clamp(x, self.action_bounds[0], self.action_bounds[1])
-        else:
-            x = torch.clamp(x, -1.0, 1.0)
         
         self.velocity_net.train()
         return x

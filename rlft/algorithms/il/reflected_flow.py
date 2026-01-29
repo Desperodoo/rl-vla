@@ -107,11 +107,14 @@ class ReflectedFlowAgent(nn.Module):
             # Hard reflection: reflect x_t and compute adjusted velocity
             x_t_reflected = self._reflect_trajectory(x_t)
             
-            # Velocity target: direction from x_t_reflected to x_1
-            # After reflection, the target should point towards the data
-            # Use remaining time to scale the velocity properly
-            remaining_time = 1.0 - t_expand + 1e-6  # avoid division by zero
-            v_target = (x_1 - x_t_reflected) / remaining_time
+            # Velocity target: use standard CFM target (x_1 - x_0) for numerical stability
+            # The reflection is only applied to x_t to keep trajectories in bounds
+            # Dividing by remaining_time causes numerical explosion when t → 1
+            # 
+            # Alternative interpretation: the velocity should point from x_0 to x_1
+            # regardless of where x_t lands after reflection. The reflection handles
+            # the boundary constraint, while the velocity field learns the flow direction.
+            v_target = x_1 - x_0
             
             return x_t_reflected, v_target
         else:

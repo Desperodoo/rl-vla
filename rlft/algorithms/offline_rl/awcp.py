@@ -118,6 +118,7 @@ class AWCPAgent(nn.Module):
         ema_decay: float = 0.999,
         weight_clip: float = 100.0,
         use_advantage: bool = True,
+        action_bounds: Optional[tuple] = None,
         device: str = "cuda",
     ):
         super().__init__()
@@ -139,6 +140,7 @@ class AWCPAgent(nn.Module):
         self.ema_decay = ema_decay
         self.weight_clip = weight_clip
         self.use_advantage = use_advantage
+        self.action_bounds = action_bounds
         self.device = device
         
         # Consistency loss hyperparameters (optimized from sweep: endpoint consistency style)
@@ -457,7 +459,10 @@ class AWCPAgent(nn.Module):
             v = net(x, t, global_cond=obs_cond)
             x = x + v * dt
         
-        return torch.clamp(x, -1.0, 1.0)
+        # Only clamp if action_bounds is explicitly set
+        if self.action_bounds is not None:
+            x = torch.clamp(x, self.action_bounds[0], self.action_bounds[1])
+        return x
     
     def update_ema(self):
         """Update EMA velocity network.
@@ -540,7 +545,9 @@ class AWCPAgent(nn.Module):
             v = net(x, t, global_cond=obs_cond)
             x = x + v * dt
         
-        x = torch.clamp(x, -1.0, 1.0)
+        # Only clamp if action_bounds is explicitly set
+        if self.action_bounds is not None:
+            x = torch.clamp(x, self.action_bounds[0], self.action_bounds[1])
         
         self.velocity_net.train()
         return x

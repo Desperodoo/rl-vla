@@ -108,6 +108,7 @@ class CPQLAgent(nn.Module):
         ema_decay: float = 0.999,
         q_grad_mode: str = "single_step",
         q_grad_steps: int = 1,
+        action_bounds: Optional[tuple] = None,
         device: str = "cuda",
     ):
         super().__init__()
@@ -129,6 +130,7 @@ class CPQLAgent(nn.Module):
         self.ema_decay = ema_decay
         self.q_grad_mode = q_grad_mode
         self.q_grad_steps = q_grad_steps
+        self.action_bounds = action_bounds
         self.device = device
         
         assert q_grad_mode in ["whole_grad", "last_few", "single_step"], \
@@ -325,7 +327,9 @@ class CPQLAgent(nn.Module):
                 obs_cond, grad_steps=self.q_grad_steps
             )
         
-        generated_actions_full = torch.clamp(generated_actions_full, -1.0, 1.0)
+        # Only clamp if action_bounds is explicitly set
+        if self.action_bounds is not None:
+            generated_actions_full = torch.clamp(generated_actions_full, self.action_bounds[0], self.action_bounds[1])
         actions_for_q = generated_actions_full[:, :act_horizon, :]
         
         # Disable critic gradients for Q-loss
@@ -454,7 +458,10 @@ class CPQLAgent(nn.Module):
             v = net(x, t, global_cond=obs_cond)
             x = x + v * dt
         
-        return torch.clamp(x, -1.0, 1.0)
+        # Only clamp if action_bounds is explicitly set
+        if self.action_bounds is not None:
+            x = torch.clamp(x, self.action_bounds[0], self.action_bounds[1])
+        return x
     
     def _sample_actions_with_grad(
         self,
@@ -608,7 +615,9 @@ class CPQLAgent(nn.Module):
             v = net(x, t, global_cond=obs_cond)
             x = x + v * dt
         
-        x = torch.clamp(x, -1.0, 1.0)
+        # Only clamp if action_bounds is explicitly set
+        if self.action_bounds is not None:
+            x = torch.clamp(x, self.action_bounds[0], self.action_bounds[1])
         
         self.velocity_net.train()
         return x

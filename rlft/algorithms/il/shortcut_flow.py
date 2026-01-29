@@ -390,9 +390,6 @@ class ShortCutFlowAgent(nn.Module):
                 v = net(x, t, d, obs_features)
                 x = x + dt * v
         
-        # Clamp to action bounds
-        x = torch.clamp(x, -1.0, 1.0)
-        
         self.velocity_net.train()
         return x
 
@@ -459,8 +456,6 @@ class ShortCutFlowAgent(nn.Module):
                 t = torch.full((batch_size,), i * dt, device=device)
                 v = net(x, t, d, obs_features)
                 x = x + dt * v
-        
-        x = torch.clamp(x, -1.0, 1.0)
         
         self.velocity_net.train()
         return x

@@ -265,6 +265,7 @@ class ReinFlowAgent(nn.Module):
         value_target_tau: float = 0.005,
         use_target_value_net: bool = True,
         value_target_clip: float = 100.0,
+        action_bounds: Optional[tuple] = None,
     ):
         super().__init__()
         
@@ -295,6 +296,7 @@ class ReinFlowAgent(nn.Module):
         self.value_target_tau = value_target_tau
         self.use_target_value_net = use_target_value_net
         self.value_target_clip = value_target_clip
+        self.action_bounds = action_bounds
         
         self.fixed_step_size = 1.0 / num_inference_steps
         
@@ -441,8 +443,9 @@ class ReinFlowAgent(nn.Module):
                 if return_chains:
                     x_chain[:, i + 1] = x.clone()
         
-        actions = torch.clamp(x, -1.0, 1.0)
-        return actions, x_chain
+        if self.action_bounds is not None:
+            x = torch.clamp(x, self.action_bounds[0], self.action_bounds[1])
+        return x, x_chain
     
     def compute_value(self, obs_cond: torch.Tensor, use_target: bool = False) -> torch.Tensor:
         """Compute state value V(s_0)."""

@@ -104,11 +104,65 @@ class Args:
     
     # Consistency Flow settings
     cons_delta: float = 0.1
-    
+    cons_use_flow_t: bool = False
+    """reuse flow t for consistency branch instead of resampling"""
+    cons_full_t_range: bool = False
+    """sample consistency t in [0,1] instead of clipped range"""
+    cons_t_min: float = 0.05
+    """minimum t for consistency sampling when not using full range"""
+    cons_t_max: float = 0.95
+    """maximum t for consistency sampling when not using full range"""
+    cons_t_upper: float = 0.95
+    """upper clamp for t_plus"""
+    cons_delta_mode: Literal["random", "fixed"] = "random"
+    """delta sampling strategy for consistency"""
+    cons_delta_min: float = 0.02
+    """minimum delta when using random delta"""
+    cons_delta_max: float = 0.15
+    """maximum delta when using random delta"""
+    cons_delta_fixed: float = 0.01
+    """fixed delta when cons_delta_mode=fixed"""
+    cons_delta_dynamic_max: bool = False
+    """cap random delta by remaining time"""
+    cons_delta_cap: float = 0.99
+    """ceiling used when cons_delta_dynamic_max is enabled"""
+    cons_teacher_steps: int = 2
+    """teacher rollout steps to t=1"""
+    cons_teacher_from: Literal["t_plus", "t_cons"] = "t_plus"
+    """where teacher rollout starts"""
+    cons_student_point: Literal["t_plus", "t_cons"] = "t_plus"
+    """student evaluation point for consistency loss"""
+    cons_loss_space: Literal["velocity", "endpoint"] = "velocity"
+    """consistency loss space: velocity or endpoint"""
+
     # ShortCut Flow settings
     sc_fixed_step_size: float = 0.0625
     sc_num_inference_steps: int = 8
-    
+    sc_max_denoising_steps: int = 8
+    """maximum denoising steps for step size sampling"""
+    sc_self_consistency_k: float = 0.25
+    """fraction of batch for consistency"""
+    sc_t_min: float = 0.0
+    """minimum t for time sampling"""
+    sc_t_max: float = 1.0
+    """maximum t for time sampling"""
+    sc_t_sampling_mode: Literal["uniform", "truncated"] = "uniform"
+    """time sampling mode"""
+    sc_step_size_mode: Literal["power2", "uniform", "fixed"] = "fixed"
+    """step size sampling mode"""
+    sc_min_step_size: float = 0.0625
+    """minimum step size"""
+    sc_max_step_size: float = 0.5
+    """maximum step size"""
+    sc_target_mode: Literal["velocity", "endpoint"] = "velocity"
+    """shortcut target mode"""
+    sc_teacher_steps: int = 1
+    """teacher rollout steps for shortcut target"""
+    sc_use_ema_teacher: bool = True
+    """whether to use EMA network as teacher"""
+    sc_inference_mode: Literal["adaptive", "uniform"] = "uniform"
+    """inference mode"""
+
     # Offline RL settings
     bc_weight: float = 1.0
     consistency_weight: float = 0.3
@@ -277,10 +331,26 @@ def create_agent(algorithm: str, action_dim: int, global_cond_dim: int, args):
             action_dim=action_dim,
             obs_horizon=args.obs_horizon,
             pred_horizon=args.pred_horizon,
+            max_denoising_steps=args.sc_max_denoising_steps,
+            self_consistency_k=args.sc_self_consistency_k,
             flow_weight=args.bc_weight,
             shortcut_weight=args.consistency_weight,
             ema_decay=args.ema_decay,
+            # Time sampling
+            t_min=args.sc_t_min,
+            t_max=args.sc_t_max,
+            t_sampling_mode=args.sc_t_sampling_mode,
+            # Step size
+            step_size_mode=args.sc_step_size_mode,
+            min_step_size=args.sc_min_step_size,
+            max_step_size=args.sc_max_step_size,
             fixed_step_size=args.sc_fixed_step_size,
+            # Target computation
+            target_mode=args.sc_target_mode,
+            teacher_steps=args.sc_teacher_steps,
+            use_ema_teacher=args.sc_use_ema_teacher,
+            # Inference
+            inference_mode=args.sc_inference_mode,
             num_inference_steps=args.sc_num_inference_steps,
             device=device,
         )
@@ -303,6 +373,22 @@ def create_agent(algorithm: str, action_dim: int, global_cond_dim: int, args):
             consistency_weight=args.consistency_weight,
             ema_decay=args.ema_decay,
             consistency_delta=args.cons_delta,
+            # Consistency design toggles
+            cons_use_flow_t=args.cons_use_flow_t,
+            cons_full_t_range=args.cons_full_t_range,
+            cons_t_min=args.cons_t_min,
+            cons_t_max=args.cons_t_max,
+            cons_t_upper=args.cons_t_upper,
+            cons_delta_mode=args.cons_delta_mode,
+            cons_delta_min=args.cons_delta_min,
+            cons_delta_max=args.cons_delta_max,
+            cons_delta_fixed=args.cons_delta_fixed,
+            cons_delta_dynamic_max=args.cons_delta_dynamic_max,
+            cons_delta_cap=args.cons_delta_cap,
+            teacher_steps=args.cons_teacher_steps,
+            teacher_from=args.cons_teacher_from,
+            student_point=args.cons_student_point,
+            consistency_loss_space=args.cons_loss_space,
             device=device,
         )
     
