@@ -181,7 +181,7 @@ def create_obs_process_fn(env_id: str, output_format: str = "NCHW") -> Callable:
     """Factory function to create observation processing function.
     
     Creates a function that processes raw ManiSkill observations into a
-    standardized format with 'state' and 'rgb' keys.
+    standardized format with 'state', 'rgb', and optionally 'depth' keys.
     
     The processing pipeline:
     1. RGB Processing:
@@ -189,7 +189,12 @@ def create_obs_process_fn(env_id: str, output_format: str = "NCHW") -> Callable:
        - Concatenate along channel dimension: (T, H, W, 3*num_cameras)
        - Transpose to NCHW format if requested: (T, C, H, W)
     
-    2. State Processing:
+    2. Depth Processing (if available):
+       - Extract depth arrays from all cameras in sensor_data
+       - Concatenate along channel dimension: (T, H, W, 1*num_cameras)
+       - Transpose to NCHW format if requested: (T, C, H, W)
+    
+    3. State Processing:
        - Extract all values from agent dict (qpos, qvel, etc.)
        - Extract all values from extra dict (tcp_pose, goal_pos, etc.)
        - Concatenate into single state vector: (T, state_dim)
@@ -202,7 +207,7 @@ def create_obs_process_fn(env_id: str, output_format: str = "NCHW") -> Callable:
     
     Returns:
         obs_process_fn: Function that takes raw obs dict and returns
-                       {"state": (T, state_dim), "rgb": (T, C, H, W)}
+                       {"state": (T, state_dim), "rgb": (T, C, H, W), "depth": (T, C, H, W)}
                        
     Example:
         >>> obs_fn = create_obs_process_fn("LiftPegUpright-v1", "NCHW")
@@ -220,25 +225,36 @@ def create_obs_process_fn(env_id: str, output_format: str = "NCHW") -> Callable:
         # State-only demos have obs as simple (T, state_dim) array
         if isinstance(obs, np.ndarray):
             state = obs.astype(np.float32) if obs.dtype != np.float32 else obs
-            return {"state": state, "rgb": None}
+            return {"state": state, "rgb": None, "depth": None}
         
         # =====================================================================
         # RGB Processing
         # =====================================================================
         # Extract rgb from each camera in sensor_data and concatenate
         # sensor_data structure: {"camera_name": {"rgb": array, "depth": array}, ...}
+        rgb = None
+        depth = None
+        
         if "sensor_data" in obs:
             img_dict = obs["sensor_data"]
-            rgb_list = [v["rgb"] for v in img_dict.values()]  # List of (T, H, W, 3)
-            rgb_nhwc = np.concatenate(rgb_list, axis=-1)  # (T, H, W, 3*num_cameras)
             
-            if output_format == "NCHW":
-                # Transpose to channel-first format for PyTorch: (T, C, H, W)
-                rgb = np.transpose(rgb_nhwc, (0, 3, 1, 2))
-            else:
-                rgb = rgb_nhwc
-        else:
-            rgb = None
+            # Process RGB
+            rgb_list = [v["rgb"] for v in img_dict.values() if "rgb" in v]
+            if rgb_list:
+                rgb_nhwc = np.concatenate(rgb_list, axis=-1)  # (T, H, W, 3*num_cameras)
+                if output_format == "NCHW":
+                    rgb = np.transpose(rgb_nhwc, (0, 3, 1, 2))  # (T, C, H, W)
+                else:
+                    rgb = rgb_nhwc
+            
+            # Process Depth
+            depth_list = [v["depth"] for v in img_dict.values() if "depth" in v]
+            if depth_list:
+                depth_nhwc = np.concatenate(depth_list, axis=-1)  # (T, H, W, 1*num_cameras)
+                if output_format == "NCHW":
+                    depth = np.transpose(depth_nhwc, (0, 3, 1, 2))  # (T, C, H, W)
+                else:
+                    depth = depth_nhwc
         
         # =====================================================================
         # State Processing  
@@ -259,7 +275,7 @@ def create_obs_process_fn(env_id: str, output_format: str = "NCHW") -> Callable:
             processed_states.append(arr)
         
         state = np.hstack(processed_states)  # (T, state_dim)
-        return {"state": state, "rgb": rgb}
+        return {"state": state, "rgb": rgb, "depth": depth}
     
     return obs_process_fn
 

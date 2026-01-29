@@ -201,11 +201,13 @@ class Args:
 class AgentWrapper(nn.Module):
     """Wrapper for agent with visual encoder for evaluation."""
     
-    def __init__(self, agent, visual_encoder, include_rgb, obs_horizon, act_horizon=None, action_normalizer=None):
+    def __init__(self, agent, visual_encoder, include_rgb, obs_horizon, act_horizon=None, 
+                 action_normalizer=None, include_depth=False):
         super().__init__()
         self.agent = agent
         self.visual_encoder = visual_encoder
         self.include_rgb = include_rgb
+        self.include_depth = include_depth
         self.obs_horizon = obs_horizon
         self.act_horizon = act_horizon if act_horizon else agent.act_horizon if hasattr(agent, 'act_horizon') else 8
         self.action_normalizer = action_normalizer
@@ -213,7 +215,7 @@ class AgentWrapper(nn.Module):
     def get_action(self, obs, deterministic=False, **kwargs):
         """Get action from observation.
         
-        Handles both RGB mode (Dict obs with 'state' and 'rgb' keys) and
+        Handles both RGB/RGBD mode (Dict obs with 'state', 'rgb', 'depth' keys) and
         State mode (direct tensor observation).
         """
         # Handle different observation formats
@@ -229,12 +231,26 @@ class AgentWrapper(nn.Module):
             
             if self.visual_encoder is not None:
                 rgb = obs["rgb"]
+                # Convert NHWC to NCHW if needed
                 if rgb.dim() == 5 and rgb.shape[-1] in [1, 3, 4, 6, 9, 12]:
                     rgb = rgb.permute(0, 1, 4, 2, 3)
                 rgb_flat = rgb.reshape(B * T, *rgb.shape[2:]).float()
-                if rgb_flat.max() > 1.0:
-                    rgb_flat = rgb_flat / 255.0
-                visual_feat = self.visual_encoder(rgb_flat)
+                # Always normalize RGB to [0, 1]
+                rgb_flat = rgb_flat / 255.0
+                
+                # Handle depth if available
+                if self.include_depth and "depth" in obs:
+                    depth = obs["depth"]
+                    if depth.dim() == 5 and depth.shape[-1] in [1, 2, 4]:
+                        depth = depth.permute(0, 1, 4, 2, 3)
+                    depth_flat = depth.reshape(B * T, *depth.shape[2:]).float()
+                    # Normalize depth (ManiSkill uses mm, typical range 0-10000)
+                    depth_flat = depth_flat / 1024.0
+                    visual_input = torch.cat([rgb_flat, depth_flat], dim=1)
+                else:
+                    visual_input = rgb_flat
+                
+                visual_feat = self.visual_encoder(visual_input)
                 visual_feat = visual_feat.view(B, T, -1)
                 features_list.append(visual_feat)
             
@@ -629,6 +645,7 @@ def main():
     # NOTE: FlattenRGBDObservationWrapper is ONLY for RGB mode. It flattens nested obs to {state, rgb, depth}
     # In state mode, the observation is already flat, so we don't need this wrapper.
     include_rgb = "rgb" in args.obs_mode
+    include_depth = "depth" in args.obs_mode
     wrappers = [FlattenRGBDObservationWrapper] if include_rgb else []
     
     envs = make_eval_envs(
@@ -688,8 +705,19 @@ def main():
     # =========================================================================
     
     if include_rgb:
+        # Compute visual input channels dynamically
+        # RGB: 3 channels per camera, Depth: 1 channel per camera
+        # FlattenRGBDObservationWrapper stacks cameras, so check observation space
+        if include_depth:
+            # RGBD mode: rgb channels + depth channels
+            total_visual_channels = sample_obs["rgb"].shape[-1] + sample_obs["depth"].shape[-1]
+        else:
+            # RGB only mode
+            total_visual_channels = sample_obs["rgb"].shape[-1]
+        
+        print(f"Visual encoder input channels: {total_visual_channels}")
         visual_encoder = PlainConv(
-            in_channels=3,
+            in_channels=total_visual_channels,
             out_dim=args.visual_feature_dim,  # Default: 256
             pool_feature_map=True,
         ).to(device)
@@ -726,6 +754,7 @@ def main():
             env_id=args.env_id,
             obs_process_fn=obs_process_fn,
             action_normalizer=action_normalizer,
+            include_depth=include_depth,
         )
     else:
         dataset = OfflineRLDataset(
@@ -741,6 +770,7 @@ def main():
             obs_process_fn=obs_process_fn,
             gamma=args.gamma,
             action_normalizer=action_normalizer,
+            include_depth=include_depth,
         )
     
     sampler = RandomSampler(dataset, replacement=False)
@@ -771,13 +801,24 @@ def main():
     ema = EMAModel(parameters=agent.parameters(), power=0.75)
     
     # Agent wrapper for evaluation
-    agent_wrapper = AgentWrapper(agent, visual_encoder, include_rgb, args.obs_horizon, args.act_horizon, action_normalizer).to(device)
-    ema_agent_wrapper = AgentWrapper(ema_agent, visual_encoder, include_rgb, args.obs_horizon, args.act_horizon, action_normalizer).to(device)
+    agent_wrapper = AgentWrapper(
+        agent, visual_encoder, include_rgb, args.obs_horizon, args.act_horizon, 
+        action_normalizer, include_depth=include_depth
+    ).to(device)
+    ema_agent_wrapper = AgentWrapper(
+        ema_agent, visual_encoder, include_rgb, args.obs_horizon, args.act_horizon, 
+        action_normalizer, include_depth=include_depth
+    ).to(device)
     
     best_eval_metrics = defaultdict(float)
     
     def encode_observations(obs_seq):
-        """Encode observations to get obs_features."""
+        """Encode observations to get obs_features.
+        
+        Handles RGB-only and RGBD modes:
+        - RGB: rgb / 255.0
+        - RGBD: concat(rgb / 255.0, depth / 1024.0)
+        """
         B = obs_seq["state"].shape[0]
         T = obs_seq["state"].shape[1]
         
@@ -786,7 +827,16 @@ def main():
         if visual_encoder is not None and "rgb" in obs_seq:
             rgb = obs_seq["rgb"]
             rgb_flat = rgb.view(B * T, *rgb.shape[2:]).float() / 255.0
-            visual_feat = visual_encoder(rgb_flat)
+            
+            # If depth is available, concatenate it
+            if include_depth and "depth" in obs_seq:
+                depth = obs_seq["depth"]
+                depth_flat = depth.view(B * T, *depth.shape[2:]).float() / 1024.0
+                visual_input = torch.cat([rgb_flat, depth_flat], dim=1)  # Concat along channel dim
+            else:
+                visual_input = rgb_flat
+            
+            visual_feat = visual_encoder(visual_input)
             visual_feat = visual_feat.view(B, T, -1)
             features_list.append(visual_feat)
         

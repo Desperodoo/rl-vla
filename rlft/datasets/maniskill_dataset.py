@@ -102,6 +102,7 @@ class ManiSkillDataset(Dataset):
     Args:
         data_path: Path to HDF5 demo file (must have obs_mode != "none")
         include_rgb: Whether to include RGB observations
+        include_depth: Whether to include depth observations
         device: Device to store tensors on
         num_traj: Number of trajectories to load (None = all)
         obs_horizon: Observation stacking horizon (how many frames of obs to stack)
@@ -127,8 +128,10 @@ class ManiSkillDataset(Dataset):
         obs_space=None,
         rgb_format: str = "NCHW",
         action_normalizer: Optional["ActionNormalizer"] = None,
+        include_depth: bool = False,
     ):
         self.include_rgb = include_rgb
+        self.include_depth = include_depth
         self.obs_horizon = obs_horizon
         self.pred_horizon = pred_horizon
         self.device = device
@@ -168,6 +171,8 @@ class ManiSkillDataset(Dataset):
             processed_obs = {}
             if include_rgb:
                 processed_obs["rgb"] = torch.from_numpy(obs_dict["rgb"]).to(device)
+            if include_depth and obs_dict.get("depth") is not None:
+                processed_obs["depth"] = torch.from_numpy(obs_dict["depth"]).to(device)
             processed_obs["state"] = torch.from_numpy(obs_dict["state"]).to(device)
             
             trajectories["observations"].append(processed_obs)
@@ -305,8 +310,10 @@ class OfflineRLDataset(Dataset):
         rgb_format: str = "NCHW",
         gamma: float = 0.99,
         action_normalizer: Optional["ActionNormalizer"] = None,
+        include_depth: bool = False,
     ):
         self.include_rgb = include_rgb
+        self.include_depth = include_depth
         self.obs_horizon = obs_horizon
         self.pred_horizon = pred_horizon
         self.act_horizon = act_horizon
@@ -350,6 +357,8 @@ class OfflineRLDataset(Dataset):
             processed_obs = {}
             if include_rgb:
                 processed_obs["rgb"] = torch.from_numpy(obs_dict["rgb"]).to(device)
+            if include_depth and obs_dict.get("depth") is not None:
+                processed_obs["depth"] = torch.from_numpy(obs_dict["depth"]).to(device)
             processed_obs["state"] = torch.from_numpy(obs_dict["state"]).to(device)
             
             trajectories["observations"].append(processed_obs)
