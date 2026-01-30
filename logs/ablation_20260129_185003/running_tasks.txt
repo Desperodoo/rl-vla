@@ -1,7 +1,0 @@
-1181527|LiftPegUpright-v1_baseline_sc_rgb|0|shortcut_flow||1769683803
-1181530|LiftPegUpright-v1_baseline_awsc_rgb|1|aw_shortcut_flow|--beta 10.0 --consistency_weight 0.3|1769683803
-1181533|LiftPegUpright-v1_awsc_beta1_rgb|2|aw_shortcut_flow|--beta 1.0 --consistency_weight 0.3|1769683803
-1181536|LiftPegUpright-v1_awsc_beta100_rgb|3|aw_shortcut_flow|--beta 100.0 --consistency_weight 0.3|1769683803
-1181539|LiftPegUpright-v1_awsc_beta1000_rgb|4|aw_shortcut_flow|--beta 1000.0 --consistency_weight 0.3|1769683803
-1181542|LiftPegUpright-v1_awsc_no_sc_rgb|5|aw_shortcut_flow|--beta 10.0 --consistency_weight 0.0|1769683803
-1181545|LiftPegUpright-v1_sc_no_sc_rgb|6|shortcut_flow|--shortcut_weight 0.0|1769683803

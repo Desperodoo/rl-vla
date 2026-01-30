@@ -1,8 +1,0 @@
-705045|LiftPegUpright-v1_flow_matching_rgb|0|1769677500
-705048|LiftPegUpright-v1_shortcut_flow_rgb|1|1769677500
-705051|LiftPegUpright-v1_consistency_flow_rgb|2|1769677500
-705054|LiftPegUpright-v1_diffusion_policy_rgb|3|1769677500
-705057|LiftPegUpright-v1_reflected_flow_rgb|4|1769677500
-705060|LiftPegUpright-v1_cpql_rgb|5|1769677500
-705063|LiftPegUpright-v1_awcp_rgb|6|1769677500
-705066|LiftPegUpright-v1_aw_shortcut_flow_rgb|7|1769677500

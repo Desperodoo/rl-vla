@@ -1,8 +1,0 @@
-376247|LiftPegUpright-v1_flow_matching_state|0|1769674828
-376250|LiftPegUpright-v1_shortcut_flow_state|1|1769674828
-376253|LiftPegUpright-v1_consistency_flow_state|2|1769674828
-376256|LiftPegUpright-v1_diffusion_policy_state|3|1769674828
-376259|LiftPegUpright-v1_reflected_flow_state|4|1769674828
-376262|LiftPegUpright-v1_cpql_state|5|1769674828
-376265|LiftPegUpright-v1_awcp_state|6|1769674828
-376268|LiftPegUpright-v1_aw_shortcut_flow_state|7|1769674828
