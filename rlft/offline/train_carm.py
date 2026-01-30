@@ -10,6 +10,7 @@ Usage:
 
 ALGO_NAME = "CARM_UNet"
 
+import json
 import os
 import random
 import time
@@ -70,6 +71,9 @@ class Args:
     precompute_actions: bool = False
     normalize_actions: bool = True
     action_norm_mode: Literal["standard", "minmax"] = "standard"
+    action_bounds: Optional[Tuple[float, float]] = None
+    """Action bounds for clamping during inference. Set to None to disable clamping.
+    CARM robot may have different action space, so disabled by default."""
     
     # Discrete gripper settings
     gripper_threshold: float = 0.05
@@ -81,6 +85,9 @@ class Args:
 
     # Camera settings
     target_image_size: Optional[Tuple[int, int]] = (128, 128)
+    include_depth: bool = False
+    """Whether to include depth channel in visual observations. When True, visual input is RGBD (4 channels).
+    NOTE: Depth support requires CARM data collection to save depth images, which is not yet implemented."""
 
     # Training settings
     total_iters: int = 100_000
@@ -148,11 +155,13 @@ class Args:
     cons_teacher_from: Literal["t_plus", "t_cons"] = "t_plus"
     cons_student_point: Literal["t_plus", "t_cons"] = "t_plus"
     cons_loss_space: Literal["velocity", "endpoint"] = "velocity"
+    cons_delta: float = 0.1
+    """consistency delta (kept for API compatibility)"""
     
     # ShortCut Flow settings
-    max_denoising_steps: int = 8
+    sc_max_denoising_steps: int = 8
     """max denoising steps for shortcut_flow"""
-    self_consistency_k: float = 0.25
+    sc_self_consistency_k: float = 0.25
     """fraction of batch for self-consistency in shortcut_flow"""
     sc_t_min: float = 0.0
     sc_t_max: float = 1.0
@@ -177,12 +186,28 @@ class Args:
     resume_optimizer: bool = True
 
 
-def create_visual_encoder(encoder_type: str, out_dim: int, pretrained: bool = True, 
-                          freeze_backbone: bool = False, freeze_bn: bool = True):
-    """Create visual encoder based on type."""
+def create_visual_encoder(encoder_type: str, out_dim: int, in_channels: int = 3,
+                          pretrained: bool = True, freeze_backbone: bool = False, 
+                          freeze_bn: bool = True):
+    """Create visual encoder based on type.
+    
+    Args:
+        encoder_type: Type of encoder ('plain_conv', 'resnet10', etc.)
+        out_dim: Output dimension of the encoder
+        in_channels: Number of input channels (3 for RGB, 4 for RGBD)
+        pretrained: Whether to use pretrained weights (ResNet only)
+        freeze_backbone: Whether to freeze backbone weights (ResNet only)
+        freeze_bn: Whether to freeze batch norm layers (ResNet only)
+    """
     if encoder_type == "plain_conv":
-        return PlainConv(in_channels=3, out_dim=out_dim, pool_feature_map=True)
+        return PlainConv(in_channels=in_channels, out_dim=out_dim, pool_feature_map=True)
     elif encoder_type.startswith("resnet"):
+        # ResNet only supports 3-channel input (RGB)
+        if in_channels != 3:
+            raise ValueError(
+                f"ResNet encoder only supports 3-channel RGB input, but got {in_channels} channels. "
+                f"For RGBD input, please use 'plain_conv' encoder instead."
+            )
         return ResNetEncoder(
             backbone_name=encoder_type,
             out_dim=out_dim,
@@ -213,6 +238,7 @@ def create_agent(algorithm: str, action_dim: int, global_cond_dim: int, args):
             obs_horizon=args.obs_horizon,
             pred_horizon=args.pred_horizon,
             num_diffusion_iters=args.num_diffusion_iters,
+            action_bounds=args.action_bounds,
             device=device,
         )
     
@@ -230,6 +256,7 @@ def create_agent(algorithm: str, action_dim: int, global_cond_dim: int, args):
             obs_horizon=args.obs_horizon,
             pred_horizon=args.pred_horizon,
             num_flow_steps=args.num_flow_steps,
+            action_bounds=args.action_bounds,
             device=device,
         )
     
@@ -249,6 +276,7 @@ def create_agent(algorithm: str, action_dim: int, global_cond_dim: int, args):
             num_flow_steps=args.num_flow_steps,
             reflection_mode=args.reflection_mode,
             boundary_reg_weight=args.boundary_reg_weight,
+            action_bounds=args.action_bounds,
             device=device,
         )
     
@@ -285,6 +313,8 @@ def create_agent(algorithm: str, action_dim: int, global_cond_dim: int, args):
             teacher_from=args.cons_teacher_from,
             student_point=args.cons_student_point,
             consistency_loss_space=args.cons_loss_space,
+            consistency_delta=args.cons_delta,
+            action_bounds=args.action_bounds,
             device=device,
         )
     
@@ -301,14 +331,16 @@ def create_agent(algorithm: str, action_dim: int, global_cond_dim: int, args):
             action_dim=action_dim,
             obs_horizon=args.obs_horizon,
             pred_horizon=args.pred_horizon,
+            num_flow_steps=args.num_flow_steps,
             flow_weight=args.bc_weight,
             shortcut_weight=args.consistency_weight,
             ema_decay=args.ema_decay,
             # ShortCut-specific parameters
-            max_denoising_steps=args.max_denoising_steps,
-            self_consistency_k=args.self_consistency_k,
+            max_denoising_steps=args.sc_max_denoising_steps,
+            self_consistency_k=args.sc_self_consistency_k,
             t_min=args.sc_t_min,
             t_max=args.sc_t_max,
+            t_sampling_mode=args.sc_t_sampling_mode,
             step_size_mode=args.sc_step_size_mode,
             min_step_size=args.sc_min_step_size,
             max_step_size=args.sc_max_step_size,
@@ -318,6 +350,7 @@ def create_agent(algorithm: str, action_dim: int, global_cond_dim: int, args):
             use_ema_teacher=args.sc_use_ema_teacher,
             inference_mode=args.sc_inference_mode,
             num_inference_steps=args.sc_num_inference_steps,
+            action_bounds=args.action_bounds,
             device=device,
         )
     
@@ -326,7 +359,8 @@ def create_agent(algorithm: str, action_dim: int, global_cond_dim: int, args):
 
 
 def save_ckpt(run_name, tag, agent, ema_agent, visual_encoder, state_encoder, 
-              gripper_head, action_normalizer, optimizer=None):
+              gripper_head, action_normalizer, optimizer=None, lr_scheduler=None,
+              ema=None, iteration=None, args=None):
     """Save checkpoint."""
     os.makedirs(f"runs/{run_name}/checkpoints", exist_ok=True)
     checkpoint = {
@@ -343,7 +377,20 @@ def save_ckpt(run_name, tag, agent, ema_agent, visual_encoder, state_encoder,
         }
     if optimizer is not None:
         checkpoint["optimizer"] = optimizer.state_dict()
+    if lr_scheduler is not None:
+        checkpoint["lr_scheduler"] = lr_scheduler.state_dict()
+    if ema is not None:
+        checkpoint["ema"] = ema.state_dict()
+    if iteration is not None:
+        checkpoint["iteration"] = iteration
     torch.save(checkpoint, f"runs/{run_name}/checkpoints/{tag}.pt")
+    
+    # Save args as JSON
+    if args is not None:
+        args_dict = vars(args)
+        args_serializable = {k: v if not isinstance(v, (list, tuple)) or not any(isinstance(x, type) for x in v) else str(v) for k, v in args_dict.items()}
+        with open(f"runs/{run_name}/checkpoints/args.json", 'w') as f:
+            json.dump(args_serializable, f, indent=2, default=str)
 
 
 def main():
@@ -384,10 +431,32 @@ def main():
     
     print(f"State dim: {state_dim}, Action dim: {action_dim}")
     
+    # Check depth support
+    if args.include_depth:
+        raise NotImplementedError(
+            "Depth support for CARM is not yet implemented. "
+            "CARM data collection needs to save depth images first. "
+            "Please use include_depth=False for now."
+        )
+    
+    # Determine image size based on encoder type
+    if args.auto_image_size:
+        # ResNet18+ works better with 224x224, plain_conv/resnet10 with 128x128
+        if args.visual_encoder_type in ["resnet18", "resnet34", "resnet50"]:
+            target_image_size = (224, 224)
+        else:
+            target_image_size = (128, 128)
+        print(f"Auto image size: {args.visual_encoder_type} -> {target_image_size}")
+        args.target_image_size = target_image_size
+    else:
+        target_image_size = args.target_image_size
+        print(f"Manual image size: {target_image_size}")
+    
     # Create observation processing function
     obs_process_fn = create_carm_obs_process_fn(
         output_format="NCHW",
-        target_size=args.target_image_size,
+        target_size=target_image_size,
+        normalize_images=True,
         state_mode=args.state_mode,
     )
     
@@ -416,13 +485,19 @@ def main():
         dataset,
         batch_sampler=batch_sampler,
         num_workers=args.num_dataload_workers,
-        worker_init_fn=lambda worker_id: worker_init_fn(worker_id),
+        worker_init_fn=lambda worker_id: worker_init_fn(worker_id, base_seed=args.seed),
+        persistent_workers=(args.num_dataload_workers > 0),
     )
     
     # Build visual encoder
+    # Compute input channels: 3 for RGB, 4 for RGBD
+    visual_in_channels = 4 if args.include_depth else 3
+    print(f"Visual encoder input channels: {visual_in_channels}")
+    
     visual_encoder = create_visual_encoder(
         encoder_type=args.visual_encoder_type,
         out_dim=args.visual_feature_dim,
+        in_channels=visual_in_channels,
         pretrained=args.pretrained_backbone,
         freeze_backbone=args.freeze_backbone,
         freeze_bn=args.freeze_bn,
@@ -482,7 +557,11 @@ def main():
     # Gripper head params
     param_groups.append({"params": gripper_head.parameters(), "lr": args.lr})
     
-    optimizer = optim.AdamW(param_groups)
+    optimizer = optim.AdamW(
+        params=param_groups,
+        betas=(0.95, 0.999),
+        weight_decay=1e-6,
+    )
     lr_scheduler = get_scheduler(
         name="cosine",
         optimizer=optimizer,
@@ -490,35 +569,79 @@ def main():
         num_training_steps=args.total_iters,
     )
     
-    # EMA
-    all_params = list(agent.parameters()) + list(visual_encoder.parameters()) + list(gripper_head.parameters())
-    if state_encoder is not None:
-        all_params += list(state_encoder.parameters())
-    ema = EMAModel(parameters=all_params, power=0.75)
+    # EMA (only for agent parameters, matching the original implementation)
+    ema = EMAModel(parameters=agent.parameters(), power=0.75)
     
     # Gripper loss with class weighting
     gripper_class_weights = torch.tensor([1.0, args.gripper_class_weight_close], device=device)
     gripper_criterion = nn.CrossEntropyLoss(weight=gripper_class_weights)
     
-    # Resume from checkpoint
+    # Resume from checkpoint if specified
     start_iter = 0
     if args.resume_from is not None:
-        print(f"Resuming from {args.resume_from}")
-        checkpoint = torch.load(args.resume_from, map_location=device)
-        agent.load_state_dict(checkpoint["agent"])
-        if checkpoint.get("ema_agent"):
-            ema_agent.load_state_dict(checkpoint["ema_agent"])
-        if checkpoint.get("visual_encoder"):
-            visual_encoder.load_state_dict(checkpoint["visual_encoder"])
-        if checkpoint.get("state_encoder") and state_encoder is not None:
-            state_encoder.load_state_dict(checkpoint["state_encoder"])
-        if checkpoint.get("gripper_head"):
-            gripper_head.load_state_dict(checkpoint["gripper_head"])
-        if args.resume_optimizer and checkpoint.get("optimizer"):
-            optimizer.load_state_dict(checkpoint["optimizer"])
+        resume_path = os.path.expanduser(args.resume_from)
+        if not os.path.exists(resume_path):
+            raise FileNotFoundError(f"Resume checkpoint not found: {resume_path}")
+        
+        print(f"Resuming from checkpoint: {resume_path}")
+        checkpoint = torch.load(resume_path, map_location=device)
+        
+        # Load agent weights
+        agent.load_state_dict(checkpoint["agent"], strict=True)
+        print("  Loaded agent weights")
+        
+        # Load EMA agent weights
+        if "ema_agent" in checkpoint:
+            ema_agent.load_state_dict(checkpoint["ema_agent"], strict=True)
+            print("  Loaded ema_agent weights")
+        
+        # Load visual encoder weights
+        if "visual_encoder" in checkpoint:
+            visual_encoder.load_state_dict(checkpoint["visual_encoder"], strict=True)
+            print("  Loaded visual_encoder weights")
+        
+        # Load state encoder weights
+        if state_encoder is not None and "state_encoder" in checkpoint:
+            state_encoder.load_state_dict(checkpoint["state_encoder"], strict=True)
+            print("  Loaded state_encoder weights")
+        
+        # Load gripper head weights
+        if "gripper_head" in checkpoint:
+            gripper_head.load_state_dict(checkpoint["gripper_head"], strict=True)
+            print("  Loaded gripper_head weights")
+        else:
+            print("  gripper_head not in checkpoint (will train from scratch)")
+        
+        # Load EMA state
+        if "ema" in checkpoint:
+            ema.load_state_dict(checkpoint["ema"])
+            print("  Loaded EMA state")
+        
+        # Load optimizer and scheduler state
+        if args.resume_optimizer:
+            if "optimizer" in checkpoint:
+                optimizer.load_state_dict(checkpoint["optimizer"])
+                print("  Loaded optimizer state")
+            if "lr_scheduler" in checkpoint:
+                lr_scheduler.load_state_dict(checkpoint["lr_scheduler"])
+                print("  Loaded lr_scheduler state")
+        else:
+            print("  Skipped optimizer/scheduler state (resume_optimizer=False)")
+        
+        # Get starting iteration
+        if "iteration" in checkpoint:
+            start_iter = checkpoint["iteration"] + 1
+            print(f"  Resuming from iteration {start_iter}")
+        
+        print(f"Resume complete!")
     
     def encode_observations(obs_seq):
-        """Encode observations to get obs_features."""
+        """Encode observations to get obs_features.
+        
+        Handles RGB-only and RGBD modes:
+        - RGB: rgb / 255.0
+        - RGBD: concat(rgb / 255.0, depth / 1024.0)
+        """
         B = obs_seq["state"].shape[0]
         T = obs_seq["state"].shape[1]
         
@@ -527,7 +650,16 @@ def main():
         # Visual features
         rgb = obs_seq["rgb"]
         rgb_flat = rgb.view(B * T, *rgb.shape[2:]).float() / 255.0
-        visual_feat = visual_encoder(rgb_flat)
+        
+        if args.include_depth and "depth" in obs_seq:
+            # RGBD mode: concat RGB and depth
+            depth = obs_seq["depth"]
+            depth_flat = depth.view(B * T, *depth.shape[2:]).float() / 1024.0  # Normalize depth
+            visual_input = torch.cat([rgb_flat, depth_flat], dim=1)  # Concat along channel dim
+        else:
+            visual_input = rgb_flat
+        
+        visual_feat = visual_encoder(visual_input)
         visual_feat = visual_feat.view(B, T, -1)
         features_list.append(visual_feat)
         
@@ -589,7 +721,7 @@ def main():
             agent.update_ema()
         
         # EMA update
-        ema.step(all_params)
+        ema.step(agent.parameters())
         
         # Logging
         if iteration % args.log_freq == 0:
@@ -616,12 +748,19 @@ def main():
                 }, step=iteration)
         
         # Save checkpoint
-        if iteration % args.save_freq == 0 and iteration > 0:
+        if iteration > 0 and iteration % args.save_freq == 0:
             ema.copy_to(ema_agent.parameters())
             save_ckpt(
                 run_name, f"iter_{iteration}", 
                 agent, ema_agent, visual_encoder, state_encoder, 
-                gripper_head, action_normalizer, optimizer
+                gripper_head, action_normalizer, optimizer,
+                lr_scheduler, ema, iteration, args
+            )
+            save_ckpt(
+                run_name, "latest", 
+                agent, ema_agent, visual_encoder, state_encoder, 
+                gripper_head, action_normalizer, optimizer,
+                lr_scheduler, ema, iteration, args
             )
         
         pbar.update(1)
@@ -630,12 +769,13 @@ def main():
             "gripper": f"{gripper_loss.item():.4f}",
         })
     
-    # Final save
+    # Final checkpoint
     ema.copy_to(ema_agent.parameters())
     save_ckpt(
         run_name, "final", 
         agent, ema_agent, visual_encoder, state_encoder, 
-        gripper_head, action_normalizer, optimizer
+        gripper_head, action_normalizer, optimizer,
+        lr_scheduler, ema, args.total_iters, args
     )
     
     writer.close()
