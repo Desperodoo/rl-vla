@@ -54,7 +54,7 @@ class ConsistencyFlowAgent(nn.Module):
         action_dim: int,
         obs_horizon: int = 2,
         pred_horizon: int = 16,
-        num_flow_steps: int = 10,
+        num_flow_steps: int = 20,  # Best from sweep (20 > 10 > 5)
         flow_weight: float = 1.0,
         consistency_weight: float = 1.0,
         ema_decay: float = 0.999,
@@ -65,10 +65,10 @@ class ConsistencyFlowAgent(nn.Module):
         cons_t_min: float = 0.05,
         cons_t_max: float = 0.95,
         cons_t_upper: float = 0.95,
-        cons_delta_mode: Literal["random", "fixed"] = "random",
+        cons_delta_mode: Literal["random", "fixed"] = "fixed",  # Best from sweep
         cons_delta_min: float = 0.02,
         cons_delta_max: float = 0.15,
-        cons_delta_fixed: float = 0.01,
+        cons_delta_fixed: float = 0.02,  # Best from sweep
         cons_delta_dynamic_max: bool = False,
         cons_delta_cap: float = 0.99,
         teacher_steps: int = 2,

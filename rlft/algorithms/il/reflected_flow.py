@@ -35,7 +35,7 @@ class ReflectedFlowAgent(nn.Module):
         action_dim: int,
         obs_horizon: int = 2,
         pred_horizon: int = 16,
-        num_flow_steps: int = 10,
+        num_flow_steps: int = 20,  # Best from sweep (20 > 10 > 5)
         action_low: float = -1.0,
         action_high: float = 1.0,
         reflection_mode: Literal["hard", "soft"] = "hard",

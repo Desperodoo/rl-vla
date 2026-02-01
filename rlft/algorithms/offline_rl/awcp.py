@@ -107,7 +107,7 @@ class AWCPAgent(nn.Module):
         obs_horizon: int = 2,
         pred_horizon: int = 16,
         act_horizon: int = 8,
-        num_flow_steps: int = 10,
+        num_flow_steps: int = 20,  # Best from sweep (20 > 10 > 5)
         beta: float = 10.0,
         bc_weight: float = 1.0,
         consistency_weight: float = 1.0,

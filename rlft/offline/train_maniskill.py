@@ -75,7 +75,7 @@ class Args:
     # Training settings
     total_iters: int = 1_000_000
     batch_size: int = 256
-    lr: float = 1e-4
+    lr: float = 3e-4  # Best from sweep (works well for most algorithms)
     lr_critic: float = 3e-4
 
     # Policy architecture settings
@@ -94,8 +94,8 @@ class Args:
     ] = "flow_matching"
     
     # Diffusion/Flow settings
-    num_diffusion_iters: int = 100
-    num_flow_steps: int = 10
+    num_diffusion_iters: int = 100  # Diffusion policy iterations
+    num_flow_steps: int = 20  # Best from sweep (20 > 10 > 5)
     ema_decay: float = 0.999
     
     # Reflected Flow settings
@@ -114,14 +114,14 @@ class Args:
     """maximum t for consistency sampling when not using full range"""
     cons_t_upper: float = 0.95
     """upper clamp for t_plus"""
-    cons_delta_mode: Literal["random", "fixed"] = "random"
-    """delta sampling strategy for consistency"""
+    cons_delta_mode: Literal["random", "fixed"] = "fixed"
+    """delta sampling strategy for consistency (fixed works best from sweep)"""
     cons_delta_min: float = 0.02
     """minimum delta when using random delta"""
     cons_delta_max: float = 0.15
     """maximum delta when using random delta"""
-    cons_delta_fixed: float = 0.01
-    """fixed delta when cons_delta_mode=fixed"""
+    cons_delta_fixed: float = 0.02
+    """fixed delta when cons_delta_mode=fixed (best from sweep)"""
     cons_delta_dynamic_max: bool = False
     """cap random delta by remaining time"""
     cons_delta_cap: float = 0.99
@@ -136,12 +136,13 @@ class Args:
     """consistency loss space: velocity or endpoint"""
 
     # ShortCut Flow settings
-    sc_fixed_step_size: float = 0.0625
+    sc_fixed_step_size: float = 0.125
     sc_num_inference_steps: int = 8
+    """number of inference steps (best from sweep)"""
     sc_max_denoising_steps: int = 8
     """maximum denoising steps for step size sampling"""
     sc_self_consistency_k: float = 0.25
-    """fraction of batch for consistency"""
+    """fraction of batch for consistency (best from sweep)"""
     sc_t_min: float = 0.0
     """minimum t for time sampling"""
     sc_t_max: float = 1.0
@@ -149,7 +150,7 @@ class Args:
     sc_t_sampling_mode: Literal["uniform", "truncated"] = "uniform"
     """time sampling mode"""
     sc_step_size_mode: Literal["power2", "uniform", "fixed"] = "fixed"
-    """step size sampling mode"""
+    """step size sampling mode (fixed works best from sweep)"""
     sc_min_step_size: float = 0.0625
     """minimum step size"""
     sc_max_step_size: float = 0.5
@@ -166,11 +167,15 @@ class Args:
     # Offline RL settings
     bc_weight: float = 1.0
     consistency_weight: float = 0.3
-    alpha: float = 0.01
-    beta: float = 10.0
+    """consistency regularization weight (best from sweep)"""
+    alpha: float = 0.001
+    """CPQL entropy coefficient (best from sweep: 0.001)"""
+    beta: float = 1.0
+    """AWR temperature (best from sweep: 1.0 for aw_shortcut_flow, 10.0 for awcp)"""
     gamma: float = 0.99
     tau: float = 0.005
     reward_scale: float = 0.1
+    """reward scaling factor (best from sweep)"""
     q_target_clip: float = 100.0
     weight_clip: float = 100.0
     

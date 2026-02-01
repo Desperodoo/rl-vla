@@ -92,7 +92,7 @@ class Args:
     # Training settings
     total_iters: int = 100_000
     batch_size: int = 256
-    lr: float = 1e-4
+    lr: float = 3e-4  # Best from sweep
 
     # Policy architecture settings
     obs_horizon: int = 2
@@ -128,7 +128,7 @@ class Args:
     
     # Diffusion/Flow settings
     num_diffusion_iters: int = 100
-    num_flow_steps: int = 10
+    num_flow_steps: int = 20  # Best from sweep (20 > 10 > 5)
     ema_decay: float = 0.999
     bc_weight: float = 1.0
     consistency_weight: float = 0.3
@@ -145,10 +145,12 @@ class Args:
     cons_t_min: float = 0.05
     cons_t_max: float = 0.95
     cons_t_upper: float = 0.95
-    cons_delta_mode: Literal["random", "fixed"] = "random"
+    cons_delta_mode: Literal["random", "fixed"] = "fixed"
+    """delta sampling strategy (fixed works best from sweep)"""
     cons_delta_min: float = 0.02
     cons_delta_max: float = 0.15
-    cons_delta_fixed: float = 0.01
+    cons_delta_fixed: float = 0.02
+    """fixed delta (best from sweep)"""
     cons_delta_dynamic_max: bool = False
     cons_delta_cap: float = 0.99
     cons_teacher_steps: int = 2
@@ -162,19 +164,21 @@ class Args:
     sc_max_denoising_steps: int = 8
     """max denoising steps for shortcut_flow"""
     sc_self_consistency_k: float = 0.25
-    """fraction of batch for self-consistency in shortcut_flow"""
+    """fraction of batch for self-consistency (best from sweep)"""
     sc_t_min: float = 0.0
     sc_t_max: float = 1.0
     sc_t_sampling_mode: Literal["uniform", "truncated"] = "uniform"
     sc_step_size_mode: Literal["power2", "uniform", "fixed"] = "fixed"
+    """step size mode (fixed works best from sweep)"""
     sc_min_step_size: float = 0.0625
     sc_max_step_size: float = 0.5
-    sc_fixed_step_size: float = 0.0625
+    sc_fixed_step_size: float = 0.125
     sc_target_mode: Literal["velocity", "endpoint"] = "velocity"
     sc_teacher_steps: int = 1
     sc_use_ema_teacher: bool = True
     sc_inference_mode: Literal["adaptive", "uniform"] = "uniform"
     sc_num_inference_steps: int = 8
+    """number of inference steps (best from sweep)"""
 
     # Logging settings
     log_freq: int = 1

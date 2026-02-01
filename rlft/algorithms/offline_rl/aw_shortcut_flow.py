@@ -140,20 +140,20 @@ class AWShortCutFlowAgent(nn.Module):
         act_horizon: int = 8,
         max_denoising_steps: int = 8,
         num_inference_steps: int = 8,
-        # Offline RL parameters
-        beta: float = 10.0,
+        # Offline RL parameters (best from sweep)
+        beta: float = 1.0,  # Best from sweep (lower than AWCP)
         bc_weight: float = 1.0,
         shortcut_weight: float = 0.3,
-        self_consistency_k: float = 0.1,
+        self_consistency_k: float = 0.25,  # Best from sweep
         gamma: float = 0.99,
         tau: float = 0.005,
-        reward_scale: float = 0.1,
+        reward_scale: float = 0.1,  # Best from sweep
         q_target_clip: float = 100.0,
         ema_decay: float = 0.999,
         weight_clip: float = 100.0,
-        # ShortCut Flow parameters
+        # ShortCut Flow parameters (best from sweep)
         step_size_mode: Literal["power2", "uniform", "fixed"] = "fixed",
-        fixed_step_size: float = 0.0625,
+        fixed_step_size: float = 0.125,  # Best from sweep (1/8)
         min_step_size: float = 0.0625,
         max_step_size: float = 0.125,
         target_mode: Literal["velocity", "endpoint"] = "velocity",
