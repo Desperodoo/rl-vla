@@ -58,7 +58,7 @@ class Args:
     seed: int = 1
     torch_deterministic: bool = True
     cuda: bool = True
-    track: bool = False
+    track: bool = True
     wandb_project_name: str = "ManiSkill"
     wandb_entity: Optional[str] = None
     capture_video: bool = True

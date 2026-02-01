@@ -110,6 +110,7 @@ run_experiment() {
     cmd+=" --total_iters ${TOTAL_ITERS}"
     cmd+=" --demo_path ${DEMO_PATH}"
     cmd+=" --exp_name ${EXP_NAME}/${algorithm}/${config_name}"
+    cmd+=" --wandb_project_name ${EXP_NAME}"
     cmd+=" ${extra_args}"
     
     local attempt=0
