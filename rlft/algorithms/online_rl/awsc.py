@@ -52,10 +52,10 @@ class AWSCAgent(nn.Module):
         num_min_qs: Number of Q-networks for subsample + min (default: 2)
         max_denoising_steps: Maximum denoising steps (default: 8)
         num_inference_steps: Number of inference steps (default: 8)
-        beta: Temperature for advantage weighting (default: 10.0)
+        beta: Temperature for advantage weighting (default: 100.0)
         bc_weight: Weight for flow matching loss (default: 1.0)
         shortcut_weight: Weight for shortcut consistency loss (default: 0.3)
-        self_consistency_k: Fraction of batch for consistency (default: 0.1)
+        self_consistency_k: Fraction of batch for consistency (default: 0.25)
         gamma: Discount factor (default: 0.99)
         tau: Soft update coefficient (default: 0.005)
         reward_scale: Scale factor for rewards (default: 1.0)
@@ -64,7 +64,7 @@ class AWSCAgent(nn.Module):
         weight_clip: Maximum weight to prevent outliers (default: 100.0)
         exploration_noise_std: Std of exploration noise (default: 0.1)
         step_size_mode: Step size sampling mode (default: "fixed")
-        fixed_step_size: Fixed step size (default: 0.0625)
+        fixed_step_size: Fixed step size (default: 0.125)
         target_mode: Shortcut target mode (default: "velocity")
         teacher_steps: Teacher rollout steps (default: 1)
         use_ema_teacher: Use EMA for teacher (default: True)
@@ -91,10 +91,10 @@ class AWSCAgent(nn.Module):
         max_denoising_steps: int = 8,
         num_inference_steps: int = 8,
         # AWAC parameters
-        beta: float = 10.0,
+        beta: float = 100.0,  # Sweep best (high temp for online RL)
         bc_weight: float = 1.0,
         shortcut_weight: float = 0.3,
-        self_consistency_k: float = 0.1,
+        self_consistency_k: float = 0.25,  # Match IL/offline_rl
         # RL parameters
         gamma: float = 0.99,
         tau: float = 0.005,
@@ -106,7 +106,7 @@ class AWSCAgent(nn.Module):
         exploration_noise_std: float = 0.1,
         # ShortCut Flow specific
         step_size_mode: Literal["power2", "uniform", "fixed"] = "fixed",
-        fixed_step_size: float = 0.0625,  # 1/16
+        fixed_step_size: float = 0.125,  # 1/8 (sweep best, match IL/offline_rl)
         min_step_size: float = 0.0625,
         max_step_size: float = 0.125,
         target_mode: Literal["velocity", "endpoint"] = "velocity",

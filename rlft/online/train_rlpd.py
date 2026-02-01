@@ -42,7 +42,7 @@ from torch.utils.tensorboard import SummaryWriter
 # Import from rlft package
 from rlft.networks import PlainConv, ShortCutVelocityUNet1D
 from rlft.algorithms.online_rl import SACAgent, AWSCAgent
-from rlft.buffers import OnlineReplayBuffer, OnlineReplayBufferRaw, SMDPChunkCollector
+from rlft.buffers import OnlineReplayBuffer, OnlineReplayBufferRaw, SMDPChunkCollector, SuccessReplayBuffer
 from rlft.envs import make_eval_envs, evaluate
 from rlft.datasets import ManiSkillDataset, OfflineRLDataset, ActionNormalizer
 from rlft.datasets.data_utils import ObservationStacker
@@ -127,15 +127,15 @@ class Args:
     load_pretrain_critic: bool = False
     """Whether to load critic from pretrain checkpoint"""
     
-    # AWSC hyperparameters
-    awsc_beta: float = 10.0
+    # AWSC hyperparameters (unified with old version)
+    awsc_beta: float = 100.0
     """Temperature for advantage weighting in AWSC"""
     awsc_bc_weight: float = 1.0
     """Weight for flow matching loss"""
     awsc_shortcut_weight: float = 0.3
     """Weight for shortcut consistency loss"""
-    awsc_self_consistency_k: float = 0.1
-    """Fraction of batch for consistency loss"""
+    awsc_self_consistency_k: float = 0.25
+    """Fraction of batch for consistency loss (match IL/offline_rl)"""
     awsc_ema_decay: float = 0.999
     """EMA decay rate for velocity network"""
     awsc_weight_clip: float = 100.0
@@ -144,26 +144,37 @@ class Args:
     """Standard deviation of exploration noise"""
     awsc_num_inference_steps: int = 8
     """Number of inference steps for flow sampling"""
+    awsc_q_target_clip: float = 100.0
+    """Q-target clipping range"""
     awsc_filter_policy_data: bool = False
     """Whether to filter policy training data by advantage"""
-    awsc_advantage_threshold: float = 0.0
+    awsc_advantage_threshold: float = -0.5
     """Minimum advantage for online samples in policy training"""
     
-    # ShortCut Flow U-Net settings (for AWSC)
-    unet_down_dims: List[int] = field(default_factory=lambda: [256, 512, 1024])
-    """U-Net down block dimensions"""
+    # ShortCut Flow U-Net settings (for AWSC, matches offline training)
+    unet_down_dims: List[int] = field(default_factory=lambda: [64, 128, 256])
+    """U-Net down block dimensions (must match pretrained checkpoint)"""
     unet_kernel_size: int = 5
     """U-Net kernel size"""
     unet_n_groups: int = 8
     """U-Net group norm groups"""
-    diffusion_step_embed_dim: int = 256
-    """Diffusion step embedding dimension"""
+    diffusion_step_embed_dim: int = 64
+    """Diffusion step embedding dimension (must match pretrained checkpoint)"""
+    
+    # Success Replay Buffer settings (for AWSC)
+    use_success_buffer: bool = False
+    """Whether to store successful episodes in SuccessReplayBuffer"""
+    success_buffer_capacity: int = 100_000
+    """Capacity of success replay buffer"""
     
     # Action normalization settings
     normalize_actions: bool = True
     """Whether to normalize actions during training (for offline data)"""
     action_norm_mode: Literal["standard", "minmax"] = "standard"
     """Action normalization mode: 'standard' (zero mean, unit var) or 'minmax' (scale to [-1, 1])"""
+    action_bounds: Optional[tuple] = (-1.0, 1.0)
+    """Action bounds for clamping during inference. Set to None to disable clamping.
+    ManiSkill environments have action space [-1, 1], so we clamp by default."""
 
 
 class AgentWrapper:
@@ -172,10 +183,12 @@ class AgentWrapper:
     Note: eval_envs already applies FrameStack, so obs comes in as
     (num_envs, obs_horizon, state_dim) format - no additional stacking needed.
     """
-    def __init__(self, agent, visual_encoder, include_rgb, obs_horizon, act_horizon, device, action_normalizer=None):
+    def __init__(self, agent, visual_encoder, include_rgb, obs_horizon, act_horizon, device, 
+                 action_normalizer=None, include_depth=False):
         self.agent = agent
         self.visual_encoder = visual_encoder
         self.include_rgb = include_rgb
+        self.include_depth = include_depth
         self.obs_horizon = obs_horizon
         self.act_horizon = act_horizon
         self.device = device
@@ -219,7 +232,21 @@ class AgentWrapper:
                 rgb_flat = rgb.reshape(B * T, *rgb.shape[2:]).float() / 255.0
                 if rgb_flat.ndim == 4 and rgb_flat.shape[-1] == 3:
                     rgb_flat = rgb_flat.permute(0, 3, 1, 2).contiguous()
-                visual_feat = self.visual_encoder(rgb_flat)
+                
+                # Handle depth if available
+                if self.include_depth and "depth" in obs:
+                    depth = obs["depth"]
+                    if isinstance(depth, np.ndarray):
+                        depth = torch.from_numpy(depth).to(self.device)
+                    depth = depth.contiguous()
+                    depth_flat = depth.reshape(B * T, *depth.shape[2:]).float() / 1024.0
+                    if depth_flat.ndim == 4 and depth_flat.shape[-1] in [1, 2, 4]:
+                        depth_flat = depth_flat.permute(0, 3, 1, 2).contiguous()
+                    visual_input = torch.cat([rgb_flat, depth_flat], dim=1)
+                else:
+                    visual_input = rgb_flat
+                
+                visual_feat = self.visual_encoder(visual_input)
                 visual_feat = visual_feat.view(B, T, -1)
                 features.append(visual_feat)
         
@@ -409,6 +436,7 @@ def main():
             target_entropy=args.target_entropy,
             backup_entropy=args.backup_entropy,
             reward_scale=args.reward_scale,
+            action_bounds=args.action_bounds,
             device=device,
         ).to(device)
         use_temperature = True
@@ -442,8 +470,10 @@ def main():
             gamma=args.gamma,
             tau=args.tau,
             reward_scale=args.reward_scale,
+            q_target_clip=args.awsc_q_target_clip,
             ema_decay=args.awsc_ema_decay,
             weight_clip=args.awsc_weight_clip,
+            action_bounds=args.action_bounds,
             exploration_noise_std=args.awsc_exploration_noise_std,
             filter_policy_data=args.awsc_filter_policy_data,
             advantage_threshold=args.awsc_advantage_threshold,
@@ -460,6 +490,19 @@ def main():
                 strict=False,
                 use_ema=True,
             )
+            # Also load visual encoder if available
+            if include_rgb and visual_encoder is not None:
+                checkpoint = torch.load(args.pretrain_path, map_location=device)
+                if "visual_encoder" in checkpoint:
+                    visual_encoder.load_state_dict(checkpoint["visual_encoder"])
+                    print(f"  Loaded visual encoder from checkpoint")
+        
+        # Print policy data filtering settings
+        if args.awsc_filter_policy_data:
+            print(f"Policy-Critic data separation enabled:")
+            print(f"  - Advantage threshold: {args.awsc_advantage_threshold}")
+            print(f"  - Policy uses: demos + high-advantage online samples")
+            print(f"  - Critic uses: all data")
     else:
         raise ValueError(f"Unknown algorithm: {args.algorithm}")
     
@@ -499,6 +542,23 @@ def main():
         device=device,
     )
     
+    # Success buffer (for storing successful online episodes)
+    success_buffer = None
+    if args.use_success_buffer:
+        success_buffer = SuccessReplayBuffer(
+            capacity=args.success_buffer_capacity,
+            num_envs=args.num_envs,
+            state_dim=state_dim,
+            action_dim=action_dim,
+            action_horizon=args.act_horizon,
+            obs_horizon=args.obs_horizon,
+            include_rgb=include_rgb,
+            rgb_shape=rgb_shape,
+            gamma=args.gamma,
+            device=device,
+        )
+        print(f"Success buffer enabled (capacity: {args.success_buffer_capacity})")
+    
     # Create action normalizer if needed (for offline data)
     action_normalizer = ActionNormalizer(mode=args.action_norm_mode) if args.normalize_actions else None
     
@@ -531,6 +591,34 @@ def main():
         device=device,
         action_normalizer=action_normalizer,
     )
+    
+    # ========== Pre-training Evaluation (Baseline) ==========
+    if args.pretrain_path:
+        print("\n" + "=" * 50)
+        print("Evaluating pretrained model (baseline)...")
+        print("=" * 50)
+        agent.eval() if hasattr(agent, 'eval') else None
+        
+        pretrain_eval_metrics = evaluate(
+            args.num_eval_episodes,
+            agent_wrapper,
+            eval_envs,
+            device,
+            sim_backend=args.sim_backend,
+        )
+        
+        print(f"Pretrain evaluation ({len(pretrain_eval_metrics['success_at_end'])} episodes):")
+        pretrain_log = {"step": 0}
+        for k in pretrain_eval_metrics.keys():
+            pretrain_eval_metrics[k] = np.mean(pretrain_eval_metrics[k])
+            writer.add_scalar(f"eval/{k}", pretrain_eval_metrics[k], 0)
+            pretrain_log[f"pretrain_eval/{k}"] = pretrain_eval_metrics[k]
+            print(f"  {k}: {pretrain_eval_metrics[k]:.4f}")
+        
+        if args.track:
+            wandb.log(pretrain_log)
+        
+        print("=" * 50 + "\n")
     
     # Training loop
     print("\n" + "=" * 50)
