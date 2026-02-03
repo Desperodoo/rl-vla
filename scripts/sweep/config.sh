@@ -16,7 +16,7 @@ ENV_ID="LiftPegUpright-v1"
 OBS_MODE="rgb"
 CONTROL_MODE="pd_ee_delta_pose"
 SIM_BACKEND="physx_cuda"
-TOTAL_ITERS=150000
+TOTAL_ITERS=50000
 
 # Demo path (relative to workspace)
 DEMO_PATH="~/.maniskill/demos/${ENV_ID}/rl/trajectory.rgb.pd_ee_delta_pose.physx_cuda.h5"

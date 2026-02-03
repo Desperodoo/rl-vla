@@ -222,7 +222,7 @@ cmd_retry() {
         
         for config in "${SWEEP_CONFIGS[@]}"; do
             local config_name=$(echo "$config" | cut -d':' -f1)
-            local exp_dir=$(get_exp_dir "$algo" "$config_name")
+            local exp_dir=$(find_actual_exp_dir "$algo" "$config_name")
             
             if is_experiment_failed "$exp_dir"; then
                 failed_configs+=("$config")
@@ -246,10 +246,16 @@ cmd_retry() {
             # Clean up failed experiment directories before retry
             for config in "${failed_configs[@]}"; do
                 local config_name=$(echo "$config" | cut -d':' -f1)
-                local exp_dir=$(get_exp_dir "$algo" "$config_name")
-                if [[ -d "$exp_dir" ]]; then
-                    log_info "Cleaning up ${exp_dir}"
-                    rm -rf "$exp_dir"
+                # Clean both base dir and timestamped dirs
+                local base_dir=$(get_exp_dir "$algo" "$config_name")
+                local actual_dir=$(find_actual_exp_dir "$algo" "$config_name")
+                if [[ -d "$base_dir" ]]; then
+                    log_info "Cleaning up ${base_dir}"
+                    rm -rf "$base_dir"
+                fi
+                if [[ -d "$actual_dir" ]] && [[ "$actual_dir" != "$base_dir" ]]; then
+                    log_info "Cleaning up ${actual_dir}"
+                    rm -rf "$actual_dir"
                 fi
             done
             
@@ -320,7 +326,7 @@ cmd_status() {
         
         for config in "${SWEEP_CONFIGS[@]}"; do
             local config_name=$(echo "$config" | cut -d':' -f1)
-            local exp_dir=$(get_exp_dir "$algo" "$config_name")
+            local exp_dir=$(find_actual_exp_dir "$algo" "$config_name")
             
             total=$((total + 1))
             

@@ -28,14 +28,32 @@ log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 get_exp_dir() {
     local algorithm=$1
     local config_name=$2
+    # Base directory without timestamp
     echo "${SWEEP_BASE_DIR}/${algorithm}/${config_name}"
+}
+
+# Find the actual experiment directory (with timestamp suffix)
+find_actual_exp_dir() {
+    local algorithm=$1
+    local config_name=$2
+    local base_dir="${SWEEP_BASE_DIR}/${algorithm}"
+    
+    # Look for directories matching pattern: config_name__timestamp
+    local matches=$(find "$base_dir" -maxdepth 1 -type d -name "${config_name}__*" 2>/dev/null | sort -r | head -1)
+    
+    if [[ -n "$matches" ]]; then
+        echo "$matches"
+    else
+        # Fallback to base directory (for compatibility)
+        echo "${base_dir}/${config_name}"
+    fi
 }
 
 get_checkpoint_path() {
     local algorithm=$1
     local config_name=$2
-    local exp_dir=$(get_exp_dir "$algorithm" "$config_name")
-    echo "${exp_dir}/checkpoints/final.pt"
+    local exp_dir=$(find_actual_exp_dir "$algorithm" "$config_name")
+    echo "${exp_dir}/checkpoints/best_eval_success_once.pt"
 }
 
 # -----------------------------------------------------------------------------
@@ -43,9 +61,13 @@ get_checkpoint_path() {
 # -----------------------------------------------------------------------------
 is_experiment_successful() {
     local exp_dir=$1
-    local final_ckpt="${exp_dir}/checkpoints/final.pt"
     
-    if [[ -f "$final_ckpt" ]]; then
+    # Check for any best checkpoint (training saves best_eval_success_once.pt)
+    if [[ -f "${exp_dir}/checkpoints/best_eval_success_once.pt" ]]; then
+        return 0  # Success
+    fi
+    # Also check for final.pt (for compatibility)
+    if [[ -f "${exp_dir}/checkpoints/final.pt" ]]; then
         return 0  # Success
     fi
     return 1  # Not successful
@@ -59,22 +81,25 @@ is_experiment_failed() {
         return 1
     fi
     
-    # Check for error indicators
+    # Check for log file with "Training completed successfully"
     local log_file="${exp_dir}/train.log"
     if [[ -f "$log_file" ]]; then
-        # Check for CUDA errors or other fatal errors
-        if grep -qE "(CUDA|RuntimeError|OutOfMemory|Segmentation|Killed|Error)" "$log_file" 2>/dev/null; then
-            return 0  # Failed
+        if grep -q "Training completed successfully" "$log_file" 2>/dev/null; then
+            return 1  # Actually succeeded
         fi
-        # Check if log exists but no checkpoint (incomplete)
-        if [[ -d "${exp_dir}/checkpoints" ]]; then
-            return 0  # Failed (started but not completed)
+        # Check for CUDA errors or other fatal errors
+        if grep -qE "(CUDA error|RuntimeError|OutOfMemoryError|Segmentation fault|Killed)" "$log_file" 2>/dev/null; then
+            return 0  # Failed
         fi
     fi
     
-    # Check if experiment directory exists with some files but no final checkpoint
+    # Check if experiment directory exists with checkpoints folder but no final checkpoint
     if [[ -d "$exp_dir" ]] && [[ -d "${exp_dir}/checkpoints" ]]; then
-        return 0  # Failed
+        # Has checkpoints folder but no success checkpoint
+        if [[ ! -f "${exp_dir}/checkpoints/best_eval_success_once.pt" ]] && \
+           [[ ! -f "${exp_dir}/checkpoints/final.pt" ]]; then
+            return 0  # Failed (started but not completed)
+        fi
     fi
     
     return 1  # Not started or unknown
@@ -89,16 +114,18 @@ run_experiment() {
     local config_name=$3
     local extra_args=$4
     
-    local exp_dir=$(get_exp_dir "$algorithm" "$config_name")
-    local log_file="${exp_dir}/train.log"
+    local base_exp_dir=$(get_exp_dir "$algorithm" "$config_name")
     
-    # Skip if already successful
-    if is_experiment_successful "$exp_dir"; then
+    # Check if already successful (look for existing run with timestamp)
+    local actual_exp_dir=$(find_actual_exp_dir "$algorithm" "$config_name")
+    if [[ -d "$actual_exp_dir" ]] && is_experiment_successful "$actual_exp_dir"; then
         log_info "Skipping ${algorithm}/${config_name} (already completed)"
         return 0
     fi
     
-    mkdir -p "$exp_dir"
+    # Create a temporary log directory for this run
+    mkdir -p "$base_exp_dir"
+    local log_file="${base_exp_dir}/train.log"
     
     # Build command
     local cmd="CUDA_VISIBLE_DEVICES=${gpu_id} python -m rlft.offline.train_maniskill"
@@ -130,12 +157,23 @@ run_experiment() {
         eval "$cmd" > "${log_file}" 2>&1
         local exit_code=$?
         
-        if [[ $exit_code -eq 0 ]] && is_experiment_successful "$exp_dir"; then
-            success=true
-            log_success "${algorithm}/${config_name} completed"
-        else
+        # After run, find the actual experiment directory (with timestamp)
+        actual_exp_dir=$(find_actual_exp_dir "$algorithm" "$config_name")
+        
+        # Check success by looking at log file content or checkpoint existence
+        if [[ $exit_code -eq 0 ]]; then
+            if is_experiment_successful "$actual_exp_dir"; then
+                success=true
+                log_success "${algorithm}/${config_name} completed"
+            elif grep -q "Training completed successfully" "${log_file}" 2>/dev/null; then
+                success=true
+                log_success "${algorithm}/${config_name} completed"
+            fi
+        fi
+        
+        if [[ "$success" == "false" ]]; then
             # Check if it's a CUDA error (retryable)
-            if grep -qE "(CUDA|cuDNN|cublas)" "${log_file}" 2>/dev/null; then
+            if grep -qE "(CUDA error|cuDNN|cublas)" "${log_file}" 2>/dev/null; then
                 log_warning "CUDA error detected, will retry..."
             else
                 log_error "${algorithm}/${config_name} failed with non-retryable error"
