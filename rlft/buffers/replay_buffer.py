@@ -321,7 +321,36 @@ class OnlineReplayBufferRaw:
         return combined
     
     def _sample_offline(self, dataset, batch_size: int) -> Dict[str, Any]:
-        """Sample from offline dataset."""
+        """Sample from offline dataset.
+        
+        Uses precomputed cache if available for better performance.
+        """
+        # Try to use optimized batch sampling if available
+        if hasattr(dataset, 'sample_batch'):
+            batch = dataset.sample_batch(batch_size)
+            if batch is not None:
+                obs = {"state": batch["observations"]["state"]}
+                next_obs = {"state": batch["next_observations"]["state"]}
+                
+                if self.include_rgb and "rgb" in batch["observations"]:
+                    obs["rgb"] = batch["observations"]["rgb"]
+                    next_obs["rgb"] = batch["next_observations"]["rgb"]
+                
+                return {
+                    "observations": obs,
+                    "next_observations": next_obs,
+                    "actions": batch["actions_for_q"],
+                    "actions_for_q": batch["actions_for_q"],
+                    "reward": batch["rewards"],
+                    "done": batch["dones"],
+                    "cumulative_reward": batch["cumulative_reward"],
+                    "chunk_done": batch["chunk_done"],
+                    "discount_factor": batch["discount_factor"],
+                    "effective_length": batch["effective_length"],
+                    "is_demo": torch.ones(batch_size, dtype=torch.bool, device=self.device),
+                }
+        
+        # Fallback to sequential sampling
         indices = np.random.choice(len(dataset), size=batch_size, replace=True)
         items = [dataset[i] for i in indices]
         

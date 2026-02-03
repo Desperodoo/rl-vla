@@ -56,7 +56,7 @@ class Args:
     seed: int = 42
     torch_deterministic: bool = True
     cuda: bool = True
-    track: bool = False
+    track: bool = True
     wandb_project_name: str = "RLPD"
     wandb_entity: Optional[str] = None
     capture_video: bool = True
@@ -67,23 +67,23 @@ class Args:
     """algorithm to use: sac (Soft Actor-Critic) or awsc (Advantage-Weighted ShortCut Flow)"""
     
     # Environment settings
-    env_id: str = "PickCube-v1"
-    num_envs: int = 50
-    num_eval_envs: int = 25
+    env_id: str = "LiftPegUpright-v1"
+    num_envs: int = 16
+    num_eval_envs: int = 16
     max_episode_steps: int = 100
     control_mode: str = "pd_ee_delta_pose"
     obs_mode: str = "rgb"
     sim_backend: str = "physx_cuda"
     
     # Data settings
-    demo_path: Optional[str] = None
+    demo_path: Optional[str] = "~/.maniskill/demos/LiftPegUpright-v1/rl/trajectory.rgb.pd_ee_delta_pose.physx_cuda.h5"
     num_demos: Optional[int] = None
     online_ratio: float = 0.5
     
     # Training settings
     total_timesteps: int = 1_000_000
     num_seed_steps: int = 5000
-    utd_ratio: int = 4
+    utd_ratio: int = 20
     batch_size: int = 256
     eval_freq: int = 10000
     save_freq: int = 50000
@@ -111,15 +111,15 @@ class Args:
     
     # Policy settings
     obs_horizon: int = 2
-    act_horizon: int = 8
-    pred_horizon: int = 16
+    act_horizon: int = 2
+    pred_horizon: int = 4
     
     # Visual encoder
     visual_feature_dim: int = 256
     freeze_visual_encoder: bool = False
     
     # Replay buffer
-    replay_buffer_capacity: int = 1_000_000
+    replay_buffer_capacity: int = 500_000
     
     # AWSC-specific settings (only used when algorithm="awsc")
     pretrain_path: Optional[str] = None
@@ -580,6 +580,9 @@ def main():
             action_normalizer=action_normalizer,
         )
         print(f"Offline dataset size: {len(offline_dataset)}")
+        
+        # Precompute cache for faster sampling (up to 50k samples)
+        offline_dataset.precompute_cache(max_cache_size=min(50000, len(offline_dataset)))
     
     # Agent wrapper for evaluation (created after action_normalizer is fitted)
     agent_wrapper = AgentWrapper(
@@ -665,6 +668,9 @@ def main():
         gamma=args.gamma,
         action_horizon=args.act_horizon,
     )
+    
+    # Training metrics accumulator
+    training_metrics = defaultdict(list)
     
     pbar = tqdm(total=args.total_timesteps, desc="Training")
     
@@ -756,6 +762,29 @@ def main():
                     online_ratio=args.online_ratio if offline_dataset else 1.0,
                 )
                 
+                # Log SMDP reward distribution for verification (periodically)
+                if total_steps % (args.log_freq * 10) == 0 and offline_dataset is not None:
+                    is_demo = batch.get("is_demo", None)
+                    if is_demo is not None:
+                        online_mask = ~is_demo
+                        offline_mask = is_demo
+                        
+                        if online_mask.any():
+                            online_cum_reward = batch["cumulative_reward"][online_mask]
+                            training_metrics["smdp/online_cum_reward_mean"].append(online_cum_reward.mean().item())
+                            training_metrics["smdp/online_cum_reward_std"].append(online_cum_reward.std().item())
+                        
+                        if offline_mask.any():
+                            offline_cum_reward = batch["cumulative_reward"][offline_mask]
+                            training_metrics["smdp/offline_cum_reward_mean"].append(offline_cum_reward.mean().item())
+                            training_metrics["smdp/offline_cum_reward_std"].append(offline_cum_reward.std().item())
+                        
+                        # Log discount factor distribution
+                        if online_mask.any():
+                            training_metrics["smdp/online_discount_mean"].append(batch["discount_factor"][online_mask].mean().item())
+                        if offline_mask.any():
+                            training_metrics["smdp/offline_discount_mean"].append(batch["discount_factor"][offline_mask].mean().item())
+                
                 # Encode observations for critic update
                 obs_features = encode_observations(batch["observations"])
                 next_obs_features = encode_observations(batch["next_observations"])
@@ -776,6 +805,11 @@ def main():
                 nn.utils.clip_grad_norm_(agent.critic.parameters(), args.max_grad_norm)
                 critic_optimizer.step()
                 
+                # Accumulate critic metrics
+                training_metrics["critic_loss"].append(critic_loss.item())
+                for k, v in critic_metrics.items():
+                    training_metrics[f"critic/{k}"].append(v.item() if torch.is_tensor(v) else v)
+                
                 # Re-encode for actor update (need fresh computation graph)
                 obs_features_actor = encode_observations(batch["observations"])
                 
@@ -795,6 +829,11 @@ def main():
                 nn.utils.clip_grad_norm_(actor_params, args.max_grad_norm)
                 actor_optimizer.step()
                 
+                # Accumulate actor metrics
+                training_metrics["actor_loss"].append(actor_loss.item())
+                for k, v in actor_metrics.items():
+                    training_metrics[f"actor/{k}"].append(v.item() if torch.is_tensor(v) else v)
+                
                 # Temperature update (SAC only)
                 if args.algorithm == "sac":
                     # Re-encode for temperature update (need fresh computation graph)
@@ -805,6 +844,11 @@ def main():
                     temp_loss, temp_metrics = agent.compute_temperature_loss(obs_features_temp.detach())
                     temp_loss.backward()
                     temp_optimizer.step()
+                    
+                    # Accumulate temperature metrics
+                    training_metrics["temperature_loss"].append(temp_loss.item())
+                    for k, v in temp_metrics.items():
+                        training_metrics[f"temperature/{k}"].append(v.item() if torch.is_tensor(v) else v)
                 
                 # Soft update target network
                 agent.update_target()
@@ -815,14 +859,28 @@ def main():
         
         # Logging
         if total_steps % args.log_freq == 0 and len(episode_successes) > 0:
+            # Log episode statistics
             writer.add_scalar("train/success_rate", np.mean(episode_successes[-100:]), total_steps)
             writer.add_scalar("train/episode_count", len(episode_successes), total_steps)
             
+            log_dict = {
+                "train/success_rate": np.mean(episode_successes[-100:]),
+                "train/episode_count": len(episode_successes),
+            }
+            
+            # Log training losses and metrics
+            if training_metrics:
+                for metric_name, values in training_metrics.items():
+                    if values:
+                        avg_value = np.mean(values)
+                        writer.add_scalar(f"train/{metric_name}", avg_value, total_steps)
+                        log_dict[f"train/{metric_name}"] = avg_value
+                
+                # Clear metrics after logging
+                training_metrics.clear()
+            
             if args.track:
-                wandb.log({
-                    "train/success_rate": np.mean(episode_successes[-100:]),
-                    "train/episode_count": len(episode_successes),
-                }, step=total_steps)
+                wandb.log(log_dict, step=total_steps)
         
         # Evaluation
         if total_steps - last_eval_step >= args.eval_freq:

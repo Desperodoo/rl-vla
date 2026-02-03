@@ -539,3 +539,90 @@ class OfflineRLDataset(Dataset):
     
     def __len__(self):
         return len(self.slices)
+    
+    def precompute_cache(self, max_cache_size: int = 50000):
+        """Precompute and cache samples for faster training.
+        
+        This avoids repeated computation during training by pre-computing
+        all SMDP rewards and storing them in GPU tensors.
+        
+        Args:
+            max_cache_size: Maximum number of samples to cache (default 50000)
+        """
+        cache_size = min(len(self.slices), max_cache_size)
+        print(f"Precomputing offline cache for {cache_size} samples...")
+        
+        # Pre-allocate tensors on GPU
+        self._cache = {
+            "obs_state": torch.zeros(cache_size, self.obs_horizon, 
+                                     self.trajectories["observations"][0]["state"].shape[-1],
+                                     device=self.device),
+            "next_obs_state": torch.zeros(cache_size, self.obs_horizon,
+                                          self.trajectories["observations"][0]["state"].shape[-1],
+                                          device=self.device),
+            "actions_for_q": torch.zeros(cache_size, self.act_horizon,
+                                         self.trajectories["actions"][0].shape[-1],
+                                         device=self.device),
+            "cumulative_reward": torch.zeros(cache_size, device=self.device),
+            "chunk_done": torch.zeros(cache_size, device=self.device),
+            "effective_length": torch.zeros(cache_size, device=self.device),
+            "discount_factor": torch.zeros(cache_size, device=self.device),
+            "rewards": torch.zeros(cache_size, device=self.device),
+            "dones": torch.zeros(cache_size, device=self.device),
+        }
+        
+        if self.include_rgb:
+            rgb_shape = self.trajectories["observations"][0]["rgb"].shape[-3:]
+            self._cache["obs_rgb"] = torch.zeros(cache_size, self.obs_horizon, *rgb_shape,
+                                                  device=self.device, dtype=torch.uint8)
+            self._cache["next_obs_rgb"] = torch.zeros(cache_size, self.obs_horizon, *rgb_shape,
+                                                       device=self.device, dtype=torch.uint8)
+        
+        # Fill cache
+        for i in range(cache_size):
+            item = self.__getitem__(i)
+            self._cache["obs_state"][i] = item["observations"]["state"]
+            self._cache["next_obs_state"][i] = item["next_observations"]["state"]
+            self._cache["actions_for_q"][i] = item["actions_for_q"]
+            self._cache["cumulative_reward"][i] = item["cumulative_reward"]
+            self._cache["chunk_done"][i] = item["chunk_done"]
+            self._cache["effective_length"][i] = item["effective_length"]
+            self._cache["discount_factor"][i] = item["discount_factor"]
+            self._cache["rewards"][i] = item["rewards"]
+            self._cache["dones"][i] = item["dones"]
+            
+            if self.include_rgb:
+                self._cache["obs_rgb"][i] = item["observations"]["rgb"]
+                self._cache["next_obs_rgb"][i] = item["next_observations"]["rgb"]
+        
+        self._cache_size = cache_size
+        print(f"Offline cache ready ({cache_size} samples)")
+    
+    def sample_batch(self, batch_size: int) -> Dict[str, torch.Tensor]:
+        """Efficiently sample a batch from precomputed cache.
+        
+        Falls back to sequential __getitem__ if cache not available.
+        """
+        if hasattr(self, '_cache') and self._cache is not None:
+            indices = torch.randint(0, self._cache_size, (batch_size,), device=self.device)
+            
+            batch = {
+                "observations": {"state": self._cache["obs_state"][indices]},
+                "next_observations": {"state": self._cache["next_obs_state"][indices]},
+                "actions_for_q": self._cache["actions_for_q"][indices],
+                "cumulative_reward": self._cache["cumulative_reward"][indices],
+                "chunk_done": self._cache["chunk_done"][indices],
+                "effective_length": self._cache["effective_length"][indices],
+                "discount_factor": self._cache["discount_factor"][indices],
+                "rewards": self._cache["rewards"][indices],
+                "dones": self._cache["dones"][indices],
+            }
+            
+            if self.include_rgb:
+                batch["observations"]["rgb"] = self._cache["obs_rgb"][indices]
+                batch["next_observations"]["rgb"] = self._cache["next_obs_rgb"][indices]
+            
+            return batch
+        else:
+            # Fallback to sequential sampling
+            return None
