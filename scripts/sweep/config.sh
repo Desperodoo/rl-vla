@@ -24,7 +24,7 @@ DEMO_PATH="~/.maniskill/demos/${ENV_ID}/rl/trajectory.rgb.pd_ee_delta_pose.physx
 # -----------------------------------------------------------------------------
 # Experiment Configuration
 # -----------------------------------------------------------------------------
-EXP_NAME="maniskill_sweep"
+EXP_NAME="maniskill_sweep_v3"
 SWEEP_BASE_DIR="runs/${EXP_NAME}"
 
 # Config version: "v1" (wave 1) or "v2" (wave 2)
@@ -43,9 +43,16 @@ RETRY_DELAY=10
 # Stage 2: RL algorithms that depend on IL results
 # Stage 3: RL algorithms that depend on Stage 2
 # -----------------------------------------------------------------------------
-STAGE1_ALGORITHMS=(flow_matching diffusion_policy consistency_flow shortcut_flow reflected_flow)
-STAGE2_ALGORITHMS=(cpql awcp)
-STAGE3_ALGORITHMS=(aw_shortcut_flow)
+if [[ "${CONFIG_VERSION}" == "v3" ]]; then
+    # Wave 3: drop diffusion_policy / flow_matching / reflected_flow
+    STAGE1_ALGORITHMS=(consistency_flow shortcut_flow)
+    STAGE2_ALGORITHMS=(cpql awcp)
+    STAGE3_ALGORITHMS=(aw_shortcut_flow)
+else
+    STAGE1_ALGORITHMS=(flow_matching diffusion_policy consistency_flow shortcut_flow reflected_flow)
+    STAGE2_ALGORITHMS=(cpql awcp)
+    STAGE3_ALGORITHMS=(aw_shortcut_flow)
+fi
 
 ALL_ALGORITHMS=(
     "${STAGE1_ALGORITHMS[@]}"

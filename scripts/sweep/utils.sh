@@ -246,6 +246,58 @@ run_batch() {
 }
 
 # -----------------------------------------------------------------------------
+# Global Queue Scheduling: Fill GPUs across algorithms
+# -----------------------------------------------------------------------------
+run_sweep_queue() {
+    local items=("$@")
+    local total=${#items[@]}
+    local idx=0
+    local completed=0
+
+    local -a free_gpus=("${AVAILABLE_GPUS[@]}")
+    declare -A pid_to_gpu=()
+
+    log_info "Running ${total} configs across algorithms (GPUs: ${#AVAILABLE_GPUS[@]})"
+
+    while [[ $idx -lt $total || ${#pid_to_gpu[@]} -gt 0 ]]; do
+        # Launch as many as possible
+        while [[ $idx -lt $total && ${#free_gpus[@]} -gt 0 ]]; do
+            local item="${items[$idx]}"
+            local algorithm="${item%%|*}"
+            local rest="${item#*|}"
+            local config_name="${rest%%|*}"
+            local extra_args="${rest#*|}"
+
+            local gpu_id="${free_gpus[0]}"
+            free_gpus=("${free_gpus[@]:1}")
+
+            log_info "[GPU ${gpu_id}] Launching ${algorithm}/${config_name} (${idx}/${total})"
+            run_experiment "$gpu_id" "$algorithm" "$config_name" "$extra_args" &
+            local pid=$!
+            pid_to_gpu[$pid]="$gpu_id"
+
+            idx=$((idx + 1))
+        done
+
+        # Collect finished processes and free GPUs
+        for pid in "${!pid_to_gpu[@]}"; do
+            if ! kill -0 "$pid" 2>/dev/null; then
+                wait "$pid" || true
+                free_gpus+=("${pid_to_gpu[$pid]}")
+                unset 'pid_to_gpu[$pid]'
+                completed=$((completed + 1))
+            fi
+        done
+
+        if [[ $idx -lt $total && ${#free_gpus[@]} -eq 0 ]]; then
+            sleep 1
+        fi
+    done
+
+    log_success "Sweep completed! (${completed}/${total})"
+}
+
+# -----------------------------------------------------------------------------
 # Load Algorithm Configs
 # -----------------------------------------------------------------------------
 load_algorithm_configs() {
@@ -255,6 +307,8 @@ load_algorithm_configs() {
     # Support config version (v1, v2, etc.)
     if [[ "$CONFIG_VERSION" == "v2" ]]; then
         config_dir="configs_v2"
+    elif [[ "$CONFIG_VERSION" == "v3" ]]; then
+        config_dir="configs_v3"
     fi
     
     local config_file="${SCRIPT_DIR}/${config_dir}/${algorithm}.sh"

@@ -142,40 +142,80 @@ cmd_run() {
     
     log_info "Algorithms to run: ${algorithms_to_run[*]}"
     
-    for algo in "${algorithms_to_run[@]}"; do
-        log_info "=========================================="
-        log_info "Processing algorithm: ${algo}"
-        log_info "=========================================="
-        
-        local config_dir="configs"
-        if [[ "$CONFIG_VERSION" == "v2" ]]; then
-            config_dir="configs_v2"
-        elif [[ "$CONFIG_VERSION" == "v3" ]]; then
-            config_dir="configs_v3"
-        fi
-        local config_file="${SCRIPT_DIR}/${config_dir}/${algo}.sh"
-        if [[ ! -f "$config_file" ]]; then
-            log_warning "Config file not found: ${config_file}, skipping"
-            continue
-        fi
-        
-        source "$config_file"
-        
-        if [[ ${#SWEEP_CONFIGS[@]} -eq 0 ]]; then
-            log_warning "No configs found for ${algo}, skipping"
-            continue
-        fi
-        
-        if [[ "$dry_run" == "true" ]]; then
+    if [[ "$dry_run" == "true" ]]; then
+        for algo in "${algorithms_to_run[@]}"; do
+            log_info "=========================================="
+            log_info "Processing algorithm: ${algo}"
+            log_info "=========================================="
+
+            local config_dir="configs"
+            if [[ "$CONFIG_VERSION" == "v2" ]]; then
+                config_dir="configs_v2"
+            elif [[ "$CONFIG_VERSION" == "v3" ]]; then
+                config_dir="configs_v3"
+            fi
+            local config_file="${SCRIPT_DIR}/${config_dir}/${algo}.sh"
+            if [[ ! -f "$config_file" ]]; then
+                log_warning "Config file not found: ${config_file}, skipping"
+                continue
+            fi
+
+            source "$config_file"
+
+            if [[ ${#SWEEP_CONFIGS[@]} -eq 0 ]]; then
+                log_warning "No configs found for ${algo}, skipping"
+                continue
+            fi
+
             log_info "[DRY RUN] Would run ${#SWEEP_CONFIGS[@]} configs:"
             for config in "${SWEEP_CONFIGS[@]}"; do
                 local config_name=$(echo "$config" | cut -d':' -f1)
                 echo "  - ${config_name}"
             done
-        else
-            run_batch "$algo" "${SWEEP_CONFIGS[@]}"
+        done
+    else
+        local sweep_items=()
+        for algo in "${algorithms_to_run[@]}"; do
+            log_info "=========================================="
+            log_info "Queueing algorithm: ${algo}"
+            log_info "=========================================="
+
+            local config_dir="configs"
+            if [[ "$CONFIG_VERSION" == "v2" ]]; then
+                config_dir="configs_v2"
+            elif [[ "$CONFIG_VERSION" == "v3" ]]; then
+                config_dir="configs_v3"
+            fi
+            local config_file="${SCRIPT_DIR}/${config_dir}/${algo}.sh"
+            if [[ ! -f "$config_file" ]]; then
+                log_warning "Config file not found: ${config_file}, skipping"
+                continue
+            fi
+
+            source "$config_file"
+
+            if [[ ${#SWEEP_CONFIGS[@]} -eq 0 ]]; then
+                log_warning "No configs found for ${algo}, skipping"
+                continue
+            fi
+
+            for config in "${SWEEP_CONFIGS[@]}"; do
+                local config_name=$(echo "$config" | cut -d':' -f1)
+                local extra_args=$(echo "$config" | cut -d':' -f2-)
+                if [[ "$config_name" == "$extra_args" ]]; then
+                    extra_args=""
+                fi
+                sweep_items+=("${algo}|${config_name}|${extra_args}")
+            done
+        done
+
+        if [[ ${#sweep_items[@]} -eq 0 ]]; then
+            log_error "No configs found to run"
+            exit 1
         fi
-    done
+
+        run_sweep_queue "${sweep_items[@]}"
+    fi
     
     log_success "Sweep completed!"
 }
