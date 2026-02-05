@@ -140,10 +140,10 @@ class AWShortCutFlowAgent(nn.Module):
         act_horizon: int = 8,
         max_denoising_steps: int = 8,
         num_inference_steps: int = 8,
-        # Offline RL parameters (best from sweep)
-        beta: float = 1.0,  # Best from sweep (lower than AWCP)
+        # Offline RL parameters (best from sweep: aggressive config)
+        beta: float = 10.0,  # Best from sweep (aggressive)
         bc_weight: float = 1.0,
-        shortcut_weight: float = 0.3,
+        shortcut_weight: float = 0.3,  # Best from sweep (consistency_weight)
         self_consistency_k: float = 0.25,  # Best from sweep
         gamma: float = 0.99,
         tau: float = 0.005,

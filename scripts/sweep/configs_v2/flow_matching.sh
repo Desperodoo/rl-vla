@@ -47,8 +47,8 @@ SWEEP_CONFIGS=(
     # 6. Network architecture: U-Net dimensions
     # Smaller = faster but less expressive
     # ---------------------------------------------------------------------
-    "unet_small:--unet_dims [32,64,128]"
-    "unet_large:--unet_dims [128,256,512]"
+    "unet_small:--unet_dims 32 64 128"
+    "unet_large:--unet_dims 128 256 512"
     
     # ---------------------------------------------------------------------
     # 7. Batch size variations

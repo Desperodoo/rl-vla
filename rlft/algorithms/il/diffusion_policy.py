@@ -38,7 +38,7 @@ class DiffusionPolicyAgent(nn.Module):
         self,
         noise_pred_net: ConditionalUnet1D,
         action_dim: int,
-        obs_horizon: int = 2,
+        obs_horizon: int = 4,  # Best from sweep (4 > 2 > 1)
         pred_horizon: int = 16,
         num_diffusion_iters: int = 100,
         action_bounds: Optional[tuple] = None,

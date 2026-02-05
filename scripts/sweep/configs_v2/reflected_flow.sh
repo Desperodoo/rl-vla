@@ -60,8 +60,8 @@ SWEEP_CONFIGS=(
     # ---------------------------------------------------------------------
     # 8. Network architecture
     # ---------------------------------------------------------------------
-    "unet_small:--unet_dims [32,64,128]"
-    "unet_large:--unet_dims [128,256,512]"
+    "unet_small:--unet_dims 32 64 128"
+    "unet_large:--unet_dims 128 256 512"
     
     # ---------------------------------------------------------------------
     # 9. Combined: Hard reflection with different flow steps

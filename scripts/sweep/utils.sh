@@ -297,6 +297,30 @@ find_failed_experiments() {
 }
 
 # -----------------------------------------------------------------------------
+# Parse Metrics from Log File
+# -----------------------------------------------------------------------------
+parse_metrics_from_log() {
+    local log_file=$1
+    local metric_name=$2
+    
+    if [[ ! -f "$log_file" ]]; then
+        echo ""
+        return
+    fi
+    
+    # Parse wandb summary line: "wandb: metric_name value"
+    local value=$(grep "wandb:.*${metric_name}" "$log_file" 2>/dev/null | tail -1 | awk '{print $NF}')
+    
+    # Skip if value is sparkline character
+    if [[ "$value" == "▁" ]] || [[ -z "$value" ]]; then
+        echo ""
+        return
+    fi
+    
+    echo "$value"
+}
+
+# -----------------------------------------------------------------------------
 # Analyze Results
 # -----------------------------------------------------------------------------
 analyze_algorithm() {
@@ -336,18 +360,150 @@ analyze_algorithm() {
 }
 
 # -----------------------------------------------------------------------------
-# Export Best Results to JSON
+# Analyze Results with Metrics (detailed analysis)
+# -----------------------------------------------------------------------------
+analyze_algorithm_with_metrics() {
+    local algorithm=$1
+    local config_dir="configs"
+    if [[ "$CONFIG_VERSION" == "v2" ]]; then
+        config_dir="configs_v2"
+    fi
+    local config_file="${SCRIPT_DIR}/${config_dir}/${algorithm}.sh"
+    
+    if [[ ! -f "$config_file" ]]; then
+        return
+    fi
+    
+    source "$config_file"
+    
+    echo "========================================"
+    echo -e "${CYAN}Algorithm: ${algorithm}${NC}"
+    echo "========================================"
+    
+    # Collect all results
+    local results=()
+    local total=0
+    local completed=0
+    local failed=0
+    local not_started=0
+    
+    for config in "${SWEEP_CONFIGS[@]}"; do
+        local config_name=$(echo "$config" | cut -d':' -f1)
+        local exp_dir=$(find_actual_exp_dir "$algorithm" "$config_name")
+        local log_file="${exp_dir}/train.log"
+        
+        # Also check base dir for log file
+        local base_dir=$(get_exp_dir "$algorithm" "$config_name")
+        if [[ ! -f "$log_file" ]] && [[ -f "${base_dir}/train.log" ]]; then
+            log_file="${base_dir}/train.log"
+        fi
+        
+        total=$((total + 1))
+        
+        local success_once=$(parse_metrics_from_log "$log_file" "final/best_success_once")
+        local success_end=$(parse_metrics_from_log "$log_file" "final/best_success_at_end")
+        local status="not_started"
+        
+        if is_experiment_successful "$exp_dir"; then
+            status="success"
+            completed=$((completed + 1))
+        elif is_experiment_failed "$exp_dir"; then
+            status="failed"
+            failed=$((failed + 1))
+        else
+            not_started=$((not_started + 1))
+        fi
+        
+        # Store result: "success_once|success_end|config_name|status"
+        if [[ -n "$success_once" ]]; then
+            results+=("${success_once}|${success_end}|${config_name}|${status}")
+        else
+            results+=("0|0|${config_name}|${status}")
+        fi
+    done
+    
+    # Sort by success_once (descending)
+    echo ""
+    echo -e "${BLUE}Results sorted by success_once:${NC}"
+    echo "----------------------------------------"
+    printf "%-30s %12s %12s %10s\n" "Config" "success_once" "success_end" "Status"
+    echo "----------------------------------------"
+    
+    # Sort results
+    local sorted_results=($(printf '%s\n' "${results[@]}" | sort -t'|' -k1 -rn))
+    
+    local best_config=""
+    local best_score="0"
+    
+    for result in "${sorted_results[@]}"; do
+        local s_once=$(echo "$result" | cut -d'|' -f1)
+        local s_end=$(echo "$result" | cut -d'|' -f2)
+        local cfg=$(echo "$result" | cut -d'|' -f3)
+        local stat=$(echo "$result" | cut -d'|' -f4)
+        
+        # Track best
+        if [[ -z "$best_config" ]] && [[ "$stat" == "success" ]]; then
+            best_config="$cfg"
+            best_score="$s_once"
+        fi
+        
+        # Color based on status
+        local color=""
+        local status_icon=""
+        case $stat in
+            success)
+                color="${GREEN}"
+                status_icon="✓"
+                ;;
+            failed)
+                color="${RED}"
+                status_icon="✗"
+                ;;
+            *)
+                color="${YELLOW}"
+                status_icon="○"
+                ;;
+        esac
+        
+        # Format output
+        if [[ "$s_once" != "0" ]]; then
+            printf "${color}%-30s %12s %12s %10s${NC}\n" "$cfg" "$s_once" "$s_end" "$status_icon"
+        else
+            printf "${color}%-30s %12s %12s %10s${NC}\n" "$cfg" "-" "-" "$status_icon"
+        fi
+    done
+    
+    echo "----------------------------------------"
+    echo "Total: ${total} | Completed: ${completed} | Failed: ${failed} | Not Started: ${not_started}"
+    
+    if [[ -n "$best_config" ]]; then
+        echo -e "${GREEN}Best config: ${best_config} (success_once=${best_score})${NC}"
+    fi
+    echo ""
+}
+
+# -----------------------------------------------------------------------------
+# Export Best Results to JSON (with metrics)
 # -----------------------------------------------------------------------------
 export_results_json() {
     local output_file=${1:-"sweep_results.json"}
+    local config_dir="configs"
+    if [[ "$CONFIG_VERSION" == "v2" ]]; then
+        config_dir="configs_v2"
+    fi
     
     echo "{" > "$output_file"
     echo '  "timestamp": "'$(date -Iseconds)'",' >> "$output_file"
+    echo '  "config_version": "'${CONFIG_VERSION}'",' >> "$output_file"
     echo '  "algorithms": {' >> "$output_file"
     
     local first_algo=true
+    local global_best_config=""
+    local global_best_score="0"
+    local global_best_algo=""
+    
     for algorithm in "${ALL_ALGORITHMS[@]}"; do
-        local config_file="${SCRIPT_DIR}/configs/${algorithm}.sh"
+        local config_file="${SCRIPT_DIR}/${config_dir}/${algorithm}.sh"
         if [[ ! -f "$config_file" ]]; then
             continue
         fi
@@ -357,19 +513,43 @@ export_results_json() {
         fi
         first_algo=false
         
+        source "$config_file"
+        
+        local algo_best_config=""
+        local algo_best_score="0"
+        
         echo -n '    "'${algorithm}'": {' >> "$output_file"
         echo '"configs": [' >> "$output_file"
         
-        source "$config_file"
         local first_config=true
         
         for config in "${SWEEP_CONFIGS[@]}"; do
             local config_name=$(echo "$config" | cut -d':' -f1)
-            local exp_dir=$(get_exp_dir "$algorithm" "$config_name")
+            local exp_dir=$(find_actual_exp_dir "$algorithm" "$config_name")
+            local log_file="${exp_dir}/train.log"
+            
+            # Also check base dir for log file
+            local base_dir=$(get_exp_dir "$algorithm" "$config_name")
+            if [[ ! -f "$log_file" ]] && [[ -f "${base_dir}/train.log" ]]; then
+                log_file="${base_dir}/train.log"
+            fi
+            
             local status="not_started"
+            local success_once=""
+            local success_end=""
             
             if is_experiment_successful "$exp_dir"; then
                 status="success"
+                success_once=$(parse_metrics_from_log "$log_file" "final/best_success_once")
+                success_end=$(parse_metrics_from_log "$log_file" "final/best_success_at_end")
+                
+                # Track best for this algorithm
+                if [[ -n "$success_once" ]]; then
+                    if (( $(echo "$success_once > $algo_best_score" | bc -l) )); then
+                        algo_best_score="$success_once"
+                        algo_best_config="$config_name"
+                    fi
+                fi
             elif is_experiment_failed "$exp_dir"; then
                 status="failed"
             fi
@@ -379,16 +559,58 @@ export_results_json() {
             fi
             first_config=false
             
-            echo -n '      {"name": "'${config_name}'", "status": "'${status}'"}' >> "$output_file"
+            echo -n '      {"name": "'${config_name}'", "status": "'${status}'"' >> "$output_file"
+            if [[ -n "$success_once" ]]; then
+                echo -n ', "success_once": '${success_once}', "success_at_end": '${success_end:-0} >> "$output_file"
+            fi
+            echo -n '}' >> "$output_file"
         done
         
         echo "" >> "$output_file"
-        echo -n '    ]}' >> "$output_file"
+        echo -n '    ]' >> "$output_file"
+        
+        # Add algorithm best
+        if [[ -n "$algo_best_config" ]]; then
+            echo -n ', "best_config": "'${algo_best_config}'", "best_success_once": '${algo_best_score} >> "$output_file"
+            
+            # Track global best
+            if (( $(echo "$algo_best_score > $global_best_score" | bc -l) )); then
+                global_best_score="$algo_best_score"
+                global_best_config="$algo_best_config"
+                global_best_algo="$algorithm"
+            fi
+        fi
+        
+        echo -n '}' >> "$output_file"
     done
     
     echo "" >> "$output_file"
+    echo "  }," >> "$output_file"
+    
+    # Add global summary
+    echo '  "summary": {' >> "$output_file"
+    if [[ -n "$global_best_config" ]]; then
+        echo '    "best_algorithm": "'${global_best_algo}'",' >> "$output_file"
+        echo '    "best_config": "'${global_best_config}'",' >> "$output_file"
+        echo '    "best_success_once": '${global_best_score} >> "$output_file"
+    else
+        echo '    "best_algorithm": null,' >> "$output_file"
+        echo '    "best_config": null,' >> "$output_file"
+        echo '    "best_success_once": null' >> "$output_file"
+    fi
     echo "  }" >> "$output_file"
     echo "}" >> "$output_file"
     
     log_success "Results exported to ${output_file}"
+    
+    # Print summary
+    if [[ -n "$global_best_config" ]]; then
+        echo ""
+        echo "========================================"
+        echo -e "${GREEN}GLOBAL BEST${NC}"
+        echo "========================================"
+        echo "Algorithm: ${global_best_algo}"
+        echo "Config: ${global_best_config}"
+        echo "success_once: ${global_best_score}"
+    fi
 }

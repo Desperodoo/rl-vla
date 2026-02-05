@@ -68,7 +68,7 @@ class ConsistencyFlowAgent(nn.Module):
         cons_delta_mode: Literal["random", "fixed"] = "fixed",  # Best from sweep
         cons_delta_min: float = 0.02,
         cons_delta_max: float = 0.15,
-        cons_delta_fixed: float = 0.02,  # Best from sweep
+        cons_delta_fixed: float = 0.04,  # Best from sweep (0.04 > 0.02)
         cons_delta_dynamic_max: bool = False,
         cons_delta_cap: float = 0.99,
         teacher_steps: int = 2,

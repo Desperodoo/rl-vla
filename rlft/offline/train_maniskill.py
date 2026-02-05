@@ -81,7 +81,7 @@ class Args:
     # Policy architecture settings
     obs_horizon: int = 2
     act_horizon: int = 8
-    pred_horizon: int = 16
+    pred_horizon: int = 8  # Best from sweep (8 > 16)
     diffusion_step_embed_dim: int = 64
     unet_dims: List[int] = field(default_factory=lambda: [64, 128, 256])
     n_groups: int = 8
@@ -99,7 +99,7 @@ class Args:
     ema_decay: float = 0.999
     
     # Reflected Flow settings
-    reflection_mode: Literal["hard", "soft"] = "hard"
+    reflection_mode: Literal["hard", "soft"] = "soft"  # Best from sweep
     boundary_reg_weight: float = 0.01
     
     # Consistency Flow settings
@@ -120,7 +120,7 @@ class Args:
     """minimum delta when using random delta"""
     cons_delta_max: float = 0.15
     """maximum delta when using random delta"""
-    cons_delta_fixed: float = 0.02
+    cons_delta_fixed: float = 0.04
     """fixed delta when cons_delta_mode=fixed (best from sweep)"""
     cons_delta_dynamic_max: bool = False
     """cap random delta by remaining time"""
@@ -165,13 +165,13 @@ class Args:
     """inference mode"""
 
     # Offline RL settings
-    bc_weight: float = 1.0
+    bc_weight: float = 0.5  # Best from sweep for cpql
     consistency_weight: float = 0.3
     """consistency regularization weight (best from sweep)"""
     alpha: float = 0.001
     """CPQL entropy coefficient (best from sweep: 0.001)"""
-    beta: float = 1.0
-    """AWR temperature (best from sweep: 1.0 for aw_shortcut_flow, 10.0 for awcp)"""
+    beta: float = 10.0
+    """AWR temperature (best from sweep: 10.0 for aggressive config)"""
     gamma: float = 0.99
     tau: float = 0.005
     reward_scale: float = 0.1

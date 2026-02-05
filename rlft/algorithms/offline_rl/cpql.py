@@ -99,7 +99,7 @@ class CPQLAgent(nn.Module):
         act_horizon: int = 8,
         num_flow_steps: int = 20,  # Best from sweep (20 > 10 > 5)
         alpha: float = 0.001,  # Best from sweep (smaller is more stable)
-        bc_weight: float = 1.0,
+        bc_weight: float = 0.5,  # Best from sweep (0.5 > 1.0)
         consistency_weight: float = 1.0,
         gamma: float = 0.99,
         tau: float = 0.005,

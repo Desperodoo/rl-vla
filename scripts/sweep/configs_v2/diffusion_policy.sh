@@ -43,8 +43,8 @@ SWEEP_CONFIGS=(
     # ---------------------------------------------------------------------
     # 6. Network architecture variations
     # ---------------------------------------------------------------------
-    "unet_small:--unet_dims [32,64,128]"
-    "unet_large:--unet_dims [128,256,512]"
+    "unet_small:--unet_dims 32 64 128"
+    "unet_large:--unet_dims 128 256 512"
     
     # ---------------------------------------------------------------------
     # 7. Batch size
@@ -61,6 +61,6 @@ SWEEP_CONFIGS=(
     # ---------------------------------------------------------------------
     # 9. Combined: Smaller steps + smaller network (efficiency focus)
     # ---------------------------------------------------------------------
-    "efficient_small:--num_diffusion_iters 50 --unet_dims [32,64,128]"
-    "efficient_medium:--num_diffusion_iters 75 --unet_dims [64,128,256]"
+    "efficient_small:--num_diffusion_iters 50 --unet_dims 32 64 128"
+    "efficient_medium:--num_diffusion_iters 75 --unet_dims 64 128 256"
 )

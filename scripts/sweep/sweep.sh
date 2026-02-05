@@ -8,6 +8,7 @@
 #   ./sweep.sh retry [--algorithm ALGO] [--config-version V]
 #   ./sweep.sh status [--algorithm ALGO] [--config-version V]
 #   ./sweep.sh analyze [--export FILE] [--config-version V]
+#   ./sweep.sh report [--algorithm ALGO] [--output-dir DIR] [--config-version V]
 #
 # Examples:
 #   ./sweep.sh run                          # Run wave 1 (default)
@@ -18,6 +19,7 @@
 #   ./sweep.sh retry --algorithm cpql       # Retry failed cpql experiments
 #   ./sweep.sh status                       # Show status of all experiments
 #   ./sweep.sh analyze --export results.json  # Export results to JSON
+#   ./sweep.sh report                       # Generate analysis report with visualizations
 #
 # =============================================================================
 
@@ -46,7 +48,8 @@ usage() {
     echo "  run       Run sweep experiments"
     echo "  retry     Retry failed experiments"
     echo "  status    Show experiment status"
-    echo "  analyze   Analyze and export results"
+    echo "  analyze   Analyze and export results (quick view)"
+    echo "  report    Generate comprehensive analysis report with visualizations"
     echo ""
     echo "Global Options:"
     echo "  --config-version V  Use config version (v1=wave1, v2=wave2, default: v1)"
@@ -65,6 +68,11 @@ usage() {
     echo ""
     echo "Options for 'analyze':"
     echo "  --export FILE     Export results to JSON file"
+    echo "  --algorithm ALGO  Analyze only specified algorithm"
+    echo ""
+    echo "Options for 'report':"
+    echo "  --algorithm ALGO  Generate report for specified algorithm only"
+    echo "  --output-dir DIR  Output directory for report (default: analysis_results)"
     echo ""
     exit 1
 }
@@ -267,7 +275,7 @@ cmd_retry() {
 }
 
 # -----------------------------------------------------------------------------
-# Status Command
+# Status Command (quick overview)
 # -----------------------------------------------------------------------------
 cmd_status() {
     local algorithm=""
@@ -364,15 +372,20 @@ cmd_status() {
 }
 
 # -----------------------------------------------------------------------------
-# Analyze Command
+# Analyze Command (detailed analysis with metrics)
 # -----------------------------------------------------------------------------
 cmd_analyze() {
     local export_file=""
+    local algorithm=""
     
     while [[ $# -gt 0 ]]; do
         case $1 in
             --export)
                 export_file=$2
+                shift 2
+                ;;
+            --algorithm)
+                algorithm=$2
                 shift 2
                 ;;
             --config-version)
@@ -386,12 +399,85 @@ cmd_analyze() {
         esac
     done
     
-    # Show status first
-    cmd_status
+    log_info "Config version: ${CONFIG_VERSION}"
+    local algorithms_to_check=()
+    
+    if [[ -n "$algorithm" ]]; then
+        algorithms_to_check=("$algorithm")
+    else
+        algorithms_to_check=("${ALL_ALGORITHMS[@]}")
+    fi
+    
+    # Detailed analysis with metrics for each algorithm
+    for algo in "${algorithms_to_check[@]}"; do
+        analyze_algorithm_with_metrics "$algo"
+    done
     
     # Export if requested
     if [[ -n "$export_file" ]]; then
         export_results_json "$export_file"
+    fi
+}
+
+# -----------------------------------------------------------------------------
+# Report Command (comprehensive analysis with Python)
+# -----------------------------------------------------------------------------
+cmd_report() {
+    local algorithm=""
+    local output_dir="analysis_results"
+    
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            --algorithm)
+                algorithm=$2
+                shift 2
+                ;;
+            --output-dir)
+                output_dir=$2
+                shift 2
+                ;;
+            --config-version)
+                # Already handled globally, skip
+                shift 2
+                ;;
+            *)
+                log_error "Unknown option: $1"
+                usage
+                ;;
+        esac
+    done
+    
+    log_info "Config version: ${CONFIG_VERSION}"
+    log_info "Generating comprehensive analysis report..."
+    
+    # Build Python command
+    local python_script="${SCRIPT_DIR}/analyze_sweep.py"
+    
+    if [[ ! -f "$python_script" ]]; then
+        log_error "Analysis script not found: ${python_script}"
+        exit 1
+    fi
+    
+    local cmd="python ${python_script}"
+    cmd+=" --sweep-dir ${SWEEP_BASE_DIR}"
+    cmd+=" --config-version ${CONFIG_VERSION}"
+    cmd+=" --output-dir ${output_dir}"
+    
+    if [[ -n "$algorithm" ]]; then
+        cmd+=" --algorithm ${algorithm}"
+    fi
+    
+    log_info "Running: ${cmd}"
+    eval "$cmd"
+    
+    if [[ $? -eq 0 ]]; then
+        log_success "Report generated in ${output_dir}/"
+        log_info "  - analysis_report.md: Main report"
+        log_info "  - analysis_data.json: Raw data"
+        log_info "  - *.png: Visualization figures"
+    else
+        log_error "Report generation failed"
+        exit 1
     fi
 }
 
@@ -418,6 +504,9 @@ main() {
             ;;
         analyze)
             cmd_analyze "$@"
+            ;;
+        report)
+            cmd_report "$@"
             ;;
         help|--help|-h)
             usage

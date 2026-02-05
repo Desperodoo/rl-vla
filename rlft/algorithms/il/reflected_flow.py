@@ -38,7 +38,7 @@ class ReflectedFlowAgent(nn.Module):
         num_flow_steps: int = 20,  # Best from sweep (20 > 10 > 5)
         action_low: float = -1.0,
         action_high: float = 1.0,
-        reflection_mode: Literal["hard", "soft"] = "hard",
+        reflection_mode: Literal["hard", "soft"] = "soft",  # Best from sweep
         boundary_reg_weight: float = 0.01,
         device: str = "cuda",
     ):
