@@ -36,7 +36,7 @@ SWEEP_CONFIGS=(
     # ---------------------------------------------------------------------
     "t_range_tight:--cons_t_min 0.1 --cons_t_max 0.9"
     "t_range_wide:--cons_t_min 0.02 --cons_t_max 0.98"
-    "t_range_full:--cons_full_t_range"
+    "t_range_full:--cons_full_t_range True"
     
     # ---------------------------------------------------------------------
     # 5. Teacher rollout steps

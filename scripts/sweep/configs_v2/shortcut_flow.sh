@@ -48,7 +48,7 @@ SWEEP_CONFIGS=(
     # 6. Teacher configuration
     # ---------------------------------------------------------------------
     "teacher_2step:--sc_teacher_steps 2"
-    "teacher_no_ema:--no-sc_use_ema_teacher"
+    "teacher_no_ema:--sc_use_ema_teacher False"
     
     # ---------------------------------------------------------------------
     # 7. Inference mode and steps

@@ -52,7 +52,7 @@ usage() {
     echo "  report    Generate comprehensive analysis report with visualizations"
     echo ""
     echo "Global Options:"
-    echo "  --config-version V  Use config version (v1=wave1, v2=wave2, default: v1)"
+    echo "  --config-version V  Use config version (v1=wave1, v2=wave2, v3=wave3, default: v1)"
     echo ""
     echo "Options for 'run':"
     echo "  --stage N         Run only stage N (1, 2, or 3)"
@@ -150,6 +150,8 @@ cmd_run() {
         local config_dir="configs"
         if [[ "$CONFIG_VERSION" == "v2" ]]; then
             config_dir="configs_v2"
+        elif [[ "$CONFIG_VERSION" == "v3" ]]; then
+            config_dir="configs_v3"
         fi
         local config_file="${SCRIPT_DIR}/${config_dir}/${algo}.sh"
         if [[ ! -f "$config_file" ]]; then
