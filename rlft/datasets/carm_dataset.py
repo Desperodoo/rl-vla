@@ -9,43 +9,19 @@ import torch
 from torch.utils.data import Dataset
 from typing import Dict, Optional, Callable, List
 from tqdm import tqdm
-from scipy.spatial.transform import Rotation as R
 
 from .data_utils import load_carm_dataset
 
 
 # =============================================================================
-# Pose Transformation Utilities
+# Pose Transformation Utilities (imported from shared module)
 # =============================================================================
 
-def pose_to_transform_matrix(position: np.ndarray, quaternion: np.ndarray) -> np.ndarray:
-    """Convert pose (xyz + quaternion) to 4x4 transformation matrix."""
-    rotation = R.from_quat(quaternion).as_matrix()
-    transform = np.eye(4)
-    transform[:3, :3] = rotation
-    transform[:3, 3] = position
-    return transform
-
-
-def transform_matrix_to_pose(transform: np.ndarray) -> tuple:
-    """Convert 4x4 transformation matrix to pose (xyz + quaternion)."""
-    position = transform[:3, 3]
-    quaternion = R.from_matrix(transform[:3, :3]).as_quat()
-    return position, quaternion
-
-
-def compute_relative_pose_transform(pose_current: np.ndarray, pose_target: np.ndarray) -> np.ndarray:
-    """Compute relative pose transformation from current to target.
-    
-    relative_transform = current_pose^{-1} @ target_pose
-    
-    At inference: target_pose = current_pose @ relative_transform
-    """
-    T_current = pose_to_transform_matrix(pose_current[:3], pose_current[3:7])
-    T_target = pose_to_transform_matrix(pose_target[:3], pose_target[3:7])
-    T_relative = np.linalg.inv(T_current) @ T_target
-    position, quaternion = transform_matrix_to_pose(T_relative)
-    return np.concatenate([position, quaternion])
+from rlft.utils.pose_utils import (
+    pose_to_transform_matrix,
+    transform_matrix_to_pose,
+    compute_relative_pose_transform,
+)
 
 
 # =============================================================================
@@ -114,6 +90,21 @@ class ActionNormalizer:
             data = json.load(f)
         self.mode = data['mode']
         self.stats = {k: np.array(v) for k, v in data['stats'].items()}
+
+    @classmethod
+    def from_checkpoint(cls, ckpt_data: dict) -> 'ActionNormalizer':
+        """Create ActionNormalizer from checkpoint data.
+        
+        Args:
+            ckpt_data: dict with 'mode' and 'stats' keys, as saved by train_carm.py's save_ckpt().
+                       stats values can be lists (from .tolist()) or np.ndarray.
+        
+        Returns:
+            ActionNormalizer with loaded stats.
+        """
+        normalizer = cls(mode=ckpt_data['mode'])
+        normalizer.stats = {k: np.array(v) for k, v in ckpt_data['stats'].items()}
+        return normalizer
 
 
 # =============================================================================

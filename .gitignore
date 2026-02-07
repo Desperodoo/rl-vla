@@ -2,9 +2,9 @@ __pycache__/
 *.pyc
 .venv
 *.npz
-catkin_ws/devel/
-catkin_ws/build/
-catkin_ws/install/
+carm_ros_deploy/devel/
+carm_ros_deploy/build/
+carm_ros_deploy/install/
 runs/
 wandb/
 logs/
@@ -21,3 +21,4 @@ archive/
 timeline_record/
 inference_logs/
 inference_logs_old/
+.pytest_cache/

@@ -8,7 +8,7 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
-CATKIN_WS="$PROJECT_ROOT/catkin_ws"
+CATKIN_WS="$PROJECT_ROOT/carm_ros_deploy"
 
 # 颜色定义
 RED='\033[0;31m'
@@ -49,7 +49,7 @@ pip show catkin_pkg >/dev/null 2>&1 || pip install catkin_pkg
 pip show rospkg >/dev/null 2>&1 || pip install rospkg
 echo -e "${GREEN}✓ catkin 依赖已安装${NC}"
 
-# 创建 catkin_ws 结构（如果不存在）
+# 创建 carm_ros_deploy 目录结构（如果不存在）
 if [ ! -d "$CATKIN_WS/src" ]; then
     echo -e "${YELLOW}创建 catkin 工作空间...${NC}"
     mkdir -p "$CATKIN_WS/src"
@@ -60,13 +60,13 @@ echo -e "${BLUE}检查 ROS 包...${NC}"
 cd "$CATKIN_WS/src"
 
 if [ ! -d "realsense-ros" ]; then
-    echo -e "${RED}错误: realsense-ros 不存在于 catkin_ws/src/${NC}"
+    echo -e "${RED}错误: realsense-ros 不存在于 carm_ros_deploy/src/${NC}"
     exit 1
 fi
 echo -e "${GREEN}✓ realsense-ros${NC}"
 
 if [ ! -d "carm_deploy" ]; then
-    echo -e "${RED}错误: carm_deploy 不存在于 catkin_ws/src/${NC}"
+    echo -e "${RED}错误: carm_deploy 不存在于 carm_ros_deploy/src/${NC}"
     exit 1
 fi
 echo -e "${GREEN}✓ carm_deploy${NC}"
@@ -96,7 +96,14 @@ if [ "$1" == "--clean" ]; then
 fi
 
 # 执行 catkin_make
-catkin_make -DPYTHON_EXECUTABLE=$(which python)
+# arm_control_sdk 位于项目根目录，需要指定 CMAKE_PREFIX_PATH 以供 find_package 查找
+# SDK 自带 Poco v71 (位于 arm_control_sdk/poco/lib)，需要同时加入链接搜索路径
+SDK_DIR="$PROJECT_ROOT/arm_control_sdk"
+SDK_POCO_LIB="$SDK_DIR/poco/lib"
+export LD_LIBRARY_PATH="$SDK_POCO_LIB:$SDK_DIR/lib:${LD_LIBRARY_PATH:-}"
+catkin_make -DPYTHON_EXECUTABLE=$(which python) \
+  -DCMAKE_PREFIX_PATH="$SDK_DIR;$CMAKE_PREFIX_PATH" \
+  -DCMAKE_EXE_LINKER_FLAGS="-L$SDK_POCO_LIB -Wl,-rpath,$SDK_POCO_LIB"
 
 echo -e "${BLUE}================================================${NC}"
 echo -e "${GREEN}  编译完成!${NC}"

@@ -6,7 +6,7 @@
 
 ```
 rl-vla/
-├── catkin_ws/                  # ROS1 工作空间
+├── carm_ros_deploy/            # ROS1 部署工作空间
 │   └── src/
 │       ├── carm_deploy/       # 部署包 (主要模块)
 │       │   ├── core/          # 核心模块 (环境、安全控制)
@@ -20,12 +20,7 @@ rl-vla/
 │       ├── realsense-ros/     # RealSense ROS 驱动
 │       └── carm_api/          # CARM ROS 消息
 │
-├── carm_sdk/                   # CARM SDK (符号链接 → carm_demo/arm_control_sdk)
-│
-├── carm_demo/                  # CARM 官方 SDK (上游参考)
-│   ├── arm_control_sdk/       # SDK 源码
-│   ├── carm_ros/              # ROS1 消息包
-│   └── python/                # Python 示例
+├── arm_control_sdk/            # CARM 机械臂 SDK (库、头文件、Python 绑定)
 │
 ├── scripts/                    # 全局脚本
 │   ├── build_catkin.sh        # catkin 编译脚本
@@ -55,7 +50,7 @@ conda create -n carm python=3.10 -y
 conda activate carm
 
 # 安装 CARM SDK
-pip install carm_sdk/lib/amd64/carm_py-1.0-cp310-cp310-linux_x86_64.whl
+pip install arm_control_sdk/lib/amd64/carm_py-1.0-cp310-cp310-linux_x86_64.whl
 
 # 安装其他依赖
 pip install numpy scipy h5py opencv-python einops pyrealsense2
@@ -72,7 +67,7 @@ source /opt/ros/noetic/setup.bash
 ./scripts/build_catkin.sh
 
 # 加载编译结果
-source catkin_ws/devel/setup.bash
+source carm_ros_deploy/devel/setup.bash
 ```
 
 ### 3. 验证安装
@@ -82,7 +77,7 @@ source catkin_ws/devel/setup.bash
 python -c "import carm_py; print('carm_py OK')"
 
 # 测试机械臂连接
-python catkin_ws/src/carm_deploy/tools/arm_test/test_connection.py
+python carm_ros_deploy/src/carm_deploy/tools/arm_test/test_connection.py
 ```
 
 ### 4. 可选: 设置环境变量
@@ -116,7 +111,7 @@ export RL_VLA_ROOT=/path/to/rl-vla
 ### 调试脚本
 
 ```bash
-cd catkin_ws/src/carm_deploy/tools/arm_test
+cd carm_ros_deploy/src/carm_deploy/tools/arm_test
 
 # 测试连接
 python test_connection.py
@@ -148,7 +143,7 @@ python safe_shutdown.py
 roslaunch carm_deploy camera.launch
 
 # 直接测试 (不需要 ROS)
-python catkin_ws/src/carm_deploy/camera/test_realsense.py
+python carm_ros_deploy/src/carm_deploy/camera/test_realsense.py
 ```
 
 ## 🎯 数据采集
@@ -170,7 +165,7 @@ roslaunch carm_deploy record.launch output_dir:=~/rl-vla/recorded_data
 ### 数据分析
 
 ```bash
-cd catkin_ws/src/carm_deploy/data
+cd carm_ros_deploy/src/carm_deploy/data
 python analyze_dataset.py --data_dir ~/rl-vla/recorded_data/mix
 ```
 
@@ -213,7 +208,7 @@ roslaunch carm_deploy inference.launch pretrain:=/path/to/model.pt
 ### 离线测试
 
 ```bash
-cd catkin_ws/src/carm_deploy/tools
+cd carm_ros_deploy/src/carm_deploy/tools
 python offline_test.py \
     --model_path /path/to/model.pt \
     --data_dir ~/rl-vla/recorded_data/mix \
@@ -234,7 +229,7 @@ python offline_test.py \
 ### 工作空间记录
 
 ```bash
-cd catkin_ws/src/carm_deploy/tools
+cd carm_ros_deploy/src/carm_deploy/tools
 # 拖动示教模式记录安全边界
 python record_workspace.py --output ~/rl-vla/safety_config.json
 ```
@@ -271,7 +266,7 @@ python verify_safety_config.py --config ~/rl-vla/safety_config.json
 ### carm_py 导入失败
 
 ```bash
-pip install --force-reinstall carm_sdk/lib/amd64/carm_py-*.whl
+pip install --force-reinstall arm_control_sdk/lib/amd64/carm_py-*.whl
 ```
 
 ### 机械臂连接失败

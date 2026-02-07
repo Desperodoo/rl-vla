@@ -1,7 +1,0 @@
-.vscode
-build/
-install/
-log/
-devel/
-*.deb
-*.zip

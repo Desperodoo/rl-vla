@@ -45,7 +45,7 @@ from rlft.algorithms.online_rl import SACAgent, AWSCAgent
 from rlft.buffers import OnlineReplayBuffer, OnlineReplayBufferRaw, SMDPChunkCollector, SuccessReplayBuffer
 from rlft.envs import make_eval_envs, evaluate
 from rlft.datasets import ManiSkillDataset, OfflineRLDataset, ActionNormalizer
-from rlft.datasets.data_utils import ObservationStacker
+from rlft.datasets.data_utils import ObservationStacker, encode_observations as _encode_observations_shared
 
 
 @dataclass
@@ -633,28 +633,12 @@ def main():
     obs_stacker.reset(obs)
     
     def encode_observations(stacked_obs):
-        B = stacked_obs["state"].shape[0]
-        T = stacked_obs["state"].shape[1]
-        features = []
-        
-        if include_rgb and visual_encoder is not None:
-            rgb = stacked_obs["rgb"]
-            if isinstance(rgb, np.ndarray):
-                rgb = torch.from_numpy(rgb).to(device)
-            rgb = rgb.contiguous()  # Ensure contiguous memory layout
-            rgb_flat = rgb.reshape(B * T, *rgb.shape[2:]).float() / 255.0
-            if rgb_flat.ndim == 4 and rgb_flat.shape[-1] == 3:
-                rgb_flat = rgb_flat.permute(0, 3, 1, 2).contiguous()
-            visual_feat = visual_encoder(rgb_flat)
-            visual_feat = visual_feat.view(B, T, -1)
-            features.append(visual_feat)
-        
-        state = stacked_obs["state"]
-        if isinstance(state, np.ndarray):
-            state = torch.from_numpy(state).to(device)
-        features.append(state)
-        
-        return torch.cat(features, dim=-1).reshape(B, -1)
+        return _encode_observations_shared(
+            obs_seq=stacked_obs,
+            visual_encoder=visual_encoder,
+            include_rgb=include_rgb,
+            device=device,
+        )
     
     total_steps = 0
     last_eval_step = -args.eval_freq  # Track last eval to handle non-exact intervals
@@ -908,35 +892,33 @@ def main():
             
             if eval_metrics.get("success_once", 0) > best_success_rate:
                 best_success_rate = eval_metrics["success_once"]
-                checkpoint = {
-                    "agent": agent.state_dict(),
-                    "visual_encoder": visual_encoder.state_dict() if visual_encoder else None,
-                    "config": vars(args),
-                }
-                if action_normalizer is not None and action_normalizer.stats is not None:
-                    checkpoint["action_normalizer"] = {
-                        "mode": action_normalizer.mode,
-                        "stats": {k: v.tolist() for k, v in action_normalizer.stats.items()},
-                    }
-                torch.save(checkpoint, f"{log_dir}/checkpoints/best.pt")
+                from rlft.utils.checkpoint import save_checkpoint as _save_ckpt
+                _save_ckpt(
+                    path=f"{log_dir}/checkpoints/best.pt",
+                    agent=agent,
+                    visual_encoder=visual_encoder,
+                    action_normalizer=action_normalizer,
+                    args=args,
+                    save_args_json=False,
+                )
                 print(f"  New best! Saved checkpoint.")
         
         # Save checkpoint
         if total_steps % args.save_freq == 0:
-            checkpoint = {
-                "agent": agent.state_dict(),
-                "visual_encoder": visual_encoder.state_dict() if visual_encoder else None,
-                "actor_optimizer": actor_optimizer.state_dict(),
-                "critic_optimizer": critic_optimizer.state_dict(),
-                "total_steps": total_steps,
-                "config": vars(args),
-            }
-            if action_normalizer is not None and action_normalizer.stats is not None:
-                checkpoint["action_normalizer"] = {
-                    "mode": action_normalizer.mode,
-                    "stats": {k: v.tolist() for k, v in action_normalizer.stats.items()},
-                }
-            torch.save(checkpoint, f"{log_dir}/checkpoints/step_{total_steps}.pt")
+            from rlft.utils.checkpoint import save_checkpoint as _save_ckpt
+            _save_ckpt(
+                path=f"{log_dir}/checkpoints/step_{total_steps}.pt",
+                agent=agent,
+                visual_encoder=visual_encoder,
+                action_normalizer=action_normalizer,
+                args=args,
+                save_args_json=False,
+                extra={
+                    "actor_optimizer": actor_optimizer.state_dict(),
+                    "critic_optimizer": critic_optimizer.state_dict(),
+                },
+                total_steps=total_steps,
+            )
         
         pbar.set_postfix({
             "success": f"{np.mean(episode_successes[-100:]) if episode_successes else 0:.2%}",
@@ -946,17 +928,15 @@ def main():
     pbar.close()
     
     # Final save
-    checkpoint = {
-        "agent": agent.state_dict(),
-        "visual_encoder": visual_encoder.state_dict() if visual_encoder else None,
-        "config": vars(args),
-    }
-    if action_normalizer is not None and action_normalizer.stats is not None:
-        checkpoint["action_normalizer"] = {
-            "mode": action_normalizer.mode,
-            "stats": {k: v.tolist() for k, v in action_normalizer.stats.items()},
-        }
-    torch.save(checkpoint, f"{log_dir}/checkpoints/final.pt")
+    from rlft.utils.checkpoint import save_checkpoint as _save_ckpt
+    _save_ckpt(
+        path=f"{log_dir}/checkpoints/final.pt",
+        agent=agent,
+        visual_encoder=visual_encoder,
+        action_normalizer=action_normalizer,
+        args=args,
+        save_args_json=False,
+    )
     
     train_envs.close()
     eval_envs.close()

@@ -467,3 +467,5 @@ class ShortCutFlowAgent(nn.Module):
         if self.action_bounds is not None:
             x = torch.clamp(x, self.action_bounds[0], self.action_bounds[1])
         
+        self.velocity_net.train()
+        return x

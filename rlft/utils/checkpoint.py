@@ -1,103 +1,203 @@
 """
-Checkpoint Utilities.
+Checkpoint Utilities for CARM / ManiSkill Training.
+
+Provides ``save_checkpoint`` and ``build_checkpoint`` to standardize the
+checkpoint schema across offline IL, offline RL, and online RL pipelines.
+
+Canonical checkpoint schema::
+
+    {
+        # Required – model weights
+        "agent":            state_dict,
+        "ema_agent":        state_dict | None,
+        "visual_encoder":   state_dict | None,
+
+        # Optional – CARM-specific components
+        "state_encoder":    state_dict | None,
+        "gripper_head":     state_dict | None,
+
+        # Optional – action normalization
+        "action_normalizer": {"mode": str, "stats": {...}} | None,
+
+        # Optional – optimizer / scheduler state (for resume)
+        "optimizer":        state_dict | None,
+        "lr_scheduler":     state_dict | None,
+        "ema":              state_dict | None,
+
+        # Optional – progress tracking
+        "iteration":        int | None,
+        "total_steps":      int | None,
+
+        # Optional – full training config
+        "config":           dict | None,
+    }
 """
 
+from __future__ import annotations
+
+import json
 import os
+from typing import Any, Dict, Optional
+
 import torch
-from typing import Dict, Any, Optional
+import torch.nn as nn
+
+
+def build_checkpoint(
+    agent: nn.Module,
+    visual_encoder: Optional[nn.Module] = None,
+    *,
+    ema_agent: Optional[nn.Module] = None,
+    state_encoder: Optional[nn.Module] = None,
+    gripper_head: Optional[nn.Module] = None,
+    action_normalizer: Any = None,
+    optimizer: Optional[torch.optim.Optimizer] = None,
+    lr_scheduler: Any = None,
+    ema: Any = None,
+    iteration: Optional[int] = None,
+    total_steps: Optional[int] = None,
+    config: Optional[dict] = None,
+    extra: Optional[Dict[str, Any]] = None,
+) -> dict:
+    """Build a checkpoint dictionary following the canonical schema.
+
+    Only non-None components are included (except ``agent`` which is always
+    present).
+
+    Args:
+        agent: The policy agent (required).
+        visual_encoder: Visual feature encoder.
+        ema_agent: Exponential moving average copy of agent.
+        state_encoder: State encoder MLP (CARM).
+        gripper_head: Discrete gripper classification head (CARM).
+        action_normalizer: ``ActionNormalizer`` instance with ``.mode`` and
+            ``.stats`` attributes.
+        optimizer: Optimizer for training resume.
+        lr_scheduler: LR scheduler for training resume.
+        ema: ``EMAModel`` instance for training resume.
+        iteration: Current training iteration number.
+        total_steps: Current total environment steps (online RL).
+        config: Full training configuration dict (e.g. ``vars(args)``).
+        extra: Any additional key-value pairs to include.
+
+    Returns:
+        Checkpoint dictionary ready for ``torch.save``.
+    """
+    ckpt: Dict[str, Any] = {
+        "agent": agent.state_dict(),
+    }
+
+    # Optional model components
+    if ema_agent is not None:
+        ckpt["ema_agent"] = ema_agent.state_dict()
+    if visual_encoder is not None:
+        ckpt["visual_encoder"] = visual_encoder.state_dict()
+    if state_encoder is not None:
+        ckpt["state_encoder"] = state_encoder.state_dict()
+    if gripper_head is not None:
+        ckpt["gripper_head"] = gripper_head.state_dict()
+
+    # Action normalizer
+    if action_normalizer is not None and getattr(action_normalizer, "stats", None) is not None:
+        import numpy as np
+        ckpt["action_normalizer"] = {
+            "mode": action_normalizer.mode,
+            "stats": {
+                k: v.tolist() if isinstance(v, np.ndarray) else v
+                for k, v in action_normalizer.stats.items()
+            },
+        }
+
+    # Optimizer / scheduler / EMA state
+    if optimizer is not None:
+        ckpt["optimizer"] = optimizer.state_dict()
+    if lr_scheduler is not None:
+        ckpt["lr_scheduler"] = lr_scheduler.state_dict()
+    if ema is not None:
+        ckpt["ema"] = ema.state_dict()
+
+    # Progress
+    if iteration is not None:
+        ckpt["iteration"] = iteration
+    if total_steps is not None:
+        ckpt["total_steps"] = total_steps
+
+    # Config
+    if config is not None:
+        ckpt["config"] = config
+
+    # Extra
+    if extra:
+        ckpt.update(extra)
+
+    return ckpt
 
 
 def save_checkpoint(
     path: str,
-    model: torch.nn.Module,
-    optimizer: Optional[torch.optim.Optimizer] = None,
-    scheduler: Optional[Any] = None,
-    ema_model: Optional[Any] = None,
-    step: int = 0,
-    epoch: int = 0,
-    metrics: Optional[Dict[str, Any]] = None,
-    config: Optional[Dict[str, Any]] = None,
-):
-    """Save training checkpoint.
-    
-    Args:
-        path: Path to save checkpoint
-        model: Model to save
-        optimizer: Optional optimizer state
-        scheduler: Optional scheduler state
-        ema_model: Optional EMA model
-        step: Current training step
-        epoch: Current training epoch
-        metrics: Optional metrics to save
-        config: Optional config to save
-    """
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    
-    checkpoint = {
-        "model_state_dict": model.state_dict(),
-        "step": step,
-        "epoch": epoch,
-    }
-    
-    if optimizer is not None:
-        checkpoint["optimizer_state_dict"] = optimizer.state_dict()
-    
-    if scheduler is not None:
-        checkpoint["scheduler_state_dict"] = scheduler.state_dict()
-    
-    if ema_model is not None:
-        checkpoint["ema_state_dict"] = ema_model.state_dict()
-    
-    if metrics is not None:
-        checkpoint["metrics"] = metrics
-    
-    if config is not None:
-        checkpoint["config"] = config
-    
-    torch.save(checkpoint, path)
-    print(f"Checkpoint saved to {path}")
+    agent: nn.Module,
+    visual_encoder: Optional[nn.Module] = None,
+    *,
+    args: Any = None,
+    action_normalizer: Any = None,
+    save_args_json: bool = True,
+    save_normalizer_json: bool = True,
+    **kwargs: Any,
+) -> str:
+    """Build a checkpoint, save it, and optionally write sidecar JSON files.
 
+    This is a convenience wrapper around :func:`build_checkpoint` that also:
 
-def load_checkpoint(
-    path: str,
-    model: torch.nn.Module,
-    optimizer: Optional[torch.optim.Optimizer] = None,
-    scheduler: Optional[Any] = None,
-    ema_model: Optional[Any] = None,
-    device: str = "cuda",
-    strict: bool = True,
-) -> Dict[str, Any]:
-    """Load training checkpoint.
-    
+    - Saves ``args.json`` next to the checkpoint (if *args* is provided).
+    - Saves ``action_normalizer.json`` next to the checkpoint (if normalizer
+      has stats).
+
     Args:
-        path: Path to checkpoint
-        model: Model to load state into
-        optimizer: Optional optimizer to load state into
-        scheduler: Optional scheduler to load state into
-        ema_model: Optional EMA model to load state into
-        device: Device to load to
-        strict: Whether to enforce strict state dict loading
-        
+        path: Full file path for the ``.pt`` checkpoint.
+        agent: The policy agent.
+        visual_encoder: Visual feature encoder.
+        args: Training args (namespace or dataclass).  Converted to dict with
+            ``vars()`` for the ``config`` field.
+        action_normalizer: ``ActionNormalizer`` instance.
+        save_args_json: Write ``args.json`` beside the checkpoint.
+        save_normalizer_json: Write ``action_normalizer.json`` beside the
+            checkpoint.
+        **kwargs: Forwarded to :func:`build_checkpoint`.
+
     Returns:
-        Checkpoint dict with additional metadata (step, epoch, metrics, config)
+        The *path* that was saved to.
     """
-    print(f"Loading checkpoint from {path}")
-    checkpoint = torch.load(path, map_location=device)
-    
-    model.load_state_dict(checkpoint["model_state_dict"], strict=strict)
-    
-    if optimizer is not None and "optimizer_state_dict" in checkpoint:
-        optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-    
-    if scheduler is not None and "scheduler_state_dict" in checkpoint:
-        scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
-    
-    if ema_model is not None and "ema_state_dict" in checkpoint:
-        ema_model.load_state_dict(checkpoint["ema_state_dict"])
-    
-    return {
-        "step": checkpoint.get("step", 0),
-        "epoch": checkpoint.get("epoch", 0),
-        "metrics": checkpoint.get("metrics", {}),
-        "config": checkpoint.get("config", {}),
-    }
+    checkpoint_dir = os.path.dirname(path)
+    os.makedirs(checkpoint_dir, exist_ok=True)
+
+    config = None
+    if args is not None:
+        config = {
+            k: v if not isinstance(v, (list, tuple)) or not any(isinstance(x, type) for x in v) else str(v)
+            for k, v in vars(args).items()
+        }
+
+    ckpt = build_checkpoint(
+        agent=agent,
+        visual_encoder=visual_encoder,
+        action_normalizer=action_normalizer,
+        config=config,
+        **kwargs,
+    )
+    torch.save(ckpt, path)
+
+    # Sidecar: args.json
+    if save_args_json and config is not None:
+        args_path = os.path.join(checkpoint_dir, "args.json")
+        with open(args_path, "w") as f:
+            json.dump(config, f, indent=2, default=str)
+
+    # Sidecar: action_normalizer.json
+    if (
+        save_normalizer_json
+        and action_normalizer is not None
+        and getattr(action_normalizer, "stats", None) is not None
+    ):
+        action_normalizer.save(os.path.join(checkpoint_dir, "action_normalizer.json"))
+
+    return path

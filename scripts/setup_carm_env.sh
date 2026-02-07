@@ -22,8 +22,8 @@ SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 RL_VLA_ROOT="$( cd "$SCRIPT_DIR/.." && pwd )"
 
 # 设置 CARM SDK 库路径
-CARM_SDK_LIB="$RL_VLA_ROOT/carm_demo/arm_control_sdk/lib"
-CARM_POCO_LIB="$RL_VLA_ROOT/carm_demo/arm_control_sdk/poco/lib"
+CARM_SDK_LIB="$RL_VLA_ROOT/arm_control_sdk/lib"
+CARM_POCO_LIB="$RL_VLA_ROOT/arm_control_sdk/poco/lib"
 
 # 添加到 LD_LIBRARY_PATH（避免重复添加）
 if [[ ":$LD_LIBRARY_PATH:" != *":$CARM_SDK_LIB:"* ]]; then
@@ -39,8 +39,8 @@ if [ -f /opt/ros/noetic/setup.bash ]; then
     source /opt/ros/noetic/setup.bash
 fi
 
-if [ -f "$RL_VLA_ROOT/catkin_ws/devel/setup.bash" ]; then
-    source "$RL_VLA_ROOT/catkin_ws/devel/setup.bash"
+if [ -f "$RL_VLA_ROOT/carm_ros_deploy/devel/setup.bash" ]; then
+    source "$RL_VLA_ROOT/carm_ros_deploy/devel/setup.bash"
 fi
 
 # 激活 conda 环境

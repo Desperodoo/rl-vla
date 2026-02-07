@@ -47,7 +47,7 @@ from rlft.algorithms import (
     CPQLAgent, AWCPAgent, AWShortCutFlowAgent,
 )
 from rlft.datasets import OfflineRLDataset, IterationBasedBatchSampler, worker_init_fn, ActionNormalizer
-from rlft.datasets.data_utils import build_state_obs_extractor, create_obs_process_fn
+from rlft.datasets.data_utils import build_state_obs_extractor, create_obs_process_fn, encode_observations as _encode_observations_shared
 
 
 @dataclass
@@ -554,20 +554,16 @@ def create_agent(algorithm: str, action_dim: int, global_cond_dim: int, args):
 
 
 def save_ckpt(run_name, tag, agent, ema_agent, visual_encoder, action_normalizer=None):
-    """Save checkpoint."""
-    os.makedirs(f"runs/{run_name}/checkpoints", exist_ok=True)
-    checkpoint = {
-        "agent": agent.state_dict(),
-        "ema_agent": ema_agent.state_dict() if ema_agent else None,
-    }
-    if visual_encoder is not None:
-        checkpoint["visual_encoder"] = visual_encoder.state_dict()
-    if action_normalizer is not None and action_normalizer.stats is not None:
-        checkpoint["action_normalizer"] = {
-            "mode": action_normalizer.mode,
-            "stats": {k: v.tolist() for k, v in action_normalizer.stats.items()},
-        }
-    torch.save(checkpoint, f"runs/{run_name}/checkpoints/{tag}.pt")
+    """Save checkpoint using shared utility."""
+    from rlft.utils.checkpoint import save_checkpoint
+    save_checkpoint(
+        path=f"runs/{run_name}/checkpoints/{tag}.pt",
+        agent=agent,
+        visual_encoder=visual_encoder,
+        ema_agent=ema_agent,
+        action_normalizer=action_normalizer,
+        save_args_json=False,
+    )
 
 
 def main():
@@ -818,38 +814,15 @@ def main():
     best_eval_metrics = defaultdict(float)
     
     def encode_observations(obs_seq):
-        """Encode observations to get obs_features.
-        
-        Handles RGB-only and RGBD modes:
-        - RGB: rgb / 255.0
-        - RGBD: concat(rgb / 255.0, depth / 1024.0)
-        """
-        B = obs_seq["state"].shape[0]
-        T = obs_seq["state"].shape[1]
-        
-        features_list = []
-        
-        if visual_encoder is not None and "rgb" in obs_seq:
-            rgb = obs_seq["rgb"]
-            rgb_flat = rgb.view(B * T, *rgb.shape[2:]).float() / 255.0
-            
-            # If depth is available, concatenate it
-            if include_depth and "depth" in obs_seq:
-                depth = obs_seq["depth"]
-                depth_flat = depth.view(B * T, *depth.shape[2:]).float() / 1024.0
-                visual_input = torch.cat([rgb_flat, depth_flat], dim=1)  # Concat along channel dim
-            else:
-                visual_input = rgb_flat
-            
-            visual_feat = visual_encoder(visual_input)
-            visual_feat = visual_feat.view(B, T, -1)
-            features_list.append(visual_feat)
-        
-        state = obs_seq["state"]
-        features_list.append(state)
-        
-        obs_features = torch.cat(features_list, dim=-1)
-        return obs_features
+        """Thin wrapper around shared encode_observations."""
+        return _encode_observations_shared(
+            obs_seq=obs_seq,
+            visual_encoder=visual_encoder,
+            include_rgb=True,
+            device=device,
+            include_depth=include_depth,
+            flatten=False,
+        )
     
     # Training loop
     agent.train()

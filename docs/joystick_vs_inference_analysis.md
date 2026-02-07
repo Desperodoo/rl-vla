@@ -9,7 +9,7 @@
 
 | 维度 | joystick.py (手柄遥操) | inference_ros.py (模型推理) |
 |------|------------------------|----------------------------|
-| **文件位置** | `archive/carm_backend/server/basic/joystick.py` | `catkin_ws/src/carm_deploy/inference/inference_ros.py` |
+| **文件位置** | `archive/carm_backend/server/basic/joystick.py` | `carm_ros_deploy/src/carm_deploy/inference/inference_ros.py` |
 | **动作来源** | VR手柄传感器实时数据 | 神经网络策略模型推理 |
 | **控制频率** | 50Hz | 推理30Hz + 控制200Hz (双线程) |
 | **核心类** | `CommandController` | `InferenceNode` + `RealPolicy` |
@@ -21,7 +21,7 @@
 ### 2.1 inference_ros.py 的方法
 
 ```python
-# 文件: catkin_ws/src/carm_deploy/inference/inference_ros.py
+# 文件: carm_ros_deploy/src/carm_deploy/inference/inference_ros.py
 
 def apply_relative_transform(relative_pose, current_pose, gripper):
     """

@@ -535,20 +535,30 @@ def encode_observations(
     visual_encoder: Optional[nn.Module],
     include_rgb: bool,
     device: torch.device,
+    state_encoder: Optional[nn.Module] = None,
+    include_depth: bool = False,
+    flatten: bool = True,
 ) -> torch.Tensor:
     """Encode observation sequence to get conditioning features.
     
-    Unified function for encoding observations across all training pipelines.
-    Supports both NCHW (offline data) and NHWC (online environment) input formats.
+    Unified function for encoding observations across all training and inference
+    pipelines.  Supports both NCHW (offline data) and NHWC (online environment)
+    input formats, optional state encoder, and optional depth channel.
     
     Args:
-        obs_seq: Dict with 'state' and optionally 'rgb' observations
-        visual_encoder: Visual encoder module (can be None for state-only)
-        include_rgb: Whether to include RGB in observations
-        device: Device for output tensor
+        obs_seq: Dict with 'state' and optionally 'rgb' / 'depth' observations.
+        visual_encoder: Visual encoder module (can be None for state-only).
+        include_rgb: Whether to include RGB in observations.
+        device: Device for output tensor.
+        state_encoder: Optional state encoder (MLP).  When provided, raw state
+            is encoded through it; otherwise raw state is used directly.
+        include_depth: Whether to include depth channel (concat with RGB).
+        flatten: If True (default) return [B, T*(visual+state)]; else [B, T, D].
         
     Returns:
-        Flattened observation conditioning tensor [B, T * (visual_dim + state_dim)]
+        Observation conditioning tensor.
+        - If *flatten* is True:  [B, T * (visual_dim + state_dim)]
+        - If *flatten* is False: [B, T, visual_dim + state_dim]
     """
     state = obs_seq["state"]
     if isinstance(state, np.ndarray):
@@ -577,12 +587,32 @@ def encode_observations(
         if rgb_flat.max() > 1.0:
             rgb_flat = rgb_flat / 255.0
         
-        visual_feat = visual_encoder(rgb_flat)
+        # Optional depth concat
+        if include_depth and "depth" in obs_seq:
+            depth = obs_seq["depth"]
+            if isinstance(depth, np.ndarray):
+                depth = torch.from_numpy(depth)
+            depth = depth.to(device)
+            depth_flat = depth.reshape(B * T, *depth.shape[2:]).float() / 1024.0
+            visual_input = torch.cat([rgb_flat, depth_flat], dim=1)
+        else:
+            visual_input = rgb_flat
+        
+        visual_feat = visual_encoder(visual_input)
         visual_feat = visual_feat.view(B, T, -1)
         features_list.append(visual_feat)
     
-    features_list.append(state)
-    obs_features = torch.cat(features_list, dim=-1)
-    obs_cond = obs_features.reshape(B, -1)
+    # State features (with optional state encoder)
+    if state_encoder is not None:
+        state_flat = state.view(B * T, -1)
+        state_feat = state_encoder(state_flat)
+        state_feat = state_feat.view(B, T, -1)
+    else:
+        state_feat = state
+    features_list.append(state_feat)
     
-    return obs_cond
+    obs_features = torch.cat(features_list, dim=-1)
+    
+    if flatten:
+        return obs_features.reshape(B, -1)
+    return obs_features
