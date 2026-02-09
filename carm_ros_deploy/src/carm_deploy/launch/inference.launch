@@ -34,7 +34,7 @@
   <arg name="pretrain" default=""/>
   <arg name="desire_inference_freq" default="30"/>
   <arg name="temporal_factor_k" default="0.05"/>
-  <arg name="safety_config" default="$(env HOME)/rl-vla/safety_config.json"/>
+  <arg name="safety_config" default="$(find carm_deploy)/safety_config.json"/>
   
   <!-- 控制参数 -->
   <arg name="pos_lookahead_step" default="1"/>

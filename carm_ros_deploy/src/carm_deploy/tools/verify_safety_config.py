@@ -10,9 +10,9 @@ Safety Config 验证脚本
     - 测试时会缓慢移动到边界附近，不会超出限制
 
 用法:
-    python verify_safety_config.py --config ~/rl-vla/safety_config.json
-    python verify_safety_config.py --config ~/rl-vla/safety_config.json --test_mode visual  # 仅可视化
-    python verify_safety_config.py --config ~/rl-vla/safety_config.json --test_mode boundary  # 边界测试
+    python verify_safety_config.py --config /path/to/carm_deploy/safety_config.json
+    python verify_safety_config.py --config /path/to/carm_deploy/safety_config.json --test_mode visual  # 仅可视化
+    python verify_safety_config.py --config /path/to/carm_deploy/safety_config.json --test_mode boundary  # 边界测试
 """
 
 import os
@@ -480,8 +480,8 @@ class SafetyConfigVerifier:
 
 def main():
     parser = argparse.ArgumentParser(description='Safety Config 验证工具')
-    parser.add_argument('--config', '-c', type=str, default='~/rl-vla/safety_config.json',
-                        help='安全配置文件路径')
+    parser.add_argument('--config', '-c', type=str, default='',
+                        help='安全配置文件路径 (default: carm_deploy/safety_config.json)')
     parser.add_argument('--robot_ip', type=str, default='10.42.0.101',
                         help='机械臂 IP 地址')
     parser.add_argument('--test_mode', type=str, choices=['visual', 'boundary', 'check'],
@@ -489,6 +489,10 @@ def main():
                         help='测试模式: visual=实时可视化, boundary=边界测试, check=仅检查当前位置')
     
     args = parser.parse_args()
+
+    if not args.config:
+        carm_deploy_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        args.config = os.path.join(carm_deploy_root, 'safety_config.json')
     
     # 创建验证器
     verifier = SafetyConfigVerifier(args.config, args.robot_ip)

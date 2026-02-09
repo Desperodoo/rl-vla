@@ -92,8 +92,9 @@ def get_safety_config_path() -> str:
     Returns:
         安全配置文件绝对路径
     """
-    root = get_rl_vla_root()
-    return os.path.join(root, 'safety_config.json')
+    # 当前文件在 carm_deploy/utils 目录下
+    carm_deploy_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(carm_deploy_root, 'safety_config.json')
 
 
 def get_training_runs_dir() -> str:

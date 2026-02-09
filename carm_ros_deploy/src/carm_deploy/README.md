@@ -136,13 +136,13 @@ rosrun carm_deploy inference_ros.py --pretrain /path/to/model.pt --slow_mode
 
 ```bash
 # 使用 launch 文件
-roslaunch carm_deploy inference.launch pretrain:=/path/to/model.pt safety_config:=~/rl-vla/safety_config.json
+roslaunch carm_deploy inference.launch pretrain:=/path/to/model.pt safety_config:=$(find carm_deploy)/safety_config.json
 
 # 或直接运行
-rosrun carm_deploy inference_ros.py --pretrain /path/to/model.pt --safety_config ~/rl-vla/safety_config.json
+rosrun carm_deploy inference_ros.py --pretrain /path/to/model.pt --safety_config ~/rl-vla/carm_ros_deploy/src/carm_deploy/safety_config.json
 ```
 
-> 推理必须提供 `safety_config.json`，默认路径为 `~/rl-vla/safety_config.json`。
+> 推理必须提供 `safety_config.json`，默认路径为 `carm_deploy/safety_config.json`。
 
 ### 离线测试
 
@@ -160,14 +160,14 @@ python tools/offline_test.py \
 
 ```bash
 # 拖动示教模式记录安全边界
-python tools/record_workspace.py --output ~/rl-vla/safety_config.json
+python tools/record_workspace.py --output ~/rl-vla/carm_ros_deploy/src/carm_deploy/safety_config.json
 ```
 
 ### 安全配置验证
 
 ```bash
 # 验证安全配置
-python tools/verify_safety_config.py --config ~/rl-vla/safety_config.json
+python tools/verify_safety_config.py --config ~/rl-vla/carm_ros_deploy/src/carm_deploy/safety_config.json
 ```
 
 ## 🔧 机械臂调试

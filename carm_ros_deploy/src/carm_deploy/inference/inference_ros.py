@@ -1200,9 +1200,9 @@ def main():
     if isinstance(config.get('arm_init_gripper'), str):
         config['arm_init_gripper'] = float(config['arm_init_gripper'])
 
-    # 安全配置：默认使用仓库根目录 safety_config.json，且必须存在
+    # 安全配置：默认使用 carm_deploy 目录下的 safety_config.json，且必须存在
     if not config.get('safety_config'):
-        default_safety = os.path.join(rl_vla_root, 'safety_config.json')
+        default_safety = os.path.join(carm_deploy_root, 'safety_config.json')
         config['safety_config'] = default_safety
     config['safety_config'] = os.path.expandvars(os.path.expanduser(config['safety_config']))
     if not os.path.exists(config['safety_config']):

@@ -53,7 +53,7 @@
     "chunk_time_base": "sys_time"
   },
   "safety": {
-    "config_path": "/path/to/safety_config.json",
+    "config_path": "/path/to/carm_deploy/safety_config.json",
     "check_workspace": true,
     "max_relative_translation": 0.1
   },

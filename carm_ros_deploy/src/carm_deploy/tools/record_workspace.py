@@ -6,13 +6,13 @@ CARM 安全操作空间记录工具
 脚本实时记录边界点，自动计算安全限位并保存到 JSON 配置文件。
 
 使用方法:
-    1. 运行脚本: python record_workspace.py --output safety_config.json
+    1. 运行脚本: python record_workspace.py --output /path/to/carm_deploy/safety_config.json
     2. 机械臂将进入拖动模式，可以手动拖动
     3. 拖动机械臂覆盖整个工作空间
     4. 按 's' 保存配置，按 'r' 重置，按 'q' 退出
 
 输出配置文件可用于 inference_ros.py:
-    rosrun carm_deploy inference_ros.py --safety_config /path/to/safety_config.json
+    rosrun carm_deploy inference_ros.py --safety_config /path/to/carm_deploy/safety_config.json
 """
 
 import argparse
@@ -456,8 +456,8 @@ def parse_args():
     parser = argparse.ArgumentParser(description='CARM Workspace Recorder')
     parser.add_argument('--robot_ip', type=str, default='10.42.0.101',
                         help='Robot IP address')
-    parser.add_argument('--output', '-o', type=str, default='~/rl-vla/safety_config.json',
-                        help='Output configuration file path')
+    parser.add_argument('--output', '-o', type=str, default='',
+                        help='Output configuration file path (default: carm_deploy/safety_config.json)')
     parser.add_argument('--margin', type=float, default=0.05,
                         help='Safety margin (0.05 = 5%%)')
     return parser.parse_args()
@@ -465,8 +465,12 @@ def parse_args():
 
 def main():
     args = parse_args()
-    
-    output_path = os.path.expanduser(args.output)
+
+    if args.output:
+        output_path = os.path.expanduser(args.output)
+    else:
+        carm_deploy_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        output_path = os.path.join(carm_deploy_root, 'safety_config.json')
     
     print("=" * 60)
     print("CARM Workspace Recorder")

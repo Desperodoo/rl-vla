@@ -16,7 +16,8 @@ rl-vla/
 │       │   ├── utils/         # 工具模块
 │       │   ├── camera/        # 相机工具
 │       │   ├── config/        # 配置文件
-│       │   └── launch/        # Launch 文件
+│       │   ├── launch/        # Launch 文件
+│       │   └── safety_config.json  # 安全配置文件
 │       ├── realsense-ros/     # RealSense ROS 驱动
 │       └── carm_api/          # CARM ROS 消息
 │
@@ -37,7 +38,7 @@ rl-vla/
 │   ├── act/                   # ACT 算法
 │   └── ppo/                   # PPO 算法
 │
-└── safety_config.json          # 安全配置文件
+
 ```
 
 ## 🚀 快速开始
@@ -231,13 +232,13 @@ python offline_test.py \
 ```bash
 cd carm_ros_deploy/src/carm_deploy/tools
 # 拖动示教模式记录安全边界
-python record_workspace.py --output ~/rl-vla/safety_config.json
+python record_workspace.py --output ~/rl-vla/carm_ros_deploy/src/carm_deploy/safety_config.json
 ```
 
 ### 安全配置验证
 
 ```bash
-python verify_safety_config.py --config ~/rl-vla/safety_config.json
+python verify_safety_config.py --config ~/rl-vla/carm_ros_deploy/src/carm_deploy/safety_config.json
 ```
 
 ## 📖 模块说明
