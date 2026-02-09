@@ -1327,15 +1327,15 @@ def main():
     
     parser.add_argument(
         "--sweep-dir", "-d",
-        default="runs/maniskill_sweep",
-        help="Directory containing sweep experiments"
+        default=None,
+        help="Directory containing sweep experiments (default: auto by config-version)"
     )
     
     parser.add_argument(
         "--config-version", "-v",
         default="v2",
-        choices=["v1", "v2"],
-        help="Config version (v1=wave1, v2=wave2)"
+        choices=["v1", "v2", "v3"],
+        help="Config version (v1=wave1, v2=wave2, v3=wave3)"
     )
     
     parser.add_argument(
@@ -1356,6 +1356,13 @@ def main():
     )
     
     args = parser.parse_args()
+    
+    # Set sweep-dir based on config-version if not specified
+    if args.sweep_dir is None:
+        if args.config_version == "v3":
+            args.sweep_dir = "runs/maniskill_sweep_v3"
+        else:
+            args.sweep_dir = "runs/maniskill_sweep"
     
     # Set output-dir based on sweep-dir if not specified
     if args.output_dir is None:

@@ -28,7 +28,7 @@ class ConsistencyFlowAgent(nn.Module):
         num_flow_steps: Number of ODE integration steps (default: 10)
         flow_weight: Weight for flow matching loss (default: 1.0)
         consistency_weight: Weight for consistency loss (default: 1.0)
-        ema_decay: Decay rate for EMA velocity network (default: 0.999)
+        ema_decay: Decay rate for EMA velocity network (default: 0.9995)
         cons_use_flow_t: Reuse flow t for consistency (default: False)
         cons_full_t_range: Use full t range [0,1] (default: False)
         cons_t_min: Minimum t for consistency (default: 0.05)
@@ -37,7 +37,7 @@ class ConsistencyFlowAgent(nn.Module):
         cons_delta_mode: Delta sampling mode (default: "random")
         cons_delta_min: Minimum delta (default: 0.02)
         cons_delta_max: Maximum delta (default: 0.15)
-        cons_delta_fixed: Fixed delta value (default: 0.01)
+        cons_delta_fixed: Fixed delta value (default: 0.03)
         cons_delta_dynamic_max: Dynamic delta cap (default: False)
         cons_delta_cap: Cap value for dynamic delta (default: 0.99)
         teacher_steps: Teacher rollout steps (default: 2)
@@ -57,7 +57,7 @@ class ConsistencyFlowAgent(nn.Module):
         num_flow_steps: int = 20,  # Best from sweep (20 > 10 > 5)
         flow_weight: float = 1.0,
         consistency_weight: float = 1.0,
-        ema_decay: float = 0.999,
+        ema_decay: float = 0.9995,  # Best from wave3 (0.9995 > 0.999)
         consistency_delta: float = 0.01,  # Kept for API compatibility
         # Consistency design toggles
         cons_use_flow_t: bool = False,
@@ -68,7 +68,7 @@ class ConsistencyFlowAgent(nn.Module):
         cons_delta_mode: Literal["random", "fixed"] = "fixed",  # Best from sweep
         cons_delta_min: float = 0.02,
         cons_delta_max: float = 0.15,
-        cons_delta_fixed: float = 0.04,  # Best from sweep (0.04 > 0.02)
+        cons_delta_fixed: float = 0.03,  # Best from wave3 (0.03 > 0.04)
         cons_delta_dynamic_max: bool = False,
         cons_delta_cap: float = 0.99,
         teacher_steps: int = 2,

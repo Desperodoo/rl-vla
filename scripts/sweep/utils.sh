@@ -421,6 +421,8 @@ analyze_algorithm_with_metrics() {
     local config_dir="configs"
     if [[ "$CONFIG_VERSION" == "v2" ]]; then
         config_dir="configs_v2"
+    elif [[ "$CONFIG_VERSION" == "v3" ]]; then
+        config_dir="configs_v3"
     fi
     local config_file="${SCRIPT_DIR}/${config_dir}/${algorithm}.sh"
     
@@ -544,6 +546,8 @@ export_results_json() {
     local config_dir="configs"
     if [[ "$CONFIG_VERSION" == "v2" ]]; then
         config_dir="configs_v2"
+    elif [[ "$CONFIG_VERSION" == "v3" ]]; then
+        config_dir="configs_v3"
     fi
     
     echo "{" > "$output_file"

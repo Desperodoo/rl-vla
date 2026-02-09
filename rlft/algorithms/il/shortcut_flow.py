@@ -49,7 +49,7 @@ class ShortCutFlowAgent(nn.Module):
         max_denoising_steps: int = 8,
         self_consistency_k: float = 0.25,  # Fraction of batch for consistency
         flow_weight: float = 1.0,  # Best from sweep: weights_1.0_1.0
-        shortcut_weight: float = 1.0,  # Best from sweep: equal weight
+        shortcut_weight: float = 0.5,  # Best from wave3: cw=0.5 (sensitivity)
         ema_decay: float = 0.999,
         # Time sampling hyperparameters
         t_min: float = 0.0,

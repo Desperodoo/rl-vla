@@ -450,14 +450,38 @@ cmd_analyze() {
         algorithms_to_check=("${ALL_ALGORITHMS[@]}")
     fi
     
-    # Detailed analysis with metrics for each algorithm
+    # Create analysis output directory
+    local analysis_dir="${SWEEP_BASE_DIR}/analysis_results"
+    mkdir -p "$analysis_dir"
+    
+    # Detailed analysis with metrics for each algorithm (tee to file)
+    local summary_file="${analysis_dir}/analyze_summary.txt"
+    {
+        echo "Sweep Analysis Summary"
+        echo "Config version: ${CONFIG_VERSION}"
+        echo "Date: $(date -Iseconds)"
+        echo "Sweep dir: ${SWEEP_BASE_DIR}"
+        echo ""
+    } > "$summary_file"
+    
     for algo in "${algorithms_to_check[@]}"; do
-        analyze_algorithm_with_metrics "$algo"
+        analyze_algorithm_with_metrics "$algo" | tee -a "$summary_file"
     done
     
-    # Export if requested
+    # Strip ANSI color codes from saved file
+    sed -i 's/\x1b\[[0-9;]*m//g' "$summary_file"
+    
+    # Always export JSON to analysis dir
+    local auto_export="${analysis_dir}/sweep_results.json"
+    export_results_json "$auto_export"
+    log_success "Results saved to ${analysis_dir}/"
+    log_info "  - analyze_summary.txt: Text summary"
+    log_info "  - sweep_results.json: JSON data"
+    
+    # Also export to custom file if requested
     if [[ -n "$export_file" ]]; then
         export_results_json "$export_file"
+        log_info "  - ${export_file}: Custom export"
     fi
 }
 
@@ -466,7 +490,7 @@ cmd_analyze() {
 # -----------------------------------------------------------------------------
 cmd_report() {
     local algorithm=""
-    local output_dir="analysis_results"
+    local output_dir=""
     
     while [[ $# -gt 0 ]]; do
         case $1 in
@@ -488,6 +512,11 @@ cmd_report() {
                 ;;
         esac
     done
+    
+    # Default output dir: <sweep-dir>/analysis_results
+    if [[ -z "$output_dir" ]]; then
+        output_dir="${SWEEP_BASE_DIR}/analysis_results"
+    fi
     
     log_info "Config version: ${CONFIG_VERSION}"
     log_info "Generating comprehensive analysis report..."

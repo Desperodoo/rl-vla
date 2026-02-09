@@ -129,7 +129,7 @@ class Args:
     # Diffusion/Flow settings
     num_diffusion_iters: int = 100
     num_flow_steps: int = 20  # Best from sweep (20 > 10 > 5)
-    ema_decay: float = 0.999
+    ema_decay: float = 0.9995  # Best from wave3 (0.9995 > 0.999)
     bc_weight: float = 1.0
     consistency_weight: float = 0.3
     
@@ -149,8 +149,8 @@ class Args:
     """delta sampling strategy (fixed works best from sweep)"""
     cons_delta_min: float = 0.02
     cons_delta_max: float = 0.15
-    cons_delta_fixed: float = 0.02
-    """fixed delta (best from sweep)"""
+    cons_delta_fixed: float = 0.03
+    """fixed delta (best from wave3: 0.03)"""
     cons_delta_dynamic_max: bool = False
     cons_delta_cap: float = 0.99
     cons_teacher_steps: int = 2
@@ -172,7 +172,7 @@ class Args:
     """step size mode (fixed works best from sweep)"""
     sc_min_step_size: float = 0.0625
     sc_max_step_size: float = 0.5
-    sc_fixed_step_size: float = 0.125
+    sc_fixed_step_size: float = 0.15  # Best from wave3 (0.15 > 0.125)
     sc_target_mode: Literal["velocity", "endpoint"] = "velocity"
     sc_teacher_steps: int = 1
     sc_use_ema_teacher: bool = True

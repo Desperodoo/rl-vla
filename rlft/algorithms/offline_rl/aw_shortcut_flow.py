@@ -84,7 +84,7 @@ class AWShortCutFlowAgent(nn.Module):
     - shortcut_weight: 0.3 (shortcut consistency loss weight)
       Lower than flow weight for stability
     - self_consistency_k: 0.1 (fraction of batch for consistency)
-    - step_size_mode: "fixed" with fixed_step_size=0.0625 (1/16)
+    - step_size_mode: "fixed" with fixed_step_size=0.15 (best from wave3)
     - target_mode: "velocity" (not endpoint)
     - teacher_steps: 1 (single step preserves locality)
     - inference_mode: "uniform" (not adaptive)
@@ -114,7 +114,7 @@ class AWShortCutFlowAgent(nn.Module):
             - "fixed": Use fixed_step_size (recommended)
             - "uniform": Sample from [min_step_size, max_step_size]
             - "power2": Sample from {1/N, 2/N, 4/N, ...}
-        fixed_step_size: Fixed step size (default: 0.0625 = 1/16)
+        fixed_step_size: Fixed step size (default: 0.15, best from wave3)
         min_step_size: Minimum step size for uniform mode (default: 0.0625)
         max_step_size: Maximum step size for uniform mode (default: 0.125)
         target_mode: Shortcut target mode:
@@ -153,7 +153,7 @@ class AWShortCutFlowAgent(nn.Module):
         weight_clip: float = 100.0,
         # ShortCut Flow parameters (best from sweep)
         step_size_mode: Literal["power2", "uniform", "fixed"] = "fixed",
-        fixed_step_size: float = 0.125,  # Best from sweep (1/8)
+        fixed_step_size: float = 0.15,  # Best from wave3 (0.15 > 0.125)
         min_step_size: float = 0.0625,
         max_step_size: float = 0.125,
         target_mode: Literal["velocity", "endpoint"] = "velocity",

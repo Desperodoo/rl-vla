@@ -96,7 +96,7 @@ class Args:
     # Diffusion/Flow settings
     num_diffusion_iters: int = 100  # Diffusion policy iterations
     num_flow_steps: int = 20  # Best from sweep (20 > 10 > 5)
-    ema_decay: float = 0.999
+    ema_decay: float = 0.9995  # Best from wave3 (0.9995 > 0.999)
     
     # Reflected Flow settings
     reflection_mode: Literal["hard", "soft"] = "soft"  # Best from sweep
@@ -120,8 +120,8 @@ class Args:
     """minimum delta when using random delta"""
     cons_delta_max: float = 0.15
     """maximum delta when using random delta"""
-    cons_delta_fixed: float = 0.04
-    """fixed delta when cons_delta_mode=fixed (best from sweep)"""
+    cons_delta_fixed: float = 0.03
+    """fixed delta when cons_delta_mode=fixed (best from wave3: 0.03)"""
     cons_delta_dynamic_max: bool = False
     """cap random delta by remaining time"""
     cons_delta_cap: float = 0.99
@@ -136,7 +136,7 @@ class Args:
     """consistency loss space: velocity or endpoint"""
 
     # ShortCut Flow settings
-    sc_fixed_step_size: float = 0.125
+    sc_fixed_step_size: float = 0.15  # Best from wave3 (0.15 > 0.125)
     sc_num_inference_steps: int = 8
     """number of inference steps (best from sweep)"""
     sc_max_denoising_steps: int = 8
@@ -168,16 +168,16 @@ class Args:
     bc_weight: float = 0.5  # Best from sweep for cpql
     consistency_weight: float = 0.3
     """consistency regularization weight (best from sweep)"""
-    alpha: float = 0.001
-    """CPQL entropy coefficient (best from sweep: 0.001)"""
+    alpha: float = 0.0005
+    """CPQL entropy coefficient (best from wave3: 0.0005)"""
     beta: float = 10.0
     """AWR temperature (best from sweep: 10.0 for aggressive config)"""
     gamma: float = 0.99
     tau: float = 0.005
-    reward_scale: float = 0.1
-    """reward scaling factor (best from sweep)"""
+    reward_scale: float = 0.05
+    """reward scaling factor (best from wave3: 0.05)"""
     q_target_clip: float = 100.0
-    weight_clip: float = 100.0
+    weight_clip: float = 200.0  # Best from wave3 (200 > 100)
     
     # Ensemble Q settings
     use_ensemble_q: bool = True

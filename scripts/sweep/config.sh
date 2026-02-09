@@ -24,7 +24,13 @@ DEMO_PATH="~/.maniskill/demos/${ENV_ID}/rl/trajectory.rgb.pd_ee_delta_pose.physx
 # -----------------------------------------------------------------------------
 # Experiment Configuration
 # -----------------------------------------------------------------------------
-EXP_NAME="maniskill_sweep_v3"
+if [[ "${CONFIG_VERSION}" == "v3" ]]; then
+    EXP_NAME="maniskill_sweep_v3"
+elif [[ "${CONFIG_VERSION}" == "v2" ]]; then
+    EXP_NAME="maniskill_sweep"
+else
+    EXP_NAME="maniskill_sweep"
+fi
 SWEEP_BASE_DIR="runs/${EXP_NAME}"
 
 # Config version: "v1" (wave 1) or "v2" (wave 2)

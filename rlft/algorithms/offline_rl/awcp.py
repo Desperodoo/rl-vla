@@ -31,7 +31,7 @@ Hyperparameter Recommendations:
 - beta: 10.0 (advantage temperature, higher = more aggressive weighting)
 - bc_weight: 1.0 (flow matching loss weight)
 - consistency_weight: 1.0 (consistency loss weight)
-- weight_clip: 100.0 (prevent outlier dominance)
+- weight_clip: 200.0 (prevent outlier dominance)
 - use_advantage: True (use Q - baseline instead of raw Q)
 
 References:
@@ -71,8 +71,8 @@ class AWCPAgent(nn.Module):
     - beta: 10.0 (temperature, higher = more aggressive weighting)
     - bc_weight: 1.0 (flow matching loss weight)
     - consistency_weight: 1.0 (self-consistency loss weight)
-    - reward_scale: 0.1 (scale rewards for stable Q-learning)
-    - weight_clip: 100.0 (max weight to prevent outlier dominance)
+    - reward_scale: 0.05 (scale rewards for stable Q-learning)
+    - weight_clip: 200.0 (max weight to prevent outlier dominance)
     - use_advantage: True (subtract baseline for reduced variance)
     
     Args:
@@ -89,10 +89,10 @@ class AWCPAgent(nn.Module):
         consistency_weight: Weight for consistency loss (default: 1.0)
         gamma: Discount factor (default: 0.99)
         tau: Soft update coefficient (default: 0.005)
-        reward_scale: Scale factor for rewards (default: 0.1)
+        reward_scale: Scale factor for rewards (default: 0.05)
         q_target_clip: Clip range for Q target (default: 100.0)
         ema_decay: Decay rate for EMA velocity network (default: 0.999)
-        weight_clip: Maximum weight to prevent outliers (default: 100.0)
+        weight_clip: Maximum weight to prevent outliers (default: 200.0)
         use_advantage: Whether to use advantage (Q - baseline) or raw Q (default: True)
             True: w = exp(β * (Q - mean(Q))) - reduces variance
             False: w = exp(β * Q) - can be unstable with large Q values
@@ -113,10 +113,10 @@ class AWCPAgent(nn.Module):
         consistency_weight: float = 0.3,  # Best from sweep (conservative config)
         gamma: float = 0.99,
         tau: float = 0.005,
-        reward_scale: float = 0.1,
+        reward_scale: float = 0.05,  # Best from wave3 (0.05 > 0.1)
         q_target_clip: float = 100.0,
         ema_decay: float = 0.999,
-        weight_clip: float = 100.0,
+        weight_clip: float = 200.0,  # Best from wave3 (200 > 100)
         use_advantage: bool = True,
         action_bounds: Optional[tuple] = None,
         device: str = "cuda",

@@ -136,10 +136,10 @@ class Args:
     """Weight for shortcut consistency loss"""
     awsc_self_consistency_k: float = 0.25
     """Fraction of batch for consistency loss (match IL/offline_rl)"""
-    awsc_ema_decay: float = 0.999
-    """EMA decay rate for velocity network"""
-    awsc_weight_clip: float = 100.0
-    """Maximum advantage weight to prevent outliers"""
+    awsc_ema_decay: float = 0.9995
+    """EMA decay rate for velocity network (best from wave3)"""
+    awsc_weight_clip: float = 200.0
+    """Maximum advantage weight to prevent outliers (best from wave3)"""
     awsc_exploration_noise_std: float = 0.1
     """Standard deviation of exploration noise"""
     awsc_num_inference_steps: int = 8

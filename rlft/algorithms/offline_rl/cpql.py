@@ -98,7 +98,7 @@ class CPQLAgent(nn.Module):
         pred_horizon: int = 16,
         act_horizon: int = 8,
         num_flow_steps: int = 20,  # Best from sweep (20 > 10 > 5)
-        alpha: float = 0.001,  # Best from sweep (smaller is more stable)
+        alpha: float = 0.0005,  # Best from wave3 (0.0005 > 0.001)
         bc_weight: float = 0.5,  # Best from sweep (0.5 > 1.0)
         consistency_weight: float = 1.0,
         gamma: float = 0.99,
