@@ -62,7 +62,7 @@ class Args:
     track: bool = True
     wandb_project_name: str = "ManiSkill"
     wandb_entity: Optional[str] = None
-    capture_video: bool = True
+    capture_video: bool = False
 
     # Environment settings
     env_id: str = "LiftPegUpright-v1"

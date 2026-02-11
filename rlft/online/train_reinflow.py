@@ -48,7 +48,7 @@ class Args:
     track: bool = True
     wandb_project_name: str = "ReinFlow"
     wandb_entity: Optional[str] = None
-    capture_video: bool = True
+    capture_video: bool = False
     """whether to capture videos of the agent performances"""
     
     # Environment settings
