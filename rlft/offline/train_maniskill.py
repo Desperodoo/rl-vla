@@ -592,7 +592,7 @@ def create_agent(algorithm: str, action_dim: int, global_cond_dim: int, args):
         raise ValueError(f"Unknown algorithm: {algorithm}")
 
 
-def save_ckpt(run_name, tag, agent, ema_agent, visual_encoder, action_normalizer=None):
+def save_ckpt(run_name, tag, agent, ema_agent, visual_encoder, action_normalizer=None, args=None):
     """Save checkpoint using shared utility."""
     from rlft.utils.checkpoint import save_checkpoint
     save_checkpoint(
@@ -601,6 +601,7 @@ def save_ckpt(run_name, tag, agent, ema_agent, visual_encoder, action_normalizer
         visual_encoder=visual_encoder,
         ema_agent=ema_agent,
         action_normalizer=action_normalizer,
+        args=args,
         save_args_json=False,
     )
 
@@ -1047,12 +1048,12 @@ def main():
             for k in ["success_once", "success_at_end"]:
                 if k in eval_metrics and eval_metrics[k] > best_eval_metrics[k]:
                     best_eval_metrics[k] = eval_metrics[k]
-                    save_ckpt(run_name, f"best_eval_{k}", agent, ema_agent, visual_encoder, action_normalizer)
+                    save_ckpt(run_name, f"best_eval_{k}", agent, ema_agent, visual_encoder, action_normalizer, args=args)
         
         # Checkpoint
         if args.save_freq is not None and iteration % args.save_freq == 0:
             ema.copy_to(ema_agent.parameters())
-            save_ckpt(run_name, str(iteration), agent, ema_agent, visual_encoder, action_normalizer)
+            save_ckpt(run_name, str(iteration), agent, ema_agent, visual_encoder, action_normalizer, args=args)
         
         pbar.update(1)
         if isinstance(loss_dict, dict):

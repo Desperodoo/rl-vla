@@ -134,7 +134,12 @@ class ShortCutVelocityUNet1D(nn.Module):
         Returns:
             velocity: (B, T, input_dim) predicted velocity
         """
-        # Get step size embedding (available for future extensions)
+        # Get step size embedding
+        # TODO: d_embed is computed but NOT actually passed to the UNet.
+        # ShortCut conditioning v(x_t, t, d) degrades to v(x_t, t) (regular Flow Matching).
+        # To fix: need to modify UNet to accept combined (t, d) embedding.
+        # WARNING: Existing pretrained checkpoints were trained with this bug,
+        # so fixing this requires retraining the offline model.
         d_embed = self.step_size_embed(step_size.unsqueeze(-1))
         
         # Flatten obs for global conditioning

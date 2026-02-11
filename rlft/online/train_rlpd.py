@@ -321,6 +321,165 @@ def make_train_envs(args):
     return env
 
 
+def validate_pretrained_checkpoint(
+    checkpoint_path: str,
+    args: "Args",
+    device: torch.device,
+    obs_dim: int = 0,
+    action_dim: int = 0,
+):
+    """Validate pretrained checkpoint architecture against current training config.
+    
+    Inspects weight tensor shapes to infer the checkpoint's architecture parameters
+    and compares them against the current args. Raises RuntimeError on mismatch.
+    
+    This catches silent failures where a pretrained model loads successfully
+    (Conv1d doesn't bind sequence length) but produces garbage outputs due to
+    mismatched pred_horizon, obs_dim, etc.
+    
+    Args:
+        checkpoint_path: Path to the pretrained checkpoint.
+        args: Current training arguments.
+        device: Torch device.
+        obs_dim: Computed obs_dim (obs_horizon * feature_dim) from current config.
+        action_dim: Environment action dimension.
+    """
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+    
+    # Get agent state dict (prefer ema_agent)
+    if "ema_agent" in checkpoint:
+        agent_state = checkpoint["ema_agent"]
+    elif "agent" in checkpoint:
+        agent_state = checkpoint["agent"]
+    else:
+        agent_state = checkpoint
+    
+    # Extract velocity_net weights (may have "velocity_net." prefix)
+    vnet_state = {}
+    for key, value in agent_state.items():
+        if key.startswith("velocity_net."):
+            vnet_state[key.replace("velocity_net.", "")] = value
+    
+    if not vnet_state:
+        print(f"  [Checkpoint Validation] No velocity_net weights found, skipping validation")
+        return
+    
+    # Determine UNet prefix (ShortCutVelocityUNet1D wraps UNet under "unet.")
+    unet_prefix = "unet." if any(k.startswith("unet.") for k in vnet_state) else ""
+    
+    errors = []
+    warnings = []
+    
+    # --- 1. Infer diffusion_step_embed_dim ---
+    dsed_key = f"{unet_prefix}diffusion_step_encoder.3.bias"
+    if dsed_key in vnet_state:
+        ckpt_dsed = vnet_state[dsed_key].shape[0]
+        if ckpt_dsed != args.diffusion_step_embed_dim:
+            errors.append(
+                f"diffusion_step_embed_dim: checkpoint={ckpt_dsed}, "
+                f"current={args.diffusion_step_embed_dim}. "
+                f"Fix: --diffusion_step_embed_dim {ckpt_dsed}"
+            )
+    
+    # --- 2. Infer action_dim (input_dim) ---
+    action_dim_key = f"{unet_prefix}final_conv.1.weight"
+    if action_dim_key in vnet_state:
+        ckpt_action_dim = vnet_state[action_dim_key].shape[0]
+        if action_dim > 0 and ckpt_action_dim != action_dim:
+            errors.append(
+                f"action_dim: checkpoint={ckpt_action_dim}, "
+                f"environment={action_dim}. "
+                f"The checkpoint was trained for a different action space."
+            )
+        else:
+            warnings.append(f"Checkpoint action_dim={ckpt_action_dim}")
+    
+    # --- 3. Infer global_cond_dim (obs_dim = obs_horizon * per_step_feature_dim) ---
+    cond_key = f"{unet_prefix}down_modules.0.0.cond_encoder.1.weight"
+    ckpt_obs_dim = None
+    if cond_key in vnet_state and dsed_key in vnet_state:
+        ckpt_cond_dim = vnet_state[cond_key].shape[1]
+        ckpt_dsed = vnet_state[dsed_key].shape[0]
+        ckpt_obs_dim = ckpt_cond_dim - ckpt_dsed
+        if obs_dim > 0 and ckpt_obs_dim != obs_dim:
+            errors.append(
+                f"obs_dim (global_cond_dim): checkpoint={ckpt_obs_dim}, "
+                f"current={obs_dim} (obs_horizon={args.obs_horizon} × feature_dim). "
+                f"This is likely an obs_horizon or visual_feature_dim mismatch. "
+                f"Fix: adjust --obs_horizon or --visual_feature_dim"
+            )
+        else:
+            warnings.append(f"Checkpoint obs_dim (global_cond_dim)={ckpt_obs_dim}")
+    
+    # --- 4. Infer down_dims ---
+    ckpt_down_dims = []
+    i = 0
+    while True:
+        dd_key = f"{unet_prefix}down_modules.{i}.0.blocks.0.block.0.weight"
+        if dd_key in vnet_state:
+            ckpt_down_dims.append(vnet_state[dd_key].shape[0])
+            i += 1
+        else:
+            break
+    
+    if ckpt_down_dims and tuple(ckpt_down_dims) != tuple(args.unet_down_dims):
+        errors.append(
+            f"unet_down_dims: checkpoint={tuple(ckpt_down_dims)}, "
+            f"current={tuple(args.unet_down_dims)}. "
+            f"Fix: --unet_down_dims {' '.join(str(d) for d in ckpt_down_dims)}"
+        )
+    
+    # --- 5. Infer kernel_size ---
+    ks_key = f"{unet_prefix}down_modules.0.0.blocks.0.block.0.weight"
+    if ks_key in vnet_state:
+        ckpt_kernel_size = vnet_state[ks_key].shape[2]
+        if ckpt_kernel_size != args.unet_kernel_size:
+            errors.append(
+                f"unet_kernel_size: checkpoint={ckpt_kernel_size}, "
+                f"current={args.unet_kernel_size}. "
+                f"Fix: --unet_kernel_size {ckpt_kernel_size}"
+            )
+    
+    # --- 6. Check config dict if saved in checkpoint ---
+    ckpt_config = checkpoint.get("config", None)
+    if ckpt_config is not None:
+        # Compare critical horizon parameters
+        for param in ["pred_horizon", "obs_horizon"]:
+            ckpt_val = ckpt_config.get(param)
+            curr_val = getattr(args, param)
+            if ckpt_val is not None and ckpt_val != curr_val:
+                errors.append(
+                    f"{param}: checkpoint={ckpt_val}, current={curr_val}. "
+                    f"Fix: --{param} {ckpt_val}"
+                )
+    
+    # --- Report ---
+    if warnings:
+        for w in warnings:
+            print(f"  [Checkpoint Info] {w}")
+    
+    if errors:
+        error_msg = (
+            f"\n{'=' * 60}\n"
+            f"PRETRAINED CHECKPOINT PARAMETER CONFLICT DETECTED\n"
+            f"{'=' * 60}\n"
+            f"Checkpoint: {checkpoint_path}\n\n"
+            f"The following parameters in the current config do NOT match\n"
+            f"the pretrained checkpoint's architecture. This will cause\n"
+            f"the model to produce incorrect outputs despite loading\n"
+            f"without errors.\n\n"
+        )
+        for i, e in enumerate(errors, 1):
+            error_msg += f"  {i}. {e}\n"
+        error_msg += (
+            f"\nPlease fix the parameters above or remove --pretrain_path.\n"
+            f"{'=' * 60}\n"
+        )
+        raise RuntimeError(error_msg)
+    
+    print(f"  [Checkpoint Validation] All architecture parameters match ✓")
+
+
 def main():
     args = tyro.cli(Args)
     
@@ -484,6 +643,11 @@ def main():
         # Load pretrained checkpoint if provided
         if args.pretrain_path:
             print(f"Loading pretrained checkpoint from {args.pretrain_path}...")
+            
+            # Validate checkpoint architecture against current config BEFORE loading
+            validate_pretrained_checkpoint(args.pretrain_path, args, device,
+                                           obs_dim=obs_dim, action_dim=action_dim)
+            
             agent.load_pretrained(
                 args.pretrain_path,
                 load_critic=args.load_pretrain_critic,

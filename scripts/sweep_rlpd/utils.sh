@@ -173,7 +173,9 @@ run_experiment() {
             log_success "${algorithm}/${config_name} completed"
         else
             # Check if it's a CUDA error (retryable)
-            if grep -qE "(CUDA|cuDNN|cublas|PhysX)" "${log_file}" 2>/dev/null; then
+            # NOTE: Must match actual error patterns, not just any mention of CUDA/PhysX
+            # (e.g. "CUDA_VISIBLE_DEVICES=4" or "physx_cuda" are NOT errors)
+            if grep -qE "(CUDA error|RuntimeError.*CUDA|illegal memory access|Segmentation fault|OutOfMemory|OOM|PhysX Internal CUDA error|out of memory)" "${log_file}" 2>/dev/null; then
                 log_warning "CUDA error detected, will retry..."
             else
                 log_error "${algorithm}/${config_name} failed with non-retryable error"

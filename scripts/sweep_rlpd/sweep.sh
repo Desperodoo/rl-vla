@@ -177,9 +177,9 @@ cmd_run() {
                     # Add mode suffix to config name
                     local new_name="${config_name}_${mode}"
                     
-                    # Add pretrain_path for pretrain mode
+                    # Add pretrain_path and match offline checkpoint's pred_horizon for pretrain mode
                     if [[ "$mode" == "pretrain" ]]; then
-                        extra_args="${extra_args} --pretrain_path ${pretrain_path}"
+                        extra_args="${extra_args} --pretrain_path ${pretrain_path} --pred_horizon 8"
                     fi
                     
                     mode_configs+=("${new_name}:${extra_args}")
