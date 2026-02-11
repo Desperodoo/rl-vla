@@ -259,16 +259,33 @@ class AgentWrapper:
     def get_action(self, obs, deterministic=True, **kwargs):
         """Get action from agent.
         
+        Uses get_action() for full pred_horizon output, then applies temporal
+        offset slice [obs_horizon-1 : obs_horizon-1+act_horizon] to align with
+        training data (matching the offline evaluation convention).
+        
         Args:
             obs: Observation from eval_envs (already FrameStacked)
                  Shape: (B, T, state_dim) or dict with 'state' key
             deterministic: Whether to use deterministic action
         
         Returns:
-            actions: (B, pred_horizon, act_dim)
+            actions: (B, act_horizon, act_dim)
         """
         obs_cond = self.encode_obs(obs)
-        actions = self.agent.select_action(obs_cond, deterministic=deterministic)
+        
+        # For flow/diffusion agents (AWSC), use get_action() which returns the
+        # full pred_horizon sequence, then apply temporal offset slice
+        # [obs_horizon-1 : obs_horizon-1+act_horizon] to match offline eval.
+        # For other agents (e.g. SAC), use select_action() which already
+        # returns (B, act_horizon, action_dim) without offset.
+        if isinstance(self.agent, AWSCAgent):
+            actions_full = self.agent.get_action(obs_cond, deterministic=deterministic)
+            # Temporal offset slice: [obs_horizon-1 : obs_horizon-1+act_horizon]
+            start = self.obs_horizon - 1
+            end = start + self.act_horizon
+            actions = actions_full[:, start:end]
+        else:
+            actions = self.agent.select_action(obs_cond, deterministic=deterministic)
         
         # Denormalize actions if normalizer is provided
         if self.action_normalizer is not None:
@@ -724,7 +741,32 @@ def main():
         print(f"Success buffer enabled (capacity: {args.success_buffer_capacity})")
     
     # Create action normalizer if needed (for offline data)
-    action_normalizer = ActionNormalizer(mode=args.action_norm_mode) if args.normalize_actions else None
+    # When loading a pretrained model, check if it was trained with normalization.
+    # If the checkpoint has no action_normalizer, the model outputs raw actions;
+    # applying inverse_transform would corrupt them.
+    action_normalizer = None
+    if args.normalize_actions:
+        if args.pretrain_path:
+            pretrain_ckpt = torch.load(args.pretrain_path, map_location=device)
+            if "action_normalizer" in pretrain_ckpt and pretrain_ckpt["action_normalizer"] is not None:
+                # Load normalizer from pretrained checkpoint for consistency
+                normalizer_info = pretrain_ckpt["action_normalizer"]
+                action_normalizer = ActionNormalizer(mode=normalizer_info["mode"])
+                import numpy as _np
+                action_normalizer.stats = {
+                    k: _np.array(v) if isinstance(v, list) else v
+                    for k, v in normalizer_info["stats"].items()
+                }
+                print(f"Loaded action normalizer from pretrained checkpoint (mode={normalizer_info['mode']})")
+            else:
+                # Pretrained model was trained WITHOUT normalization
+                print(f"WARNING: Pretrained checkpoint has no action_normalizer.")
+                print(f"  Disabling action normalization to match pretrained model.")
+                print(f"  (The model outputs raw actions; denormalizing would corrupt them.)")
+                args.normalize_actions = False
+            del pretrain_ckpt
+        else:
+            action_normalizer = ActionNormalizer(mode=args.action_norm_mode)
     
     # Offline dataset for RLPD (use OfflineRLDataset for SMDP formulation)
     offline_dataset = None

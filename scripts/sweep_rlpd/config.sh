@@ -29,7 +29,7 @@ CONTROL_MODE="${CONTROL_MODE:-pd_ee_delta_pose}"
 SIM_BACKEND="${SIM_BACKEND:-physx_cuda}"
 
 # Training timesteps (Online RL 使用 timesteps 而非 iterations)
-TOTAL_TIMESTEPS="${TOTAL_TIMESTEPS:-500000}"
+TOTAL_TIMESTEPS="${TOTAL_TIMESTEPS:-100000}"
 
 # Online RL 特有配置
 NUM_ENVS="${NUM_ENVS:-50}"
