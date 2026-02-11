@@ -39,7 +39,7 @@ usage() {
     echo "Options for 'run':"
     echo "  --algorithm ALGO    Run only specified algorithm (sac, awsc)"
     echo "  --mode MODE         AWSC mode: scratch, pretrain, both (default: scratch)"
-    echo "  --pretrain-path P   Pretrained checkpoint path (required for AWSC pretrain mode)"
+    echo "  --pretrain-path P   Pretrained checkpoint path (default: Wave 3 best AWSC model)"
     echo "  --dry-run           Show what would be run without executing"
     echo ""
     echo "Options for 'retry':"
@@ -103,15 +103,12 @@ cmd_run() {
     # Validate pretrain mode requirements
     if [[ "$algorithm" == "awsc" || -z "$algorithm" ]]; then
         if [[ "$awsc_mode" == "pretrain" || "$awsc_mode" == "both" ]]; then
+            # Use default pretrain path if not explicitly provided
             if [[ -z "$pretrain_path" ]]; then
-                log_error "AWSC pretrain mode requires --pretrain-path"
-                if [[ "$awsc_mode" == "both" ]]; then
-                    log_warning "Falling back to scratch mode only"
-                    awsc_mode="scratch"
-                else
-                    exit 1
-                fi
-            elif [[ ! -f "$pretrain_path" ]]; then
+                pretrain_path="${DEFAULT_AWSC_PRETRAIN_PATH}"
+                log_info "Using default AWSC pretrain path: ${pretrain_path}"
+            fi
+            if [[ ! -f "$pretrain_path" ]]; then
                 log_error "Pretrained checkpoint not found: $pretrain_path"
                 if [[ "$awsc_mode" == "both" ]]; then
                     log_warning "Falling back to scratch mode only"

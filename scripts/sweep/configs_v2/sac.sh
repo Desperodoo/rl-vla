@@ -117,11 +117,12 @@ SWEEP_CONFIGS=(
     # =====================================================================
     # 12. Reward Scale (H5: coupled with temperature)
     #     Scales rewards before TD computation; affects Q magnitude
+    #     Default is now 1.0 (SAC uses alpha for balance)
     # =====================================================================
-    "reward_scale_0.01:--reward_scale 0.01"
-    "reward_scale_0.1:--reward_scale 0.1"
-    "reward_scale_0.5:--reward_scale 0.5"
-    "reward_scale_1.0:--reward_scale 1.0"
+    "reward_scale_0.01:--sac_reward_scale 0.01"
+    "reward_scale_0.1:--sac_reward_scale 0.1"
+    "reward_scale_0.5:--sac_reward_scale 0.5"
+    "reward_scale_5.0:--sac_reward_scale 5.0"
 
     # =====================================================================
     # 13. Q Target Clip (H6: prevents divergence)
@@ -143,30 +144,30 @@ SWEEP_CONFIGS=(
     # 15. Combined — Conservative preset
     #     Large ensemble, low entropy, stable updates, backup entropy
     # =====================================================================
-    "combined_conservative:--num_qs 20 --num_min_qs 2 --init_temperature 0.3 --target_entropy -70.0 --backup_entropy --tau 0.001 --reward_scale 0.05"
+    "combined_conservative:--num_qs 20 --num_min_qs 2 --init_temperature 0.3 --target_entropy -70.0 --backup_entropy --tau 0.001 --sac_reward_scale 1.0"
 
     # =====================================================================
     # 16. Combined — Aggressive preset
     #     Smaller ensemble, high entropy, fast updates
     # =====================================================================
-    "combined_aggressive:--num_qs 5 --num_min_qs 2 --init_temperature 3.0 --tau 0.01 --reward_scale 0.5 --lr 5e-4 --lr_critic 1e-3"
+    "combined_aggressive:--num_qs 5 --num_min_qs 2 --init_temperature 3.0 --tau 0.01 --sac_reward_scale 5.0 --lr 5e-4 --lr_critic 1e-3"
 
     # =====================================================================
     # 17. Combined — SAC-N style (many Qs, few min)
     #     Maximum pessimism through ensemble diversification
     # =====================================================================
-    "combined_sacn_style:--num_qs 20 --num_min_qs 1 --reward_scale 0.1 --tau 0.005"
+    "combined_sacn_style:--num_qs 20 --num_min_qs 1 --sac_reward_scale 1.0 --tau 0.005"
 
     # =====================================================================
     # 18. Combined — EDAC style (moderate ensemble + backup entropy)
     # =====================================================================
-    "combined_edac_style:--num_qs 10 --num_min_qs 2 --backup_entropy --init_temperature 0.5 --reward_scale 0.1"
+    "combined_edac_style:--num_qs 10 --num_min_qs 2 --backup_entropy --init_temperature 0.5 --sac_reward_scale 1.0"
 
     # =====================================================================
     # 19. Combined — Matched AWCP-best settings (translate from flow agent)
     #     Reward scale and Q settings from best AWCP config
     # =====================================================================
-    "combined_match_awcp:--reward_scale 0.05 --gamma 0.99 --tau 0.005 --num_qs 10 --num_min_qs 2 --q_target_clip 100.0"
+    "combined_match_awcp:--sac_reward_scale 0.05 --gamma 0.99 --tau 0.005 --num_qs 10 --num_min_qs 2 --q_target_clip 100.0"
 
     # =====================================================================
     # 20. Combined — Low LR + Large batch (stability focused)
@@ -176,8 +177,8 @@ SWEEP_CONFIGS=(
     # =====================================================================
     # 21. Combined — Reward scale x Temperature interaction
     # =====================================================================
-    "rs0.01_temp0.1:--reward_scale 0.01 --init_temperature 0.1"
-    "rs0.1_temp0.3:--reward_scale 0.1 --init_temperature 0.3"
-    "rs0.5_temp1.0:--reward_scale 0.5 --init_temperature 1.0"
-    "rs1.0_temp3.0:--reward_scale 1.0 --init_temperature 3.0"
+    "rs0.01_temp0.1:--sac_reward_scale 0.01 --init_temperature 0.1"
+    "rs0.1_temp0.3:--sac_reward_scale 0.1 --init_temperature 0.3"
+    "rs0.5_temp1.0:--sac_reward_scale 0.5 --init_temperature 1.0"
+    "rs1.0_temp3.0:--sac_reward_scale 1.0 --init_temperature 3.0"
 )

@@ -65,6 +65,10 @@ STAGE1_ALGORITHMS=(sac)
 # Stage 2: Algorithms that can use pretrained models
 STAGE2_ALGORITHMS=(awsc)
 
+# Default pretrained checkpoint paths (Wave 3 sweep 最优模型)
+# AWSC: cw0.3_step0.15 — success_once=0.85 (Wave 3 全局最优)
+DEFAULT_AWSC_PRETRAIN_PATH="${DEFAULT_AWSC_PRETRAIN_PATH:-runs/maniskill_sweep_v3/aw_shortcut_flow/cw0.3_step0.15__1770390417/checkpoints/best_eval_success_once.pt}"
+
 ALL_ALGORITHMS=(
     "${STAGE1_ALGORITHMS[@]}"
     "${STAGE2_ALGORITHMS[@]}"

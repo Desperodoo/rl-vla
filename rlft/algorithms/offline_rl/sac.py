@@ -280,11 +280,13 @@ class OfflineSACAgent(nn.Module):
                 td_target = torch.clamp(td_target, -self.q_target_clip, self.q_target_clip)
         
         # Compute ensemble Q-values and MSE loss for each
+        # ×0.5 coefficient matches SB3 convention (equivalent to halving critic LR)
         q_values = self.critic(actions_for_q, obs_cond)  # (num_qs, B, 1)
         
         critic_loss = 0.0
         for q in q_values:
             critic_loss = critic_loss + F.mse_loss(q, td_target)
+        critic_loss = 0.5 * critic_loss
         
         metrics = {
             "q_mean": q_values.mean().item(),

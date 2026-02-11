@@ -181,8 +181,12 @@ class Args:
     weight_clip: float = 200.0  # Best from wave3 (200 > 100)
     
     # SAC-specific settings (only used when algorithm="sac")
+    sac_reward_scale: float = 1.0
+    """Reward scale for SAC (overrides reward_scale when algorithm=sac; SAC uses alpha to balance, no manual compression needed)"""
     init_temperature: float = 1.0
     """Initial entropy temperature for SAC"""
+    lr_temperature: float = 1e-4
+    """Learning rate for temperature optimizer (lower than actor/critic to prevent alpha collapse)"""
     target_entropy: Optional[float] = None
     """Target entropy for SAC temperature tuning (default: -action_dim * act_horizon)"""
     backup_entropy: bool = False
@@ -561,6 +565,8 @@ def create_agent(algorithm: str, action_dim: int, global_cond_dim: int, args):
         )
     
     elif algorithm == "sac":
+        # SAC uses its own reward_scale (default 1.0) — alpha handles the balance
+        sac_rs = args.sac_reward_scale
         return OfflineSACAgent(
             obs_dim=global_cond_dim,
             action_dim=action_dim,
@@ -575,7 +581,7 @@ def create_agent(algorithm: str, action_dim: int, global_cond_dim: int, args):
             init_temperature=args.init_temperature,
             target_entropy=args.target_entropy,
             backup_entropy=args.backup_entropy,
-            reward_scale=args.reward_scale,
+            reward_scale=sac_rs,
             q_target_clip=args.q_target_clip,
             actor_q_mode=args.actor_q_mode,
             action_bounds=args.action_bounds,
@@ -826,7 +832,7 @@ def main():
         
         actor_optimizer = optim.AdamW(actor_params, lr=args.lr)
         critic_optimizer = optim.AdamW(agent.critic.parameters(), lr=args.lr_critic)
-        temp_optimizer = optim.AdamW(agent.temperature.parameters(), lr=args.lr)
+        temp_optimizer = optim.AdamW(agent.temperature.parameters(), lr=args.lr_temperature)
         
         actor_lr_scheduler = get_scheduler(
             name="cosine",
@@ -926,9 +932,13 @@ def main():
                 next_obs_cond = next_obs_features.reshape(next_obs_features.shape[0], -1) if next_obs_features.dim() == 3 else next_obs_features
                 
                 # Critic update
+                # Detach obs for critic: critic_optimizer doesn't include visual
+                # encoder params, so no need to backprop through encoder graph.
+                # This also prevents freeing the encoder graph needed by actor.
                 critic_optimizer.zero_grad()
                 critic_loss, critic_metrics = agent._compute_critic_loss(
-                    obs_cond, actions_for_q, next_obs_cond, rewards, dones,
+                    obs_cond.detach(), actions_for_q, next_obs_cond.detach(),
+                    rewards, dones,
                     cumulative_reward, chunk_done, discount_factor,
                 )
                 critic_loss.backward()
@@ -937,6 +947,8 @@ def main():
                 critic_lr_scheduler.step()
                 
                 # Actor update
+                # obs_cond keeps encoder graph so actor gradients flow to
+                # visual_encoder via actor_optimizer.
                 actor_optimizer.zero_grad()
                 for p in agent.critic.parameters():
                     p.requires_grad_(False)
@@ -952,7 +964,7 @@ def main():
                 
                 # Temperature update
                 temp_optimizer.zero_grad()
-                temp_loss, temp_metrics = agent._compute_temperature_loss(obs_cond)
+                temp_loss, temp_metrics = agent._compute_temperature_loss(obs_cond.detach())
                 temp_loss.backward()
                 temp_optimizer.step()
                 
