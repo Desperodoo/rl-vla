@@ -19,6 +19,7 @@ from .offline_rl.sac import OfflineSACAgent
 from .offline_rl.cpql import CPQLAgent
 from .offline_rl.awcp import AWCPAgent
 from .offline_rl.aw_shortcut_flow import AWShortCutFlowAgent
+from .offline_rl.dqc import DQCAgent
 
 # Online RL algorithms
 from .online_rl.sac import SACAgent
@@ -37,6 +38,7 @@ __all__ = [
     "CPQLAgent",
     "AWCPAgent",
     "AWShortCutFlowAgent",
+    "DQCAgent",
     # Online RL
     "SACAgent",
     "ReinFlowAgent",

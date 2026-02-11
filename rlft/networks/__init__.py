@@ -16,7 +16,7 @@ from .unet import (
     ConditionalResidualBlock1D,
 )
 from .velocity import VelocityUNet1D, ShortCutVelocityUNet1D, GripperHead
-from .q_networks import DoubleQNetwork, EnsembleQNetwork, soft_update
+from .q_networks import DoubleQNetwork, EnsembleQNetwork, SigmoidQNetwork, soft_update
 from .actors import DiagGaussianActor, LearnableTemperature
 from .encoders import (
     PlainConv,
@@ -39,6 +39,7 @@ __all__ = [
     # Q-Networks
     "DoubleQNetwork",
     "EnsembleQNetwork",
+    "SigmoidQNetwork",
     "soft_update",
     # Actors
     "DiagGaussianActor",

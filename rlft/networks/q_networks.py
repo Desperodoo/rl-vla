@@ -319,3 +319,115 @@ class EnsembleQNetwork(nn.Module):
         """Get Q-values from first two networks (for compatibility)."""
         q_all = self.forward(action_seq, obs_cond)
         return q_all[0], q_all[1]
+
+
+class SigmoidQNetwork(nn.Module):
+    """Ensemble Q-Network with sigmoid parameterization for DQC.
+    
+    Outputs Q ∈ [0, 1] via sigmoid activation. Trained with BCE loss
+    to avoid scale issues and provide bounded Q-value estimates.
+    
+    Based on DQC (Li, Park, Levine 2025): Decoupled Q-Chunking uses
+    sigmoid Q to ensure bounded outputs that work well with BCE training.
+    
+    Args:
+        action_dim: Action dimension
+        obs_dim: Dimension of observation features
+        action_horizon: Length of action sequence (can differ for chunk vs action critic)
+        hidden_dims: Hidden layer dimensions for each Q-network MLP
+        num_qs: Number of Q-networks (default: 2)
+    """
+    
+    def __init__(
+        self,
+        action_dim: int,
+        obs_dim: int,
+        action_horizon: int = 8,
+        hidden_dims: List[int] = [256, 256, 256],
+        num_qs: int = 2,
+    ):
+        super().__init__()
+        
+        self.action_horizon = action_horizon
+        self.action_dim = action_dim
+        self.obs_dim = obs_dim
+        self.num_qs = num_qs
+        
+        input_dim = action_horizon * action_dim + obs_dim
+        
+        self.q_nets = nn.ModuleList()
+        for _ in range(num_qs):
+            q_layers = []
+            in_dim = input_dim
+            for hidden_dim in hidden_dims:
+                q_layers.extend([
+                    nn.Linear(in_dim, hidden_dim),
+                    nn.LayerNorm(hidden_dim),
+                    nn.Mish(),
+                ])
+                in_dim = hidden_dim
+            q_layers.append(nn.Linear(in_dim, 1))
+            self.q_nets.append(nn.Sequential(*q_layers))
+        
+        self._init_weights()
+    
+    def _init_weights(self):
+        """Initialize network weights."""
+        for q_net in self.q_nets:
+            for module in q_net.modules():
+                if isinstance(module, nn.Linear):
+                    nn.init.orthogonal_(module.weight, gain=np.sqrt(2))
+                    if module.bias is not None:
+                        nn.init.zeros_(module.bias)
+            final_layer = q_net[-1]
+            if isinstance(final_layer, nn.Linear):
+                nn.init.orthogonal_(final_layer.weight, gain=0.01)
+                if final_layer.bias is not None:
+                    nn.init.zeros_(final_layer.bias)
+    
+    def forward_logits(
+        self,
+        action_seq: torch.Tensor,
+        obs_cond: torch.Tensor,
+    ) -> torch.Tensor:
+        """Forward pass returning raw logits (before sigmoid).
+        
+        Use for BCE loss computation (numerically stable with F.binary_cross_entropy_with_logits).
+        
+        Returns:
+            logits: (num_qs, B, 1) raw logits
+        """
+        B = action_seq.shape[0]
+        action_flat = action_seq.reshape(B, -1)
+        x = torch.cat([action_flat, obs_cond], dim=-1)
+        return torch.stack([q_net(x) for q_net in self.q_nets], dim=0)
+    
+    def forward(
+        self,
+        action_seq: torch.Tensor,
+        obs_cond: torch.Tensor,
+    ) -> torch.Tensor:
+        """Forward pass returning Q-values in [0, 1] via sigmoid.
+        
+        Returns:
+            q_values: (num_qs, B, 1) Q-values in [0, 1]
+        """
+        return torch.sigmoid(self.forward_logits(action_seq, obs_cond))
+    
+    def get_min_q(
+        self,
+        action_seq: torch.Tensor,
+        obs_cond: torch.Tensor,
+    ) -> torch.Tensor:
+        """Get min Q-value over ensemble. Returns: (B, 1) in [0, 1]."""
+        q_all = self.forward(action_seq, obs_cond)  # (num_qs, B, 1)
+        return q_all.min(dim=0).values
+    
+    def get_mean_q(
+        self,
+        action_seq: torch.Tensor,
+        obs_cond: torch.Tensor,
+    ) -> torch.Tensor:
+        """Get mean Q-value over ensemble. Returns: (B, 1) in [0, 1]."""
+        q_all = self.forward(action_seq, obs_cond)
+        return q_all.mean(dim=0)

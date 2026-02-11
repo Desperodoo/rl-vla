@@ -1,184 +1,141 @@
 #!/bin/bash
 # =============================================================================
-# SAC (Offline) - Comprehensive Hyperparameter Sweep
+# SAC (Offline) — Wave 2: Regularization Method Sweep (PRIORITY)
 # =============================================================================
-# First sweep for Offline SAC — Gaussian policy baseline for offline RL.
-# Since this is the only algorithm being swept, configs are comprehensive.
+# Goal: Find which offline regularization method enables stable SAC training.
+# This is the FIRST sweep — once we identify working method(s), fine-tune
+# other hyperparams (lr, ensemble, gamma, tau, etc.) in v3.
+#
+# Axes swept (ordered by priority):
+#   1. Actor loss type: td3bc / awr / iql / sac (pure)
+#   2. Per-method params: bc_weight, awr_temperature, iql_expectile
+#   3. CQL critic penalty (orthogonal to actor regularization)
+#   4. Key combined presets
 #
 # Architecture: DiagGaussianActor + EnsembleQNetwork + LearnableTemperature
-# Key insight: Ensemble Q (subsample + min) provides implicit conservatism;
-#              no CQL penalty needed (similar to SAC-N / EDAC approach).
-#
-# Hypotheses:
-#   H1: Ensemble pessimism (num_qs × num_min_qs) is the most critical axis
-#   H2: Lower entropy target helps for offline (fixed data → less exploration)
-#   H3: backup_entropy=True stabilizes Q-values (entropy in target)
-#   H4: Critic should learn faster than actor (lr_critic > lr ratio)
-#   H5: Reward scale strongly coupled with temperature tuning
-#   H6: Q target clip prevents divergence from offline distribution shift
+# Default: td3bc with bc_weight=2.0, sac_reward_scale=1.0, num_qs=10
 #
 # Format: "config_name:--param1 value1 --param2 value2"
 # =============================================================================
 
 SWEEP_CONFIGS=(
     # =====================================================================
-    # 0. Baseline (all defaults)
+    # 0. Baseline (td3bc with all defaults, bc_weight=2.0)
     # =====================================================================
     "baseline:"
 
     # =====================================================================
-    # 1. Learning Rate — Actor (lr controls actor optimizer)
+    # 1. Actor Loss Type — Core Method Comparison
+    #    These define fundamentally different offline RL strategies.
+    #    td3bc: reparam Q-max + MSE BC (default)
+    #    awr:   advantage-weighted log-prob on data actions (no OOD Q query)
+    #    iql:   expectile V + advantage-weighted actor (fully in-sample)
+    #    sac:   pure reparam Q-max (no constraint, likely diverges)
     # =====================================================================
-    "lr_1e-4:--lr 1e-4"
-    "lr_2e-4:--lr 2e-4"
-    "lr_5e-4:--lr 5e-4"
-    "lr_1e-3:--lr 1e-3"
+    "type_sac:--actor_loss_type sac"
+    "type_td3bc:--actor_loss_type td3bc"
+    "type_awr:--actor_loss_type awr"
+    "type_iql:--actor_loss_type iql"
 
     # =====================================================================
-    # 2. Learning Rate — Critic (lr_critic controls critic optimizer)
+    # 2. TD3+BC — BC Weight (lam = 1/(1+w))
+    #    w=0 -> pure SAC, w=0.5 -> 67%RL, w=1 -> 50/50, w=2 -> 33%RL (default),
+    #    w=5 -> 17%RL, w=10 -> 9%RL
     # =====================================================================
-    "lr_critic_1e-4:--lr_critic 1e-4"
-    "lr_critic_5e-4:--lr_critic 5e-4"
-    "lr_critic_1e-3:--lr_critic 1e-3"
+    "td3bc_w0:--actor_loss_type td3bc --actor_bc_weight 0.0"
+    "td3bc_w0.5:--actor_loss_type td3bc --actor_bc_weight 0.5"
+    "td3bc_w1:--actor_loss_type td3bc --actor_bc_weight 1.0"
+    "td3bc_w5:--actor_loss_type td3bc --actor_bc_weight 5.0"
+    "td3bc_w10:--actor_loss_type td3bc --actor_bc_weight 10.0"
 
     # =====================================================================
-    # 3. Learning Rate — Asymmetric (critic faster / slower than actor)
-    #    Hypothesis: critic should see stable targets before actor adapts
+    # 3. AWR — Temperature beta
+    #    Controls selectivity: lower beta = more selective (only high-advantage
+    #    data actions get high weight), higher beta = more uniform.
+    #    Default: 1.0
     # =====================================================================
-    "lr_asym_slow_actor:--lr 1e-4 --lr_critic 3e-4"
-    "lr_asym_fast_critic:--lr 3e-4 --lr_critic 1e-3"
-    "lr_asym_fast_actor:--lr 1e-3 --lr_critic 3e-4"
+    "awr_beta0.1:--actor_loss_type awr --awr_temperature 0.1"
+    "awr_beta0.3:--actor_loss_type awr --awr_temperature 0.3"
+    "awr_beta0.5:--actor_loss_type awr --awr_temperature 0.5"
+    "awr_beta1.0:--actor_loss_type awr --awr_temperature 1.0"
+    "awr_beta3.0:--actor_loss_type awr --awr_temperature 3.0"
+    "awr_beta10.0:--actor_loss_type awr --awr_temperature 10.0"
 
     # =====================================================================
-    # 4. Initial Temperature
-    #    Controls initial entropy regularization strength
+    # 4. IQL — Expectile tau
+    #    Controls optimism of V: tau=0.5 (mean, conservative), tau=0.7 (default),
+    #    tau=0.9 (aggressive, approaches max Q). Higher = better policy
+    #    improvement but less stable.
     # =====================================================================
-    "init_temp_0.1:--init_temperature 0.1"
-    "init_temp_0.3:--init_temperature 0.3"
-    "init_temp_0.5:--init_temperature 0.5"
-    "init_temp_3.0:--init_temperature 3.0"
+    "iql_tau0.5:--actor_loss_type iql --iql_expectile 0.5"
+    "iql_tau0.7:--actor_loss_type iql --iql_expectile 0.7"
+    "iql_tau0.8:--actor_loss_type iql --iql_expectile 0.8"
+    "iql_tau0.9:--actor_loss_type iql --iql_expectile 0.9"
+    "iql_tau0.95:--actor_loss_type iql --iql_expectile 0.95"
 
     # =====================================================================
-    # 5. Target Entropy
-    #    Default: -action_dim * act_horizon = -7*8 = -56
-    #    Lower = more deterministic policy; Higher = more stochastic
+    # 5. IQL — AWR Temperature (advantage weighting beta for IQL actor)
+    #    IQL uses the same exp(A/beta) weighting as AWR, but with learned V.
     # =====================================================================
-    "target_ent_-28:--target_entropy -28.0"
-    "target_ent_-42:--target_entropy -42.0"
-    "target_ent_-70:--target_entropy -70.0"
-    "target_ent_-84:--target_entropy -84.0"
+    "iql_beta0.1:--actor_loss_type iql --awr_temperature 0.1"
+    "iql_beta0.3:--actor_loss_type iql --awr_temperature 0.3"
+    "iql_beta1.0:--actor_loss_type iql --awr_temperature 1.0"
+    "iql_beta3.0:--actor_loss_type iql --awr_temperature 3.0"
 
     # =====================================================================
-    # 6. Backup Entropy (entropy in Q-target)
-    #    True: Q-target includes -alpha*logpi → more conservative
+    # 6. CQL Critic Penalty (orthogonal — can combine with any actor type)
+    #    Penalizes Q for policy-sampled actions vs data actions.
+    #    Provides critic conservatism independent of actor regularization.
     # =====================================================================
-    "backup_entropy:--backup_entropy"
-    "backup_entropy_low_temp:--backup_entropy --init_temperature 0.3"
-    "backup_entropy_hi_temp:--backup_entropy --init_temperature 3.0"
+    "cql_0.1:--cql_alpha 0.1"
+    "cql_0.5:--cql_alpha 0.5"
+    "cql_1.0:--cql_alpha 1.0"
+    "cql_5.0:--cql_alpha 5.0"
 
     # =====================================================================
-    # 7. Actor Q Aggregation Mode
-    #    min = pessimistic (SB3 default), mean = optimistic
+    # 7. CQL + Actor Type Combinations (top 2 CQL alphas x 3 actor types)
     # =====================================================================
-    "actor_q_mean:--actor_q_mode mean"
-    "actor_q_mean_backup:--actor_q_mode mean --backup_entropy"
+    "cql1_td3bc:--cql_alpha 1.0 --actor_loss_type td3bc"
+    "cql1_awr:--cql_alpha 1.0 --actor_loss_type awr"
+    "cql1_iql:--cql_alpha 1.0 --actor_loss_type iql"
+    "cql5_td3bc:--cql_alpha 5.0 --actor_loss_type td3bc"
+    "cql5_awr:--cql_alpha 5.0 --actor_loss_type awr"
+    "cql5_iql:--cql_alpha 5.0 --actor_loss_type iql"
 
     # =====================================================================
-    # 8. Ensemble Q Size (H1: key axis for conservatism)
-    #    More Qs + fewer min_qs = stronger pessimism
+    # 8. Combined Presets — Best-guess configurations for each method
     # =====================================================================
-    "num_qs_2:--num_qs 2 --num_min_qs 2"
-    "num_qs_5:--num_qs 5 --num_min_qs 2"
-    "num_qs_20:--num_qs 20 --num_min_qs 2"
 
-    # =====================================================================
-    # 9. Ensemble Q — min_qs (subsample size for pessimism)
-    # =====================================================================
-    "num_min_qs_1:--num_qs 10 --num_min_qs 1"
-    "num_min_qs_3:--num_qs 10 --num_min_qs 3"
-    "num_min_qs_5:--num_qs 10 --num_min_qs 5"
+    # Pure TD3+BC (no entropy, strong BC — simplest offline method)
+    "preset_td3bc_strong:--actor_loss_type td3bc --actor_bc_weight 5.0 --init_temperature 0.01"
 
-    # =====================================================================
-    # 10. Discount Factor (gamma)
-    #    Lower = more myopic, higher = longer-horizon credit assignment
-    # =====================================================================
-    "gamma_0.95:--gamma 0.95"
-    "gamma_0.98:--gamma 0.98"
-    "gamma_0.999:--gamma 0.999"
+    # TD3+BC + backup entropy (moderate BC, SAC entropy helps exploration)
+    "preset_td3bc_entropy:--actor_loss_type td3bc --actor_bc_weight 2.0 --backup_entropy --init_temperature 0.3"
 
-    # =====================================================================
-    # 11. Soft Update Rate (tau)
-    #     Lower = more stable but slower target updates
-    # =====================================================================
-    "tau_0.001:--tau 0.001"
-    "tau_0.01:--tau 0.01"
-    "tau_0.02:--tau 0.02"
+    # AWR conservative (low beta = selective weighting, backup entropy)
+    "preset_awr_conservative:--actor_loss_type awr --awr_temperature 0.3 --backup_entropy --init_temperature 0.3"
 
-    # =====================================================================
-    # 12. Reward Scale (H5: coupled with temperature)
-    #     Scales rewards before TD computation; affects Q magnitude
-    #     Default is now 1.0 (SAC uses alpha for balance)
-    # =====================================================================
-    "reward_scale_0.01:--sac_reward_scale 0.01"
-    "reward_scale_0.1:--sac_reward_scale 0.1"
-    "reward_scale_0.5:--sac_reward_scale 0.5"
-    "reward_scale_5.0:--sac_reward_scale 5.0"
+    # AWR aggressive (higher beta, more data utilization)
+    "preset_awr_aggressive:--actor_loss_type awr --awr_temperature 3.0 --init_temperature 1.0"
 
-    # =====================================================================
-    # 13. Q Target Clip (H6: prevents divergence)
-    # =====================================================================
-    "q_clip_20:--q_target_clip 20.0"
-    "q_clip_50:--q_target_clip 50.0"
-    "q_clip_200:--q_target_clip 200.0"
-    "q_clip_none:--q_target_clip 1000.0"
+    # IQL standard (tau=0.7, beta=1.0 — balanced IQL)
+    "preset_iql_standard:--actor_loss_type iql --iql_expectile 0.7 --awr_temperature 1.0"
 
-    # =====================================================================
-    # 14. Batch Size
-    #     Larger batch = more stable gradients, especially for ensemble Q
-    # =====================================================================
-    "batch_128:--batch_size 128"
-    "batch_512:--batch_size 512"
-    "batch_1024:--batch_size 1024"
+    # IQL optimistic (tau=0.9, beta=0.3 — aggressive policy improvement)
+    "preset_iql_optimistic:--actor_loss_type iql --iql_expectile 0.9 --awr_temperature 0.3"
 
-    # =====================================================================
-    # 15. Combined — Conservative preset
-    #     Large ensemble, low entropy, stable updates, backup entropy
-    # =====================================================================
-    "combined_conservative:--num_qs 20 --num_min_qs 2 --init_temperature 0.3 --target_entropy -70.0 --backup_entropy --tau 0.001 --sac_reward_scale 1.0"
+    # IQL conservative (tau=0.5, beta=3.0 — safe, mean V-function)
+    "preset_iql_conservative:--actor_loss_type iql --iql_expectile 0.5 --awr_temperature 3.0"
 
-    # =====================================================================
-    # 16. Combined — Aggressive preset
-    #     Smaller ensemble, high entropy, fast updates
-    # =====================================================================
-    "combined_aggressive:--num_qs 5 --num_min_qs 2 --init_temperature 3.0 --tau 0.01 --sac_reward_scale 5.0 --lr 5e-4 --lr_critic 1e-3"
+    # CQL-SAC (CQL penalty + pure SAC actor — CQL provides conservatism)
+    "preset_cql_sac:--actor_loss_type sac --cql_alpha 5.0"
 
-    # =====================================================================
-    # 17. Combined — SAC-N style (many Qs, few min)
-    #     Maximum pessimism through ensemble diversification
-    # =====================================================================
-    "combined_sacn_style:--num_qs 20 --num_min_qs 1 --sac_reward_scale 1.0 --tau 0.005"
+    # CQL + TD3+BC (double conservatism: CQL on critic + BC on actor)
+    "preset_cql_td3bc:--actor_loss_type td3bc --actor_bc_weight 2.0 --cql_alpha 1.0"
 
-    # =====================================================================
-    # 18. Combined — EDAC style (moderate ensemble + backup entropy)
-    # =====================================================================
-    "combined_edac_style:--num_qs 10 --num_min_qs 2 --backup_entropy --init_temperature 0.5 --sac_reward_scale 1.0"
+    # CQL + IQL (CQL on critic + IQL actor — maximum conservatism)
+    "preset_cql_iql:--actor_loss_type iql --iql_expectile 0.7 --cql_alpha 1.0"
 
-    # =====================================================================
-    # 19. Combined — Matched AWCP-best settings (translate from flow agent)
-    #     Reward scale and Q settings from best AWCP config
-    # =====================================================================
-    "combined_match_awcp:--sac_reward_scale 0.05 --gamma 0.99 --tau 0.005 --num_qs 10 --num_min_qs 2 --q_target_clip 100.0"
-
-    # =====================================================================
-    # 20. Combined — Low LR + Large batch (stability focused)
-    # =====================================================================
-    "combined_stable:--lr 1e-4 --lr_critic 1e-4 --batch_size 512 --tau 0.001 --num_qs 10 --num_min_qs 2"
-
-    # =====================================================================
-    # 21. Combined — Reward scale x Temperature interaction
-    # =====================================================================
-    "rs0.01_temp0.1:--sac_reward_scale 0.01 --init_temperature 0.1"
-    "rs0.1_temp0.3:--sac_reward_scale 0.1 --init_temperature 0.3"
-    "rs0.5_temp1.0:--sac_reward_scale 0.5 --init_temperature 1.0"
-    "rs1.0_temp3.0:--sac_reward_scale 1.0 --init_temperature 3.0"
+    # Full kitchen sink — everything conservative
+    "preset_max_conservative:--actor_loss_type iql --iql_expectile 0.7 --cql_alpha 5.0 --backup_entropy --init_temperature 0.3 --num_qs 20 --num_min_qs 2"
 )
