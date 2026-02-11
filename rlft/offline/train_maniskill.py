@@ -45,6 +45,7 @@ from rlft.algorithms import (
     DiffusionPolicyAgent, FlowMatchingAgent, ShortCutFlowAgent,
     ConsistencyFlowAgent, ReflectedFlowAgent,
     CPQLAgent, AWCPAgent, AWShortCutFlowAgent,
+    OfflineSACAgent,
 )
 from rlft.datasets import OfflineRLDataset, IterationBasedBatchSampler, worker_init_fn, ActionNormalizer
 from rlft.datasets.data_utils import build_state_obs_extractor, create_obs_process_fn, encode_observations as _encode_observations_shared
@@ -90,7 +91,7 @@ class Args:
     # Algorithm selection
     algorithm: Literal[
         "diffusion_policy", "flow_matching", "consistency_flow", "reflected_flow", "shortcut_flow",
-        "cpql", "awcp", "aw_shortcut_flow",
+        "cpql", "awcp", "aw_shortcut_flow", "sac",
     ] = "flow_matching"
     
     # Diffusion/Flow settings
@@ -178,6 +179,16 @@ class Args:
     """reward scaling factor (best from wave3: 0.05)"""
     q_target_clip: float = 100.0
     weight_clip: float = 200.0  # Best from wave3 (200 > 100)
+    
+    # SAC-specific settings (only used when algorithm="sac")
+    init_temperature: float = 1.0
+    """Initial entropy temperature for SAC"""
+    target_entropy: Optional[float] = None
+    """Target entropy for SAC temperature tuning (default: -action_dim * act_horizon)"""
+    backup_entropy: bool = False
+    """Whether to subtract entropy in Q-target for SAC"""
+    actor_q_mode: Literal["min", "mean"] = "min"
+    """Q aggregation mode for actor loss: 'min' (pessimistic, SB3-style) or 'mean' (optimistic)"""
     
     # Ensemble Q settings
     use_ensemble_q: bool = True
@@ -549,6 +560,28 @@ def create_agent(algorithm: str, action_dim: int, global_cond_dim: int, args):
             device=device,
         )
     
+    elif algorithm == "sac":
+        return OfflineSACAgent(
+            obs_dim=global_cond_dim,
+            action_dim=action_dim,
+            obs_horizon=args.obs_horizon,
+            pred_horizon=args.pred_horizon,
+            act_horizon=args.act_horizon,
+            hidden_dims=args.q_hidden_dims,
+            num_qs=args.num_qs,
+            num_min_qs=args.num_min_qs,
+            gamma=args.gamma,
+            tau=args.tau,
+            init_temperature=args.init_temperature,
+            target_entropy=args.target_entropy,
+            backup_entropy=args.backup_entropy,
+            reward_scale=args.reward_scale,
+            q_target_clip=args.q_target_clip,
+            actor_q_mode=args.actor_q_mode,
+            action_bounds=args.action_bounds,
+            device=device,
+        )
+    
     else:
         raise ValueError(f"Unknown algorithm: {algorithm}")
 
@@ -785,18 +818,43 @@ def main():
     )
     
     # Set up optimizer
-    if visual_encoder is not None:
-        params = list(agent.parameters()) + list(visual_encoder.parameters())
+    if args.algorithm == "sac":
+        # SAC uses separate optimizers for actor, critic, and temperature
+        actor_params = list(agent.actor.parameters())
+        if visual_encoder is not None:
+            actor_params += list(visual_encoder.parameters())
+        
+        actor_optimizer = optim.AdamW(actor_params, lr=args.lr)
+        critic_optimizer = optim.AdamW(agent.critic.parameters(), lr=args.lr_critic)
+        temp_optimizer = optim.AdamW(agent.temperature.parameters(), lr=args.lr)
+        
+        actor_lr_scheduler = get_scheduler(
+            name="cosine",
+            optimizer=actor_optimizer,
+            num_warmup_steps=500,
+            num_training_steps=args.total_iters,
+        )
+        critic_lr_scheduler = get_scheduler(
+            name="cosine",
+            optimizer=critic_optimizer,
+            num_warmup_steps=500,
+            num_training_steps=args.total_iters,
+        )
+        optimizer = None  # Not used for SAC
+        lr_scheduler = None
     else:
-        params = list(agent.parameters())
-    
-    optimizer = optim.AdamW(params, lr=args.lr)
-    lr_scheduler = get_scheduler(
-        name="cosine",
-        optimizer=optimizer,
-        num_warmup_steps=500,
-        num_training_steps=args.total_iters,
-    )
+        if visual_encoder is not None:
+            params = list(agent.parameters()) + list(visual_encoder.parameters())
+        else:
+            params = list(agent.parameters())
+        
+        optimizer = optim.AdamW(params, lr=args.lr)
+        lr_scheduler = get_scheduler(
+            name="cosine",
+            optimizer=optimizer,
+            num_warmup_steps=500,
+            num_training_steps=args.total_iters,
+        )
     
     # EMA
     ema = EMAModel(parameters=agent.parameters(), power=0.75)
@@ -862,31 +920,81 @@ def main():
             
             next_obs_features = encode_observations(next_obs_seq)
             
-            loss_dict = agent.compute_loss(
-                obs_features=obs_features,
-                actions=action_seq,
-                rewards=rewards,
-                next_obs_features=next_obs_features,
-                dones=dones,
-                actions_for_q=actions_for_q,
-                cumulative_reward=cumulative_reward,
-                chunk_done=chunk_done,
-                discount_factor=discount_factor,
-            )
-            
-            total_loss = loss_dict["loss"]
-            
-            optimizer.zero_grad()
-            total_loss.backward()
-            torch.nn.utils.clip_grad_norm_(agent.parameters(), 1.0)
-            if visual_encoder is not None:
-                torch.nn.utils.clip_grad_norm_(visual_encoder.parameters(), 1.0)
-            optimizer.step()
-            lr_scheduler.step()
-            
-            agent.update_target()
-            if hasattr(agent, "update_ema"):
-                agent.update_ema()
+            if args.algorithm == "sac":
+                # SAC: separate backward passes for actor, critic, temperature
+                obs_cond = obs_features.reshape(obs_features.shape[0], -1) if obs_features.dim() == 3 else obs_features
+                next_obs_cond = next_obs_features.reshape(next_obs_features.shape[0], -1) if next_obs_features.dim() == 3 else next_obs_features
+                
+                # Critic update
+                critic_optimizer.zero_grad()
+                critic_loss, critic_metrics = agent._compute_critic_loss(
+                    obs_cond, actions_for_q, next_obs_cond, rewards, dones,
+                    cumulative_reward, chunk_done, discount_factor,
+                )
+                critic_loss.backward()
+                torch.nn.utils.clip_grad_norm_(agent.critic.parameters(), 1.0)
+                critic_optimizer.step()
+                critic_lr_scheduler.step()
+                
+                # Actor update
+                actor_optimizer.zero_grad()
+                for p in agent.critic.parameters():
+                    p.requires_grad_(False)
+                actor_loss, actor_metrics = agent._compute_actor_loss(obs_cond)
+                actor_loss.backward()
+                for p in agent.critic.parameters():
+                    p.requires_grad_(True)
+                torch.nn.utils.clip_grad_norm_(agent.actor.parameters(), 1.0)
+                if visual_encoder is not None:
+                    torch.nn.utils.clip_grad_norm_(visual_encoder.parameters(), 1.0)
+                actor_optimizer.step()
+                actor_lr_scheduler.step()
+                
+                # Temperature update
+                temp_optimizer.zero_grad()
+                temp_loss, temp_metrics = agent._compute_temperature_loss(obs_cond)
+                temp_loss.backward()
+                temp_optimizer.step()
+                
+                agent.update_target()
+                
+                # Build loss_dict for logging
+                loss_dict = {
+                    "loss": (critic_loss + actor_loss + temp_loss).detach(),
+                    "actor_loss": actor_loss.detach(),
+                    "critic_loss": critic_loss.detach(),
+                    "temperature_loss": temp_loss.detach(),
+                }
+                loss_dict.update(critic_metrics)
+                loss_dict.update(actor_metrics)
+                loss_dict.update(temp_metrics)
+            else:
+                # Flow-based offline RL (cpql, awcp, aw_shortcut_flow)
+                loss_dict = agent.compute_loss(
+                    obs_features=obs_features,
+                    actions=action_seq,
+                    rewards=rewards,
+                    next_obs_features=next_obs_features,
+                    dones=dones,
+                    actions_for_q=actions_for_q,
+                    cumulative_reward=cumulative_reward,
+                    chunk_done=chunk_done,
+                    discount_factor=discount_factor,
+                )
+                
+                total_loss = loss_dict["loss"]
+                
+                optimizer.zero_grad()
+                total_loss.backward()
+                torch.nn.utils.clip_grad_norm_(agent.parameters(), 1.0)
+                if visual_encoder is not None:
+                    torch.nn.utils.clip_grad_norm_(visual_encoder.parameters(), 1.0)
+                optimizer.step()
+                lr_scheduler.step()
+                
+                agent.update_target()
+                if hasattr(agent, "update_ema"):
+                    agent.update_ema()
         
         # EMA update
         ema.step(agent.parameters())
@@ -897,12 +1005,14 @@ def main():
                      for k, v in (loss_dict.items() if isinstance(loss_dict, dict) else {"loss": loss_dict})}
             for k, v in losses.items():
                 writer.add_scalar(f"losses/{k}", v, iteration)
-            writer.add_scalar("charts/learning_rate", optimizer.param_groups[0]["lr"], iteration)
+            
+            current_lr = actor_optimizer.param_groups[0]["lr"] if args.algorithm == "sac" else optimizer.param_groups[0]["lr"]
+            writer.add_scalar("charts/learning_rate", current_lr, iteration)
             
             # WandB logging
             if args.track:
                 wandb_log = {f"losses/{k}": v for k, v in losses.items()}
-                wandb_log["charts/learning_rate"] = optimizer.param_groups[0]["lr"]
+                wandb_log["charts/learning_rate"] = current_lr
                 wandb_log["charts/iteration"] = iteration
                 wandb.log(wandb_log, step=iteration)
         

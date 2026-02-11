@@ -6,7 +6,7 @@
 # -----------------------------------------------------------------------------
 # GPU Configuration
 # -----------------------------------------------------------------------------
-AVAILABLE_GPUS=(0 1 2 3 4 5 6 7 8 9)
+AVAILABLE_GPUS=(1 2 3 4 5 6 7 8 9)
 NUM_GPUS=${#AVAILABLE_GPUS[@]}
 
 # -----------------------------------------------------------------------------
@@ -52,11 +52,11 @@ RETRY_DELAY=10
 if [[ "${CONFIG_VERSION}" == "v3" ]]; then
     # Wave 3: drop diffusion_policy / flow_matching / reflected_flow
     STAGE1_ALGORITHMS=(consistency_flow shortcut_flow)
-    STAGE2_ALGORITHMS=(cpql awcp)
+    STAGE2_ALGORITHMS=(cpql awcp sac)
     STAGE3_ALGORITHMS=(aw_shortcut_flow)
 else
     STAGE1_ALGORITHMS=(flow_matching diffusion_policy consistency_flow shortcut_flow reflected_flow)
-    STAGE2_ALGORITHMS=(cpql awcp)
+    STAGE2_ALGORITHMS=(cpql awcp sac)
     STAGE3_ALGORITHMS=(aw_shortcut_flow)
 fi
 

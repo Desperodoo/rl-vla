@@ -100,13 +100,13 @@ class AWSCAgent(nn.Module):
         tau: float = 0.005,
         reward_scale: float = 1.0,
         q_target_clip: float = 100.0,
-        ema_decay: float = 0.999,
-        weight_clip: float = 100.0,
+        ema_decay: float = 0.9995,  # Wave3 best (consistency_flow)
+        weight_clip: float = 200.0,  # Wave3 best (awcp)
         # Exploration parameters
         exploration_noise_std: float = 0.1,
         # ShortCut Flow specific
         step_size_mode: Literal["power2", "uniform", "fixed"] = "fixed",
-        fixed_step_size: float = 0.125,  # 1/8 (sweep best, match IL/offline_rl)
+        fixed_step_size: float = 0.15,  # Wave3 best (aw_shortcut_flow)
         min_step_size: float = 0.0625,
         max_step_size: float = 0.125,
         target_mode: Literal["velocity", "endpoint"] = "velocity",
