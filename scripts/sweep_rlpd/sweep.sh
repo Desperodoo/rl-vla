@@ -7,7 +7,8 @@
 #   ./sweep.sh run [--algorithm ALGO] [--mode MODE] [--pretrain-path PATH]
 #   ./sweep.sh retry [--algorithm ALGO]
 #   ./sweep.sh status [--algorithm ALGO]
-#   ./sweep.sh analyze [--export FILE]
+#   ./sweep.sh analyze [--algorithm ALGO] [--export FILE]
+#   ./sweep.sh report [--algorithm ALGO]
 #
 # Examples:
 #   ./sweep.sh run                                  # Run all algorithms
@@ -17,11 +18,22 @@
 #   ./sweep.sh retry                                # Retry all failed experiments
 #   ./sweep.sh retry --algorithm sac                # Retry failed SAC experiments
 #   ./sweep.sh status                               # Show status of all experiments
+#   ./sweep.sh analyze --algorithm awsc             # Analyze with metrics for AWSC
 #   ./sweep.sh analyze --export results.json        # Export results to JSON
+#   ./sweep.sh report                               # Generate Python analysis report
 #
 # =============================================================================
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Pre-parse --config-version from all args
+ARGS=("$@")
+for ((i=0; i<${#ARGS[@]}; i++)); do
+    if [[ "${ARGS[$i]}" == "--config-version" ]]; then
+        export CONFIG_VERSION="${ARGS[$((i+1))]}"
+    fi
+done
+
 source "${SCRIPT_DIR}/utils.sh"
 
 # -----------------------------------------------------------------------------
@@ -34,7 +46,11 @@ usage() {
     echo "  run       Run sweep experiments"
     echo "  retry     Retry failed experiments"
     echo "  status    Show experiment status"
-    echo "  analyze   Analyze and export results"
+    echo "  analyze   Analyze results with metrics"
+    echo "  report    Generate Python analysis report"
+    echo ""
+    echo "Global Options:"
+    echo "  --config-version V  Use config version (v1=wave1, v2=wave2, default: v1)"
     echo ""
     echo "Options for 'run':"
     echo "  --algorithm ALGO    Run only specified algorithm (sac, awsc)"
@@ -50,7 +66,11 @@ usage() {
     echo "  --algorithm ALGO    Show status for specified algorithm only"
     echo ""
     echo "Options for 'analyze':"
+    echo "  --algorithm ALGO    Analyze only specified algorithm"
     echo "  --export FILE       Export results to JSON file"
+    echo ""
+    echo "Options for 'report':"
+    echo "  --algorithm ALGO    Report only specified algorithm"
     echo ""
     echo "Environment Variables:"
     echo "  ENV_ID              Task ID (default: LiftPegUpright-v1)"
@@ -93,6 +113,10 @@ cmd_run() {
                 dry_run=true
                 shift
                 ;;
+            --config-version)
+                # Already handled globally, skip
+                shift 2
+                ;;
             *)
                 log_error "Unknown option: $1"
                 usage
@@ -133,6 +157,7 @@ cmd_run() {
         algorithms_to_run=("${ALL_ALGORITHMS[@]}")
     fi
     
+    log_info "Config version: ${CONFIG_VERSION}"
     log_info "Environment: ${ENV_ID}"
     log_info "Total timesteps: ${TOTAL_TIMESTEPS}"
     log_info "Algorithms to run: ${algorithms_to_run[*]}"
@@ -143,7 +168,13 @@ cmd_run() {
         log_info "Processing algorithm: ${algo}"
         log_info "=========================================="
         
-        local config_file="${SCRIPT_DIR}/configs/${algo}.sh"
+        local config_dir="configs"
+        if [[ "$CONFIG_VERSION" == "v2" ]]; then
+            config_dir="configs_v2"
+        elif [[ "$CONFIG_VERSION" == "v3" ]]; then
+            config_dir="configs_v3"
+        fi
+        local config_file="${SCRIPT_DIR}/${config_dir}/${algo}.sh"
         if [[ ! -f "$config_file" ]]; then
             log_warning "Config file not found: ${config_file}, skipping"
             continue
@@ -179,7 +210,7 @@ cmd_run() {
                     
                     # Add pretrain_path and match offline checkpoint's pred_horizon for pretrain mode
                     if [[ "$mode" == "pretrain" ]]; then
-                        extra_args="${extra_args} --pretrain_path ${pretrain_path} --pred_horizon 8"
+                        extra_args="${extra_args} --pretrain_path ${pretrain_path} --pred_horizon 8 --load_pretrain_critic"
                     fi
                     
                     mode_configs+=("${new_name}:${extra_args}")
@@ -229,6 +260,9 @@ cmd_retry() {
                 dry_run=true
                 shift
                 ;;
+            --config-version)
+                shift 2
+                ;;
             *)
                 log_error "Unknown option: $1"
                 usage
@@ -245,7 +279,13 @@ cmd_retry() {
     fi
     
     for algo in "${algorithms_to_check[@]}"; do
-        local config_file="${SCRIPT_DIR}/configs/${algo}.sh"
+        local config_dir="configs"
+        if [[ "$CONFIG_VERSION" == "v2" ]]; then
+            config_dir="configs_v2"
+        elif [[ "$CONFIG_VERSION" == "v3" ]]; then
+            config_dir="configs_v3"
+        fi
+        local config_file="${SCRIPT_DIR}/${config_dir}/${algo}.sh"
         if [[ ! -f "$config_file" ]]; then
             continue
         fi
@@ -255,7 +295,7 @@ cmd_retry() {
         
         for config in "${SWEEP_CONFIGS[@]}"; do
             local config_name=$(echo "$config" | cut -d':' -f1)
-            local exp_dir=$(get_exp_dir "$algo" "$config_name")
+            local exp_dir=$(find_actual_exp_dir "$algo" "$config_name")
             
             if is_experiment_failed "$exp_dir"; then
                 failed_configs+=("$config")
@@ -279,7 +319,7 @@ cmd_retry() {
             # Clean up failed experiment directories before retry
             for config in "${failed_configs[@]}"; do
                 local config_name=$(echo "$config" | cut -d':' -f1)
-                local exp_dir=$(get_exp_dir "$algo" "$config_name")
+                local exp_dir=$(find_actual_exp_dir "$algo" "$config_name")
                 if [[ -d "$exp_dir" ]]; then
                     log_info "Cleaning up ${exp_dir}"
                     rm -rf "$exp_dir"
@@ -305,6 +345,9 @@ cmd_status() {
                 algorithm=$2
                 shift 2
                 ;;
+            --config-version)
+                shift 2
+                ;;
             *)
                 log_error "Unknown option: $1"
                 usage
@@ -326,13 +369,20 @@ cmd_status() {
     local not_started_all=0
     
     echo ""
+    echo "Config version: ${CONFIG_VERSION}"
     echo "Environment: ${ENV_ID}"
     echo "Total timesteps: ${TOTAL_TIMESTEPS}"
     echo "Sweep directory: ${SWEEP_BASE_DIR}"
     echo ""
     
     for algo in "${algorithms_to_check[@]}"; do
-        local config_file="${SCRIPT_DIR}/configs/${algo}.sh"
+        local config_dir="configs"
+        if [[ "$CONFIG_VERSION" == "v2" ]]; then
+            config_dir="configs_v2"
+        elif [[ "$CONFIG_VERSION" == "v3" ]]; then
+            config_dir="configs_v3"
+        fi
+        local config_file="${SCRIPT_DIR}/${config_dir}/${algo}.sh"
         if [[ ! -f "$config_file" ]]; then
             continue
         fi
@@ -350,7 +400,7 @@ cmd_status() {
         
         for config in "${SWEEP_CONFIGS[@]}"; do
             local config_name=$(echo "$config" | cut -d':' -f1)
-            local exp_dir=$(get_exp_dir "$algo" "$config_name")
+            local exp_dir=$(find_actual_exp_dir "$algo" "$config_name")
             
             total=$((total + 1))
             
@@ -388,15 +438,23 @@ cmd_status() {
 }
 
 # -----------------------------------------------------------------------------
-# Analyze Command
+# Analyze Command (with metrics)
 # -----------------------------------------------------------------------------
 cmd_analyze() {
     local export_file=""
+    local algorithm=""
     
     while [[ $# -gt 0 ]]; do
         case $1 in
             --export)
                 export_file=$2
+                shift 2
+                ;;
+            --algorithm)
+                algorithm=$2
+                shift 2
+                ;;
+            --config-version)
                 shift 2
                 ;;
             *)
@@ -406,13 +464,82 @@ cmd_analyze() {
         esac
     done
     
-    # Show status first
-    cmd_status
+    # Create analysis output directory
+    local analysis_dir="${SWEEP_BASE_DIR}/analysis_results"
+    mkdir -p "$analysis_dir"
     
-    # Export if requested
-    if [[ -n "$export_file" ]]; then
-        export_results_json "$export_file"
+    local algorithms_to_analyze=()
+    if [[ -n "$algorithm" ]]; then
+        algorithms_to_analyze=("$algorithm")
+    else
+        algorithms_to_analyze=("${ALL_ALGORITHMS[@]}")
     fi
+    
+    echo ""
+    echo "Config version: ${CONFIG_VERSION}"
+    echo "Environment: ${ENV_ID}"
+    echo "Total timesteps: ${TOTAL_TIMESTEPS}"
+    echo "Sweep directory: ${SWEEP_BASE_DIR}"
+    echo ""
+    
+    # Run detailed analysis with metrics for each algorithm
+    for algo in "${algorithms_to_analyze[@]}"; do
+        analyze_algorithm_with_metrics "$algo"
+    done
+    
+    # Save analysis summary to file (strip ANSI color codes)
+    local summary_file="${analysis_dir}/analysis_summary_$(date +%Y%m%d_%H%M%S).txt"
+    {
+        echo "RLPD Sweep Analysis Summary"
+        echo "Generated: $(date)"
+        echo "Config version: ${CONFIG_VERSION}"
+        echo "Environment: ${ENV_ID}"
+        echo "Total timesteps: ${TOTAL_TIMESTEPS}"
+        echo ""
+        for algo in "${algorithms_to_analyze[@]}"; do
+            analyze_algorithm_with_metrics "$algo"
+        done
+    } | sed 's/\x1b\[[0-9;]*m//g' > "$summary_file"
+    log_info "Analysis summary saved to ${summary_file}"
+    
+    # Auto-export JSON
+    local json_file="${export_file:-${analysis_dir}/results.json}"
+    export_results_json "$json_file"
+}
+
+# -----------------------------------------------------------------------------
+# Report Command (Python analysis with visualizations)
+# -----------------------------------------------------------------------------
+cmd_report() {
+    local algorithm=""
+    
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            --algorithm)
+                algorithm=$2
+                shift 2
+                ;;
+            --config-version)
+                shift 2
+                ;;
+            *)
+                log_error "Unknown option: $1"
+                usage
+                ;;
+        esac
+    done
+    
+    local analysis_dir="${SWEEP_BASE_DIR}/analysis_results"
+    mkdir -p "$analysis_dir"
+    
+    local cmd="python ${SCRIPT_DIR}/analyze_sweep.py --sweep-dir ${SWEEP_BASE_DIR} --config-version ${CONFIG_VERSION} --output-dir ${analysis_dir}"
+    
+    if [[ -n "$algorithm" ]]; then
+        cmd="${cmd} --algorithm ${algorithm}"
+    fi
+    
+    log_info "Running Python analysis..."
+    eval "$cmd"
 }
 
 # -----------------------------------------------------------------------------
@@ -438,6 +565,9 @@ main() {
             ;;
         analyze)
             cmd_analyze "$@"
+            ;;
+        report)
+            cmd_report "$@"
             ;;
         help|--help|-h)
             usage

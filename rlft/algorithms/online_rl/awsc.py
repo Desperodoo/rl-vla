@@ -71,6 +71,10 @@ class AWSCAgent(nn.Module):
         inference_mode: Inference step mode (default: "uniform")
         filter_policy_data: Whether to filter policy data by advantage (default: False)
         advantage_threshold: Minimum advantage for online samples (default: 0.0)
+        advantage_mode: How to compute advantage baseline:
+            - 'batch_mean': Q(s,a) - mean(Q) over batch (current default, batch-relative)
+            - 'per_state_v': Q(s,a) - V(s) where V(s) = E_{a'~π}[Q(s,a')] (per-state, proper AWAC)
+        num_v_samples: Number of policy samples to estimate V(s) (default: 4)
         device: Device to run on (default: "cuda")
     """
     
@@ -118,6 +122,9 @@ class AWSCAgent(nn.Module):
         # Policy-Critic data separation
         filter_policy_data: bool = False,
         advantage_threshold: float = 0.0,
+        # Advantage computation mode
+        advantage_mode: Literal["batch_mean", "per_state_v"] = "batch_mean",
+        num_v_samples: int = 4,
         action_bounds: Optional[tuple] = None,
         device: str = "cuda",
     ):
@@ -164,6 +171,10 @@ class AWSCAgent(nn.Module):
         self.filter_policy_data = filter_policy_data
         self.advantage_threshold = advantage_threshold
         self.action_bounds = action_bounds
+        
+        # Advantage computation mode
+        self.advantage_mode = advantage_mode
+        self.num_v_samples = num_v_samples
         
         # Log2 of max steps for power2 mode
         self.log_max_steps = int(math.log2(max_denoising_steps))
@@ -391,6 +402,37 @@ class AWSCAgent(nn.Module):
             x = torch.clamp(x, self.action_bounds[0], self.action_bounds[1])
         return x
     
+    @torch.no_grad()
+    def _estimate_value(self, obs_cond: torch.Tensor) -> torch.Tensor:
+        """Estimate V(s) = E_{a'~π}[Q(s,a')] by sampling from current policy.
+        
+        This provides a per-state baseline for proper advantage computation,
+        unlike batch-mean which is state-independent.
+        
+        Args:
+            obs_cond: (B, obs_dim) observation features
+            
+        Returns:
+            v_values: (B, 1) estimated state values
+        """
+        B = obs_cond.shape[0]
+        K = self.num_v_samples
+        
+        # Expand obs for K parallel samples: (B, obs_dim) -> (B*K, obs_dim)
+        obs_expanded = obs_cond.unsqueeze(1).expand(-1, K, -1).reshape(B * K, -1)
+        
+        # Sample K action sequences from current policy (use EMA for stability)
+        sampled_actions = self._sample_actions_batch(obs_expanded, use_ema=True)
+        sampled_actions_q = sampled_actions[:, :self.act_horizon, :]  # (B*K, act_horizon, action_dim)
+        
+        # Evaluate Q for each sampled action
+        q_values = self.critic.get_min_q(sampled_actions_q, obs_expanded, random_subset=True)  # (B*K, 1)
+        
+        # Average over K samples per state: (B*K, 1) -> (B, K, 1) -> (B, 1)
+        v_values = q_values.reshape(B, K, 1).mean(dim=1)
+        
+        return v_values
+    
     def compute_actor_loss(
         self,
         obs_features: torch.Tensor,
@@ -447,8 +489,17 @@ class AWSCAgent(nn.Module):
         # Compute AWAC-style weights from Ensemble Q-values
         with torch.no_grad():
             q_data = self.critic.get_min_q(actions_for_q, obs_cond, random_subset=True)
-            baseline = q_data.mean()
-            advantage = q_data - baseline
+            
+            if self.advantage_mode == "per_state_v":
+                # Per-state V(s) baseline: V(s) = E_{a'~π}[Q(s,a')]
+                # Sample multiple actions from current policy for each state
+                v_values = self._estimate_value(obs_cond)  # (B, 1)
+                advantage = q_data - v_values
+            else:
+                # Batch-mean baseline (original)
+                baseline = q_data.mean()
+                advantage = q_data - baseline
+            
             weights = torch.clamp(torch.exp(self.beta * advantage), max=self.weight_clip)
             weights = weights / weights.mean()
             weights = weights.squeeze(-1)
@@ -565,7 +616,10 @@ class AWSCAgent(nn.Module):
             "q_mean": q_data.mean().item(),
             "weight_mean": weights.mean().item(),
             "weight_std": weights.std().item(),
+            "weight_max": weights.max().item(),
             "advantage_mean": advantage.mean().item(),
+            "advantage_std": advantage.std().item(),
+            "advantage_mode": self.advantage_mode,
             "policy_batch_size": B_policy,
             "n_demo_samples": n_demo,
             "n_online_kept": n_online_kept,

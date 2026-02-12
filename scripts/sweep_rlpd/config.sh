@@ -43,7 +43,15 @@ DEMO_PATH="${DEMO_PATH:-~/.maniskill/demos/${ENV_ID}/rl/trajectory.${OBS_MODE}.$
 # -----------------------------------------------------------------------------
 # Experiment Configuration
 # -----------------------------------------------------------------------------
-EXP_NAME="${EXP_NAME:-rlpd_sweep}"
+# Config version: "v1" (wave 1) or "v2" (wave 2)
+# Can be overridden by --config-version flag
+CONFIG_VERSION="${CONFIG_VERSION:-v1}"
+
+if [[ "${CONFIG_VERSION}" == "v2" ]]; then
+    EXP_NAME="${EXP_NAME:-rlpd_sweep_v2}"
+else
+    EXP_NAME="${EXP_NAME:-rlpd_sweep}"
+fi
 SWEEP_BASE_DIR="${SWEEP_BASE_DIR:-runs/${EXP_NAME}}"
 
 # WandB 配置

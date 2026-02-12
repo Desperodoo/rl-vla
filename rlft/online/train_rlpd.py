@@ -111,8 +111,11 @@ class Args:
     
     # Policy settings
     obs_horizon: int = 2
-    act_horizon: int = 2
-    pred_horizon: int = 4
+    act_horizon: int = 8
+    """Action horizon (number of action steps fed to critic). Default 8 to match
+    offline pretrained checkpoints. Must align with pretrain checkpoint's critic
+    input_dim = obs_dim + action_dim * act_horizon."""
+    pred_horizon: int = 16
     
     # Visual encoder
     visual_feature_dim: int = 256
@@ -125,7 +128,7 @@ class Args:
     pretrain_path: Optional[str] = None
     """Path to pretrained ShortCut Flow or AW-ShortCut checkpoint for AWSC"""
     load_pretrain_critic: bool = False
-    """Whether to load critic from pretrain checkpoint"""
+    """Whether to load critic from pretrain checkpoint (recommended for AW-SC offline checkpoints)"""
     
     # AWSC hyperparameters (unified with old version)
     awsc_beta: float = 100.0
@@ -150,6 +153,22 @@ class Args:
     """Whether to filter policy training data by advantage"""
     awsc_advantage_threshold: float = -0.5
     """Minimum advantage for online samples in policy training"""
+    
+    # Advantage computation mode (AWSC)
+    awsc_advantage_mode: Literal["batch_mean", "per_state_v"] = "batch_mean"
+    """How to compute advantage baseline for Q-weighting:
+    - 'batch_mean': A(s,a) = Q(s,a) - mean(Q) over batch (fast, but state-independent)
+    - 'per_state_v': A(s,a) = Q(s,a) - V(s) where V(s) = E_{a'~π}[Q(s,a')]
+      (proper AWAC, distinguishes good/bad actions per state, costs extra forward passes)"""
+    awsc_num_v_samples: int = 4
+    """Number of policy samples to estimate V(s) for per_state_v mode"""
+    
+    # Actor policy training mode (AWSC)
+    actor_policy_mode: Literal["all", "success_only"] = "all"
+    """Data source for actor (policy) updates:
+    - 'all': Use full mixed batch (demo + online buffer), same as critic
+    - 'success_only': Use only demo + online success buffer for actor;
+      prevents policy from imitating failed rollout actions"""
     
     # ShortCut Flow U-Net settings (for AWSC, matches offline training)
     unet_down_dims: List[int] = field(default_factory=lambda: [64, 128, 256])
@@ -470,6 +489,31 @@ def validate_pretrained_checkpoint(
                     f"Fix: --{param} {ckpt_val}"
                 )
     
+    # --- 7. Validate critic dimensions (act_horizon must match for load_pretrain_critic) ---
+    if args.load_pretrain_critic:
+        critic_key = None
+        for key in agent_state:
+            if key.startswith("critic.q_nets.0.0.weight"):
+                critic_key = key
+                break
+        if critic_key is not None:
+            ckpt_critic_input_dim = agent_state[critic_key].shape[1]
+            expected_critic_input_dim = obs_dim + action_dim * args.act_horizon
+            if ckpt_critic_input_dim != expected_critic_input_dim:
+                ckpt_act_horizon = (ckpt_critic_input_dim - obs_dim) // action_dim
+                errors.append(
+                    f"critic input_dim: checkpoint={ckpt_critic_input_dim} "
+                    f"(act_horizon={ckpt_act_horizon}), "
+                    f"current={expected_critic_input_dim} "
+                    f"(act_horizon={args.act_horizon}). "
+                    f"Fix: --act_horizon {ckpt_act_horizon}"
+                )
+            else:
+                warnings.append(
+                    f"Critic input_dim={ckpt_critic_input_dim} matches "
+                    f"(act_horizon={args.act_horizon}) ✓"
+                )
+    
     # --- Report ---
     if warnings:
         for w in warnings:
@@ -653,6 +697,8 @@ def main():
             exploration_noise_std=args.awsc_exploration_noise_std,
             filter_policy_data=args.awsc_filter_policy_data,
             advantage_threshold=args.awsc_advantage_threshold,
+            advantage_mode=args.awsc_advantage_mode,
+            num_v_samples=args.awsc_num_v_samples,
             device=device,
         ).to(device)
         use_temperature = False
@@ -684,6 +730,15 @@ def main():
             print(f"  - Advantage threshold: {args.awsc_advantage_threshold}")
             print(f"  - Policy uses: demos + high-advantage online samples")
             print(f"  - Critic uses: all data")
+        
+        # Print actor policy mode and advantage mode
+        print(f"Actor policy mode: {args.actor_policy_mode}")
+        if args.actor_policy_mode == "success_only":
+            print(f"  - Actor trains on: demo buffer + online success buffer only")
+            print(f"  - Critic trains on: all data (demo + full online buffer)")
+        print(f"Advantage mode: {args.awsc_advantage_mode}")
+        if args.awsc_advantage_mode == "per_state_v":
+            print(f"  - V(s) estimated with {args.awsc_num_v_samples} policy samples per state")
     else:
         raise ValueError(f"Unknown algorithm: {args.algorithm}")
     
@@ -724,8 +779,12 @@ def main():
     )
     
     # Success buffer (for storing successful online episodes)
+    # Auto-enable when actor_policy_mode requires it
     success_buffer = None
-    if args.use_success_buffer:
+    need_success_buffer = args.use_success_buffer or (
+        args.algorithm == "awsc" and args.actor_policy_mode == "success_only"
+    )
+    if need_success_buffer:
         success_buffer = SuccessReplayBuffer(
             capacity=args.success_buffer_capacity,
             num_envs=args.num_envs,
@@ -884,6 +943,7 @@ def main():
         chunk_collector.reset()
         chunk_rewards = []
         chunk_dones = []
+        chunk_success_per_env = np.zeros(args.num_envs, dtype=np.float32)
         
         first_obs_raw = obs_stacker.get_stacked()
         first_obs_raw_np = {
@@ -913,6 +973,8 @@ def main():
                     if hasattr(success, "item"):
                         success = success.item()
                     episode_successes.append(float(success))
+                    # Track success per env for this chunk (for success buffer)
+                    chunk_success_per_env[env_idx] = max(chunk_success_per_env[env_idx], float(success))
                     episode_rewards[env_idx] = 0.0
                     episode_lengths[env_idx] = 0
             
@@ -940,6 +1002,21 @@ def main():
             discount_factor=discount_factor,
             effective_length=effective_length,
         )
+        
+        # Store successful transitions in success buffer (for actor_policy_mode="success_only")
+        if success_buffer is not None:
+            success_buffer.store(
+                obs=first_obs_raw_np,
+                action=action_chunk,
+                reward=chunk_rewards[0],
+                next_obs=next_obs_raw_np,
+                done=np.any(np.stack(chunk_dones, axis=0), axis=0).astype(np.float32),
+                cumulative_reward=cumulative_reward,
+                chunk_done=chunk_done,
+                discount_factor=discount_factor,
+                effective_length=effective_length,
+                success=chunk_success_per_env,
+            )
         
         # Training updates
         if total_steps >= args.num_seed_steps and online_buffer.size >= args.batch_size:
@@ -1001,7 +1078,28 @@ def main():
                     training_metrics[f"critic/{k}"].append(v.item() if torch.is_tensor(v) else v)
                 
                 # Re-encode for actor update (need fresh computation graph)
-                obs_features_actor = encode_observations(batch["observations"])
+                # In "success_only" mode, sample a separate batch for actor from
+                # success_buffer + offline_dataset (no failed transitions).
+                # In "all" mode, reuse the same batch as critic.
+                use_success_batch = (
+                    args.algorithm == "awsc"
+                    and args.actor_policy_mode == "success_only"
+                    and success_buffer is not None
+                    and success_buffer.size > 0
+                )
+                
+                if use_success_batch:
+                    actor_batch = success_buffer.sample_mixed(
+                        batch_size=args.batch_size,
+                        offline_dataset=offline_dataset,
+                        online_ratio=args.online_ratio if offline_dataset else 1.0,
+                        policy_mode=True,
+                        success_only=True,
+                    )
+                    obs_features_actor = encode_observations(actor_batch["observations"])
+                else:
+                    actor_batch = batch
+                    obs_features_actor = encode_observations(batch["observations"])
                 
                 # Update actor - algorithm-specific
                 actor_optimizer.zero_grad()
@@ -1011,9 +1109,9 @@ def main():
                     # AWSC needs actions and is_demo for advantage-weighted loss
                     actor_loss, actor_metrics = agent.compute_actor_loss(
                         obs_features_actor,
-                        batch["actions"],
-                        batch["actions"][:, :args.act_horizon],
-                        batch.get("is_demo"),  # May be None if not tracked
+                        actor_batch["actions"],
+                        actor_batch["actions"][:, :args.act_horizon],
+                        actor_batch.get("is_demo"),  # May be None if not tracked
                     )
                 actor_loss.backward()
                 nn.utils.clip_grad_norm_(actor_params, args.max_grad_norm)
@@ -1062,12 +1160,21 @@ def main():
             if training_metrics:
                 for metric_name, values in training_metrics.items():
                     if values:
+                        # Skip string metrics (like advantage_mode)
+                        if isinstance(values[0], str):
+                            continue
                         avg_value = np.mean(values)
                         writer.add_scalar(f"train/{metric_name}", avg_value, total_steps)
                         log_dict[f"train/{metric_name}"] = avg_value
                 
                 # Clear metrics after logging
                 training_metrics.clear()
+            
+            # Log success buffer statistics
+            if success_buffer is not None:
+                sb_stats = success_buffer.get_statistics()
+                for k, v in sb_stats.items():
+                    log_dict[f"train/success_buffer/{k}"] = v
             
             if args.track:
                 wandb.log(log_dict, step=total_steps)
