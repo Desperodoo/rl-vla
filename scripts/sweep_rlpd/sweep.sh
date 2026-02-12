@@ -13,6 +13,7 @@
 # Examples:
 #   ./sweep.sh run                                  # Run all algorithms
 #   ./sweep.sh run --algorithm sac                  # Run only SAC
+#   ./sweep.sh run --algorithm awsc --config-version v2  # Run AWSC v2 (auto pretrain mode)
 #   ./sweep.sh run --algorithm awsc --mode scratch  # Run AWSC from scratch
 #   ./sweep.sh run --algorithm awsc --mode pretrain --pretrain-path runs/shortcut_flow/best.pt
 #   ./sweep.sh retry                                # Retry all failed experiments
@@ -51,10 +52,12 @@ usage() {
     echo ""
     echo "Global Options:"
     echo "  --config-version V  Use config version (v1=wave1, v2=wave2, default: v1)"
+    echo "                      v2 auto-sets AWSC mode to 'pretrain' (fine-tuning)"
     echo ""
     echo "Options for 'run':"
     echo "  --algorithm ALGO    Run only specified algorithm (sac, awsc)"
-    echo "  --mode MODE         AWSC mode: scratch, pretrain, both (default: scratch)"
+    echo "  --mode MODE         AWSC mode: scratch, pretrain, both"
+    echo "                      (default: scratch for v1, pretrain for v2)"
     echo "  --pretrain-path P   Pretrained checkpoint path (default: Wave 3 best AWSC model)"
     echo "  --dry-run           Show what would be run without executing"
     echo ""
@@ -87,7 +90,7 @@ usage() {
 # -----------------------------------------------------------------------------
 cmd_run() {
     local algorithm=""
-    local awsc_mode="scratch"
+    local awsc_mode=""  # Empty means auto-detect based on config-version
     local pretrain_path=""
     local dry_run=false
     
@@ -123,6 +126,17 @@ cmd_run() {
                 ;;
         esac
     done
+    
+    # Auto-detect AWSC mode based on config-version if not explicitly set
+    if [[ -z "$awsc_mode" ]]; then
+        if [[ "$CONFIG_VERSION" == "v2" ]]; then
+            # v2 configs are designed for fine-tuning from pretrained model
+            awsc_mode="pretrain"
+            log_info "Config v2: auto-setting AWSC mode to 'pretrain' (designed for fine-tuning)"
+        else
+            awsc_mode="scratch"
+        fi
+    fi
     
     # Validate pretrain mode requirements
     if [[ "$algorithm" == "awsc" || -z "$algorithm" ]]; then
@@ -161,6 +175,10 @@ cmd_run() {
     log_info "Environment: ${ENV_ID}"
     log_info "Total timesteps: ${TOTAL_TIMESTEPS}"
     log_info "Algorithms to run: ${algorithms_to_run[*]}"
+    log_info "AWSC mode: ${awsc_mode}"
+    if [[ -n "$pretrain_path" ]]; then
+        log_info "Pretrain path: ${pretrain_path}"
+    fi
     log_info "Available GPUs: ${AVAILABLE_GPUS[*]} (${NUM_GPUS} total)"
     
     for algo in "${algorithms_to_run[@]}"; do
