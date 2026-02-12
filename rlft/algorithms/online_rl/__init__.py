@@ -9,9 +9,11 @@ Online Reinforcement Learning algorithms.
 from .sac import SACAgent
 from .reinflow import ReinFlowAgent
 from .awsc import AWSCAgent
+from .dsrl_sac import DSRLSACAgent
 
 __all__ = [
     "SACAgent",
     "ReinFlowAgent",
     "AWSCAgent",
+    "DSRLSACAgent",
 ]

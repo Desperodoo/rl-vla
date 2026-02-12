@@ -8,8 +8,10 @@ Provides:
 
 from .make_env import make_eval_envs
 from .evaluate import evaluate
+from .dsrl_env import ManiSkillFlowEnvWrapper
 
 __all__ = [
     "make_eval_envs",
     "evaluate",
+    "ManiSkillFlowEnvWrapper",
 ]

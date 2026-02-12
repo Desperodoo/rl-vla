@@ -14,5 +14,6 @@ Usage:
 try:
     from rlft.online import train_rlpd
     from rlft.online import train_reinflow
+    from rlft.online import train_dsrl
 except ImportError:
     pass  # Scripts have external dependencies
