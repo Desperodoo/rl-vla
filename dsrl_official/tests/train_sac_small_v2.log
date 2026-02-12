@@ -1,0 +1,62 @@
+/home/amax/miniforge-pypy3/envs/rlft_ms3/lib/python3.10/site-packages/torch/cuda/__init__.py:56: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+/home/amax/miniforge-pypy3/envs/rlft_ms3/lib/python3.10/site-packages/sapien/__init__.py:18: UserWarning: pkg_resources is deprecated as an API. See https://setuptools.pypa.io/en/latest/pkg_resources.html. The pkg_resources package is slated for removal as early as 2025-11-30. Refrain from using this package or pin to Setuptools<81.
+  import pkg_resources
+======================================================================
+DSRL-SAC Small Scale Training
+======================================================================
+
+Config:
+  total_timesteps: 100000
+  n_envs: 50
+  learning_rate: 0.0003
+  gradient_steps (UTD): 20
+
+[1/5] Loading checkpoint...
+
+[2/5] Loading model components...
+number of parameters: 6.10M
+  ✅ Loaded velocity_net
+  ✅ Loaded visual_encoder
+  ✅ Created ShortCutFlowWrapper
+
+[3/5] Creating training environments...
+  ✅ Created training env with 50 parallel envs
+  Action space: Box(-1.5, 1.5, (56,), float32)
+  Observation space: Box(-inf, inf, (562,), float32)
+
+[4/5] Creating SAC model...
+Using cuda device
+  ✅ Created SAC model
+
+[5/5] Starting training...
+
+Training for 100000 timesteps...
+Traceback (most recent call last):
+  File "/home/amax/rl-vla/rlft/dsrl_official/tests/train_dsrl_sac_small.py", line 309, in <module>
+    model.learn(
+  File "/home/amax/rl-vla/rlft/dsrl_ajwagen/stable-baselines3/stable_baselines3/sac/sac.py", line 320, in learn
+    return super().learn(
+  File "/home/amax/rl-vla/rlft/dsrl_ajwagen/stable-baselines3/stable_baselines3/common/off_policy_algorithm.py", line 328, in learn
+    rollout = self.collect_rollouts(
+  File "/home/amax/rl-vla/rlft/dsrl_ajwagen/stable-baselines3/stable_baselines3/common/off_policy_algorithm.py", line 560, in collect_rollouts
+    new_obs, rewards, dones, infos = env.step(actions)
+  File "/home/amax/rl-vla/rlft/dsrl_ajwagen/stable-baselines3/stable_baselines3/common/vec_env/base_vec_env.py", line 222, in step
+    return self.step_wait()
+  File "/home/amax/rl-vla/rlft/dsrl_official/tests/train_dsrl_sac_small.py", line 186, in step_wait
+    obs, reward, terminated, truncated, info = self.env.step(self._actions)
+  File "/home/amax/rl-vla/rlft/dsrl_official/env_utils.py", line 375, in step
+    step_action = real_actions[:, i, :]
+IndexError: index 7 is out of bounds for dimension 1 with size 7
+Exception ignored in: <function tqdm.__del__ at 0x7f239d729360>
+Traceback (most recent call last):
+  File "/home/amax/miniforge-pypy3/envs/rlft_ms3/lib/python3.10/site-packages/tqdm/std.py", line 1148, in __del__
+  File "/home/amax/miniforge-pypy3/envs/rlft_ms3/lib/python3.10/site-packages/tqdm/rich.py", line 121, in close
+  File "/home/amax/miniforge-pypy3/envs/rlft_ms3/lib/python3.10/site-packages/rich/progress.py", line 1189, in __exit__
+  File "/home/amax/miniforge-pypy3/envs/rlft_ms3/lib/python3.10/site-packages/rich/progress.py", line 1175, in stop
+  File "/home/amax/miniforge-pypy3/envs/rlft_ms3/lib/python3.10/site-packages/rich/live.py", line 165, in stop
+  File "/home/amax/miniforge-pypy3/envs/rlft_ms3/lib/python3.10/site-packages/rich/live.py", line 272, in refresh
+  File "/home/amax/miniforge-pypy3/envs/rlft_ms3/lib/python3.10/site-packages/rich/console.py", line 1698, in print
+  File "/home/amax/miniforge-pypy3/envs/rlft_ms3/lib/python3.10/site-packages/rich/console.py", line 1555, in _collect_renderables
+  File "/home/amax/miniforge-pypy3/envs/rlft_ms3/lib/python3.10/site-packages/rich/protocol.py", line 28, in rich_cast
+ImportError: sys.meta_path is None, Python is likely shutting down

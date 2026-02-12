@@ -1,0 +1,58 @@
+# DSRL Official - 虚拟环境依赖
+# 使用: conda activate arx-py310
+#
+# 注意: 本项目使用现有的 arx-py310 环境
+# 以下记录关键依赖版本，供参考和问题排查
+
+name: arx-py310
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+  - defaults
+
+dependencies:
+  - python=3.10
+  - pytorch>=2.0
+  - pytorch-cuda>=11.8
+  - numpy
+  - scipy
+  - tqdm
+  - pip
+
+  # pip 安装的包
+  - pip:
+    # RL 框架
+    - stable-baselines3>=2.0  # 官方 DSRL 使用魔改版 SB3
+    - gymnasium>=0.29
+    
+    # ManiSkill3
+    - mani_skill  # 或从源码安装
+    
+    # 深度学习
+    - torch
+    - torchvision
+    - einops
+    
+    # 配置和日志
+    - tyro  # 命令行参数解析
+    - omegaconf  # 配置管理
+    - hydra-core  # 官方 DSRL 使用 Hydra
+    - wandb  # 实验跟踪
+    - tensorboard
+    
+    # 数据处理
+    - h5py  # HDF5 数据集
+    - opencv-python
+    
+    # 其他
+    - tqdm
+    - rich
+
+# 安装说明:
+# 1. 激活环境: conda activate arx-py310
+# 2. 安装官方 SB3 fork (如需要 DSRL-NA):
+#    cd /path/to/ajwagen/stable-baselines3
+#    pip install -e .
+# 3. 或使用标准 SB3 (仅 DSRL-SAC):
+#    pip install stable-baselines3
