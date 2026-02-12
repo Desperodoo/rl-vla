@@ -11,19 +11,10 @@
 # =============================================================================
 
 # -----------------------------------------------------------------------------
-# GPU Configuration (auto-detect if not set)
+# GPU Configuration
 # -----------------------------------------------------------------------------
-if [[ -z "${GPU_IDS:-}" ]]; then
-    if command -v nvidia-smi &>/dev/null; then
-        NUM_GPUS=$(nvidia-smi -L 2>/dev/null | wc -l)
-    else
-        NUM_GPUS=1
-    fi
-    AVAILABLE_GPUS=($(seq 0 $((NUM_GPUS - 1))))
-else
-    IFS=',' read -ra AVAILABLE_GPUS <<< "$GPU_IDS"
-    NUM_GPUS=${#AVAILABLE_GPUS[@]}
-fi
+AVAILABLE_GPUS=(1 2 3 4 5 6 7 8 9)
+NUM_GPUS=${#AVAILABLE_GPUS[@]}
 
 # -----------------------------------------------------------------------------
 # Environment Configuration

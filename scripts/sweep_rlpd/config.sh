@@ -6,18 +6,7 @@
 # -----------------------------------------------------------------------------
 # GPU Configuration
 # -----------------------------------------------------------------------------
-# 支持外部指定 GPU 列表
-if [ -n "${CUDA_VISIBLE_DEVICES}" ]; then
-    IFS=',' read -ra AVAILABLE_GPUS <<< "${CUDA_VISIBLE_DEVICES}"
-else
-    # 自动检测可用 GPU
-    _gpu_count=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | wc -l)
-    AVAILABLE_GPUS=()
-    for ((i=0; i<_gpu_count; i++)); do
-        AVAILABLE_GPUS+=($i)
-    done
-    unset _gpu_count
-fi
+AVAILABLE_GPUS=(1 2 3 4 5 6 7 8 9)
 NUM_GPUS=${#AVAILABLE_GPUS[@]}
 
 # -----------------------------------------------------------------------------
