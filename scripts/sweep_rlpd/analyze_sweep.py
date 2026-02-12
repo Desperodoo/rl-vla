@@ -217,9 +217,11 @@ class DataExtractor:
             content = f.read()
 
         # wandb summary lines
+        # train_rlpd.py logs:
+        #   final/best_success_rate (best success_once over training)
+        #   eval/success_once, eval/success_at_end (final eval values)
         patterns = [
-            (r"wandb:\s*final/best_success_once\s+([\d.]+)", "best_success_once"),
-            (r"wandb:\s*final/best_success_at_end\s+([\d.]+)", "best_success_at_end"),
+            (r"wandb:\s*final/best_success_rate\s+([\d.]+)", "best_success_once"),
             (r"wandb:\s*eval/success_once\s+([\d.]+)", "final_success_once"),
             (r"wandb:\s*eval/success_at_end\s+([\d.]+)", "final_success_at_end"),
             (r"wandb:\s*train/critic_loss\s+([\d.]+)", "critic_loss"),
@@ -288,8 +290,10 @@ class DataExtractor:
                     params[key] = config_json[key]
 
         # Check status
+        # train_rlpd.py saves best.pt (not best_eval_success_once.pt)
         checkpoint_dir = exp_dir / "checkpoints"
         has_checkpoint = (
+            (checkpoint_dir / "best.pt").exists() or
             (checkpoint_dir / "best_eval_success_once.pt").exists() or
             (checkpoint_dir / "final.pt").exists()
         )
@@ -312,12 +316,17 @@ class DataExtractor:
 
         training_curves = self.load_tensorboard_data(exp_dir)
 
+        # best_success_once = final/best_success_rate from train_rlpd.py
+        # For success_at_end, use final eval value since no "best" version is tracked
+        success_once = metrics.get("best_success_once")
+        success_at_end = metrics.get("final_success_at_end")
+
         return ExperimentResult(
             algorithm=algorithm,
             config_name=config_name,
             params=params,
-            success_once=metrics.get("best_success_once"),
-            success_at_end=metrics.get("best_success_at_end"),
+            success_once=success_once,
+            success_at_end=success_at_end,
             status=status,
             exp_dir=str(exp_dir),
             training_curves=training_curves,

@@ -18,7 +18,7 @@ CONTROL_MODE="${CONTROL_MODE:-pd_ee_delta_pose}"
 SIM_BACKEND="${SIM_BACKEND:-physx_cuda}"
 
 # Training timesteps (Online RL 使用 timesteps 而非 iterations)
-TOTAL_TIMESTEPS="${TOTAL_TIMESTEPS:-100000}"
+TOTAL_TIMESTEPS="${TOTAL_TIMESTEPS:-500000}"
 
 # Online RL 特有配置
 NUM_ENVS="${NUM_ENVS:-50}"
@@ -32,11 +32,17 @@ DEMO_PATH="${DEMO_PATH:-~/.maniskill/demos/${ENV_ID}/rl/trajectory.${OBS_MODE}.$
 # -----------------------------------------------------------------------------
 # Experiment Configuration
 # -----------------------------------------------------------------------------
-# Config version: "v1" (wave 1) or "v2" (wave 2)
+# Config version: "v1" (wave 1), "v2" (wave 2), or "v3" (wave 3)
 # Can be overridden by --config-version flag
 CONFIG_VERSION="${CONFIG_VERSION:-v1}"
 
-if [[ "${CONFIG_VERSION}" == "v2" ]]; then
+if [[ "${CONFIG_VERSION}" == "v4" ]]; then
+    EXP_NAME="${EXP_NAME:-rlpd_sweep_v4}"
+    # v4 建议 500K 训练 (v3 250K 数据显示多数配置仍在上升)
+    TOTAL_TIMESTEPS="${TOTAL_TIMESTEPS:-500000}"
+elif [[ "${CONFIG_VERSION}" == "v3" ]]; then
+    EXP_NAME="${EXP_NAME:-rlpd_sweep_v3}"
+elif [[ "${CONFIG_VERSION}" == "v2" ]]; then
     EXP_NAME="${EXP_NAME:-rlpd_sweep_v2}"
 else
     EXP_NAME="${EXP_NAME:-rlpd_sweep}"

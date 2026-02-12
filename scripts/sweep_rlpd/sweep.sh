@@ -51,8 +51,8 @@ usage() {
     echo "  report    Generate Python analysis report"
     echo ""
     echo "Global Options:"
-    echo "  --config-version V  Use config version (v1=wave1, v2=wave2, default: v1)"
-    echo "                      v2 auto-sets AWSC mode to 'pretrain' (fine-tuning)"
+    echo "  --config-version V  Use config version (v1=wave1, v2=wave2, v3=wave3, v4=wave4)"
+    echo "                      v2/v3/v4 auto-sets AWSC mode to 'pretrain' (fine-tuning)"
     echo ""
     echo "Options for 'run':"
     echo "  --algorithm ALGO    Run only specified algorithm (sac, awsc)"
@@ -129,10 +129,10 @@ cmd_run() {
     
     # Auto-detect AWSC mode based on config-version if not explicitly set
     if [[ -z "$awsc_mode" ]]; then
-        if [[ "$CONFIG_VERSION" == "v2" ]]; then
-            # v2 configs are designed for fine-tuning from pretrained model
+        if [[ "$CONFIG_VERSION" == "v2" || "$CONFIG_VERSION" == "v3" || "$CONFIG_VERSION" == "v4" ]]; then
+            # v2/v3/v4 configs are designed for fine-tuning from pretrained model
             awsc_mode="pretrain"
-            log_info "Config v2: auto-setting AWSC mode to 'pretrain' (designed for fine-tuning)"
+            log_info "Config ${CONFIG_VERSION}: auto-setting AWSC mode to 'pretrain' (designed for fine-tuning)"
         else
             awsc_mode="scratch"
         fi
@@ -192,6 +192,8 @@ cmd_run() {
             config_dir="configs_v2"
         elif [[ "$CONFIG_VERSION" == "v3" ]]; then
             config_dir="configs_v3"
+        elif [[ "$CONFIG_VERSION" == "v4" ]]; then
+            config_dir="configs_v4"
         fi
         local config_file="${SCRIPT_DIR}/${config_dir}/${algo}.sh"
         if [[ ! -f "$config_file" ]]; then
@@ -320,6 +322,8 @@ cmd_retry() {
             config_dir="configs_v2"
         elif [[ "$CONFIG_VERSION" == "v3" ]]; then
             config_dir="configs_v3"
+        elif [[ "$CONFIG_VERSION" == "v4" ]]; then
+            config_dir="configs_v4"
         fi
         local config_file="${SCRIPT_DIR}/${config_dir}/${algo}.sh"
         if [[ ! -f "$config_file" ]]; then
@@ -427,6 +431,8 @@ cmd_status() {
             config_dir="configs_v2"
         elif [[ "$CONFIG_VERSION" == "v3" ]]; then
             config_dir="configs_v3"
+        elif [[ "$CONFIG_VERSION" == "v4" ]]; then
+            config_dir="configs_v4"
         fi
         local config_file="${SCRIPT_DIR}/${config_dir}/${algo}.sh"
         if [[ ! -f "$config_file" ]]; then

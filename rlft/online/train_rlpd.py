@@ -169,6 +169,13 @@ class Args:
     - 'all': Use full mixed batch (demo + online buffer), same as critic
     - 'success_only': Use only demo + online success buffer for actor;
       prevents policy from imitating failed rollout actions"""
+    success_criteria: Literal["success_once", "success_at_end"] = "success_once"
+    """How to determine if a transition is 'successful' for success_buffer:
+    - 'success_once': Mark as success if the agent succeeded at any point during
+      the episode (cumulative). Requires tracking per-env success_once state.
+    - 'success_at_end': Mark as success only if info['success'] is True at episode
+      termination (instantaneous). This is stricter and may result in zero successes
+      for tasks where the agent can't maintain success at the final step."""
     
     # ShortCut Flow U-Net settings (for AWSC, matches offline training)
     unet_down_dims: List[int] = field(default_factory=lambda: [64, 128, 256])
@@ -798,6 +805,11 @@ def main():
             device=device,
         )
         print(f"Success buffer enabled (capacity: {args.success_buffer_capacity})")
+        print(f"Success criteria: {args.success_criteria}")
+        if args.success_criteria == "success_once":
+            print("  - Transitions marked successful if agent succeeded at ANY point in episode")
+        else:
+            print("  - Transitions marked successful only if success=True at episode termination")
     
     # Create action normalizer if needed (for offline data)
     # When loading a pretrained model, check if it was trained with normalization.
@@ -912,6 +924,10 @@ def main():
     episode_successes = []
     best_success_rate = 0.0
     
+    # Per-env success_once tracking: accumulates success across steps within an episode
+    # Reset on episode done. Used when success_criteria='success_once'.
+    episode_has_succeeded = np.zeros(args.num_envs, dtype=np.float32)
+    
     chunk_collector = SMDPChunkCollector(
         num_envs=args.num_envs,
         gamma=args.gamma,
@@ -968,13 +984,27 @@ def main():
                 episode_rewards[env_idx] += reward_np[env_idx]
                 episode_lengths[env_idx] += 1
                 
+                # Track per-step success for success_once accumulation
+                step_success = info.get("success", [False] * args.num_envs)[env_idx]
+                if hasattr(step_success, "item"):
+                    step_success = step_success.item()
+                episode_has_succeeded[env_idx] = max(episode_has_succeeded[env_idx], float(step_success))
+                
                 if done_np[env_idx]:
-                    success = info.get("success", [False] * args.num_envs)[env_idx]
-                    if hasattr(success, "item"):
-                        success = success.item()
-                    episode_successes.append(float(success))
+                    episode_successes.append(float(step_success))
                     # Track success per env for this chunk (for success buffer)
-                    chunk_success_per_env[env_idx] = max(chunk_success_per_env[env_idx], float(success))
+                    if args.success_criteria == "success_once":
+                        # Use accumulated success: True if agent succeeded at any point
+                        chunk_success_per_env[env_idx] = max(
+                            chunk_success_per_env[env_idx], episode_has_succeeded[env_idx]
+                        )
+                    else:
+                        # Use instantaneous success at termination
+                        chunk_success_per_env[env_idx] = max(
+                            chunk_success_per_env[env_idx], float(step_success)
+                        )
+                    # Reset per-env success_once tracker on episode boundary
+                    episode_has_succeeded[env_idx] = 0.0
                     episode_rewards[env_idx] = 0.0
                     episode_lengths[env_idx] = 0
             

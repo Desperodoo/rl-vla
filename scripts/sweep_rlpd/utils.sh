@@ -34,20 +34,36 @@ get_exp_dir() {
 
 # Find the actual experiment directory (with timestamp suffix)
 # train_rlpd.py creates dirs like: runs/{exp_name}__{timestamp}
+# For AWSC, cmd_run adds mode suffixes: config_name_pretrain or config_name_scratch
 find_actual_exp_dir() {
     local algorithm=$1
     local config_name=$2
-    local base_dir="${SWEEP_BASE_DIR}/${algorithm}"
+    local algo_dir="${SWEEP_BASE_DIR}/${algorithm}"
     
-    # Look for directories matching pattern: config_name__timestamp
-    local matches=$(find "$base_dir" -maxdepth 1 -type d -name "${config_name}__*" 2>/dev/null | sort -r | head -1)
-    
+    # 1. Try exact match: config_name__timestamp
+    local matches=$(find "$algo_dir" -maxdepth 1 -type d -name "${config_name}__*" 2>/dev/null | sort -r | head -1)
     if [[ -n "$matches" ]]; then
         echo "$matches"
-    else
-        # Fallback to base directory (for compatibility)
-        echo "${base_dir}/${config_name}"
+        return
     fi
+    
+    # 2. Try with mode suffixes (for AWSC): config_name_pretrain__timestamp, config_name_scratch__timestamp
+    for suffix in "_pretrain" "_scratch"; do
+        local suffixed="${config_name}${suffix}"
+        matches=$(find "$algo_dir" -maxdepth 1 -type d -name "${suffixed}__*" 2>/dev/null | sort -r | head -1)
+        if [[ -n "$matches" ]]; then
+            echo "$matches"
+            return
+        fi
+        # Also check non-timestamped base dir with suffix
+        if [[ -d "${algo_dir}/${suffixed}" ]] && [[ -f "${algo_dir}/${suffixed}/train.log" || -d "${algo_dir}/${suffixed}/checkpoints" ]]; then
+            echo "${algo_dir}/${suffixed}"
+            return
+        fi
+    done
+    
+    # 3. Fallback to base directory (for compatibility)
+    echo "${algo_dir}/${config_name}"
 }
 
 get_checkpoint_path() {
@@ -55,7 +71,9 @@ get_checkpoint_path() {
     local config_name=$2
     local exp_dir=$(find_actual_exp_dir "$algorithm" "$config_name")
     # Online RL saves best checkpoints
-    if [[ -f "${exp_dir}/checkpoints/best_eval_success_once.pt" ]]; then
+    if [[ -f "${exp_dir}/checkpoints/best.pt" ]]; then
+        echo "${exp_dir}/checkpoints/best.pt"
+    elif [[ -f "${exp_dir}/checkpoints/best_eval_success_once.pt" ]]; then
         echo "${exp_dir}/checkpoints/best_eval_success_once.pt"
     else
         echo "${exp_dir}/checkpoints/final.pt"
@@ -68,8 +86,8 @@ get_checkpoint_path() {
 is_experiment_successful() {
     local exp_dir=$1
     
-    # Check for best checkpoint (online RL saves best_eval_success_once.pt)
-    if [[ -f "${exp_dir}/checkpoints/best_eval_success_once.pt" ]]; then
+    # Check for best checkpoint (online RL saves best.pt)
+    if [[ -f "${exp_dir}/checkpoints/best.pt" ]] || [[ -f "${exp_dir}/checkpoints/best_eval_success_once.pt" ]]; then
         return 0  # Success
     fi
     
@@ -132,7 +150,8 @@ parse_metrics_from_log() {
     fi
     
     # Parse wandb summary line: "wandb: metric_name value"
-    local value=$(grep "wandb:.*${metric_name}" "$log_file" 2>/dev/null | tail -1 | awk '{print $NF}')
+    # Use word boundary to avoid partial matches (e.g. pretrain_eval/success matching eval/success)
+    local value=$(grep -P "wandb:\s+${metric_name}\s" "$log_file" 2>/dev/null | tail -1 | awk '{print $NF}')
     
     # Skip if value is sparkline character or empty
     if [[ "$value" == "▁" ]] || [[ -z "$value" ]]; then
@@ -499,16 +518,23 @@ analyze_algorithm_with_metrics() {
         local exp_dir=$(find_actual_exp_dir "$algorithm" "$config_name")
         local log_file="${exp_dir}/train.log"
         
-        # Also check base dir for log file
+        # Also check base dir and mode-suffixed dirs for log file
         local base_dir=$(get_exp_dir "$algorithm" "$config_name")
         if [[ ! -f "$log_file" ]] && [[ -f "${base_dir}/train.log" ]]; then
             log_file="${base_dir}/train.log"
         fi
+        # Try mode-suffixed base dirs (for AWSC: baseline -> baseline_pretrain/train.log)
+        for _suffix in "_pretrain" "_scratch"; do
+            if [[ ! -f "$log_file" ]] && [[ -f "${base_dir}${_suffix}/train.log" ]]; then
+                log_file="${base_dir}${_suffix}/train.log"
+                break
+            fi
+        done
         
         total=$((total + 1))
         
-        local success_once=$(parse_metrics_from_log "$log_file" "final/best_success_once")
-        local success_end=$(parse_metrics_from_log "$log_file" "final/best_success_at_end")
+        local success_once=$(parse_metrics_from_log "$log_file" "final/best_success_rate")
+        local success_end=$(parse_metrics_from_log "$log_file" "eval/success_at_end")
         local status="not_started"
         
         if is_experiment_successful "$exp_dir"; then
@@ -634,11 +660,18 @@ export_results_json() {
             local exp_dir=$(find_actual_exp_dir "$algorithm" "$config_name")
             local log_file="${exp_dir}/train.log"
             
-            # Also check base dir for log file
+            # Also check base dir and mode-suffixed dirs for log file
             local base_dir=$(get_exp_dir "$algorithm" "$config_name")
             if [[ ! -f "$log_file" ]] && [[ -f "${base_dir}/train.log" ]]; then
                 log_file="${base_dir}/train.log"
             fi
+            # Try mode-suffixed base dirs (for AWSC)
+            for _suffix in "_pretrain" "_scratch"; do
+                if [[ ! -f "$log_file" ]] && [[ -f "${base_dir}${_suffix}/train.log" ]]; then
+                    log_file="${base_dir}${_suffix}/train.log"
+                    break
+                fi
+            done
             
             local status="not_started"
             local success_once=""
@@ -646,8 +679,8 @@ export_results_json() {
             
             if is_experiment_successful "$exp_dir"; then
                 status="success"
-                success_once=$(parse_metrics_from_log "$log_file" "final/best_success_once")
-                success_end=$(parse_metrics_from_log "$log_file" "final/best_success_at_end")
+                success_once=$(parse_metrics_from_log "$log_file" "final/best_success_rate")
+                success_end=$(parse_metrics_from_log "$log_file" "eval/success_at_end")
                 
                 # Track best for this algorithm
                 if [[ -n "$success_once" ]]; then
