@@ -66,15 +66,15 @@ usage() {
 # Command: run
 # =============================================================================
 cmd_run() {
-    local algorithm="${1:-dsrl_sac}"
+    local algorithm="dsrl_sac"
     local dry_run=false
-    shift || true
 
     # Parse options
     while [[ $# -gt 0 ]]; do
         case $1 in
             --dry-run) dry_run=true; shift ;;
-            *) shift ;;
+            --*) shift ;;          # skip unknown flags
+            *)  algorithm="$1"; shift ;;
         esac
     done
 
@@ -91,8 +91,8 @@ cmd_run() {
     echo "WandB:           ${USE_WANDB}"
     echo "========================================"
 
-    # Validate checkpoint
-    if ! check_checkpoint; then
+    # Validate checkpoint (skip in dry-run mode)
+    if [[ "$dry_run" != "true" ]] && ! check_checkpoint; then
         exit 1
     fi
 
@@ -148,9 +148,21 @@ cmd_run() {
     # Change to project root
     cd "$PROJECT_ROOT"
 
-    # Run sweep using batch scheduling
-    log_info "Starting DSRL sweep for ${algorithm}..."
-    run_batch "$algorithm" "${SWEEP_CONFIGS[@]}"
+    # Build global queue for efficient GPU scheduling
+    local sweep_items=()
+    for config in "${SWEEP_CONFIGS[@]}"; do
+        local config_name
+        config_name=$(echo "$config" | cut -d':' -f1)
+        local extra_args
+        extra_args=$(echo "$config" | cut -d':' -f2-)
+        if [[ "$config_name" == "$extra_args" ]]; then
+            extra_args=""
+        fi
+        sweep_items+=("${algorithm}|${config_name}|${extra_args}")
+    done
+
+    log_info "Starting DSRL sweep for ${algorithm} (${#sweep_items[@]} configs, queue mode)..."
+    run_sweep_queue "${sweep_items[@]}"
 
     log_success "Sweep completed for ${algorithm}!"
 }
@@ -193,7 +205,19 @@ cmd_retry() {
         return 0
     fi
 
-    run_batch "$algorithm" "${failed[@]}"
+    # Build queue from failed configs for efficient GPU scheduling
+    local retry_items=()
+    for f in "${failed[@]}"; do
+        local fname
+        fname=$(echo "$f" | cut -d':' -f1)
+        local fargs
+        fargs=$(echo "$f" | cut -d':' -f2-)
+        if [[ "$fname" == "$fargs" ]]; then
+            fargs=""
+        fi
+        retry_items+=("${algorithm}|${fname}|${fargs}")
+    done
+    run_sweep_queue "${retry_items[@]}"
     log_success "Retry completed for ${algorithm}!"
 }
 

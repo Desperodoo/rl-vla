@@ -29,7 +29,7 @@ MAX_EPISODE_STEPS="${MAX_EPISODE_STEPS:-100}"
 # -----------------------------------------------------------------------------
 # Training Configuration
 # -----------------------------------------------------------------------------
-TOTAL_TIMESTEPS="${TOTAL_TIMESTEPS:-1000000}"
+TOTAL_TIMESTEPS="${TOTAL_TIMESTEPS:-100000}"
 NUM_ENVS="${NUM_ENVS:-50}"
 NUM_EVAL_ENVS="${NUM_EVAL_ENVS:-50}"
 EVAL_FREQ="${EVAL_FREQ:-10000}"
@@ -40,7 +40,7 @@ NUM_EVAL_EPISODES="${NUM_EVAL_EPISODES:-50}"
 # Pretrained Checkpoint (REQUIRED for DSRL)
 # -----------------------------------------------------------------------------
 # DSRL always requires a pretrained ShortCut Flow policy checkpoint.
-DEFAULT_CHECKPOINT="runs/awsc_checkpoint/checkpoints/best_eval_success_once.pt"
+DEFAULT_CHECKPOINT="runs/maniskill_sweep_v3/aw_shortcut_flow/cw0.3_step0.15__1770390417/checkpoints/best_eval_success_once.pt"
 CHECKPOINT="${CHECKPOINT:-${DEFAULT_CHECKPOINT}}"
 
 # -----------------------------------------------------------------------------

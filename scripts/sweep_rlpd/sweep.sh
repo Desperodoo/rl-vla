@@ -181,6 +181,7 @@ cmd_run() {
     fi
     log_info "Available GPUs: ${AVAILABLE_GPUS[*]} (${NUM_GPUS} total)"
     
+    local sweep_items=()
     for algo in "${algorithms_to_run[@]}"; do
         log_info "=========================================="
         log_info "Processing algorithm: ${algo}"
@@ -218,10 +219,12 @@ cmd_run() {
                 log_info "--- AWSC Mode: ${mode} ---"
                 
                 # Prepare configs with mode suffix and pretrain_path
-                local mode_configs=()
                 for config in "${SWEEP_CONFIGS[@]}"; do
                     local config_name=$(echo "$config" | cut -d':' -f1)
                     local extra_args=$(echo "$config" | cut -d':' -f2-)
+                    if [[ "$config_name" == "$extra_args" ]]; then
+                        extra_args=""
+                    fi
                     
                     # Add mode suffix to config name
                     local new_name="${config_name}_${mode}"
@@ -231,32 +234,47 @@ cmd_run() {
                         extra_args="${extra_args} --pretrain_path ${pretrain_path} --pred_horizon 8 --load_pretrain_critic"
                     fi
                     
-                    mode_configs+=("${new_name}:${extra_args}")
+                    if [[ "$dry_run" == "true" ]]; then
+                        echo "  - ${new_name}"
+                    else
+                        sweep_items+=("${algo}|${new_name}|${extra_args}")
+                    fi
                 done
                 
                 if [[ "$dry_run" == "true" ]]; then
-                    log_info "[DRY RUN] Would run ${#mode_configs[@]} configs for ${algo}_${mode}:"
-                    for config in "${mode_configs[@]}"; do
-                        local cname=$(echo "$config" | cut -d':' -f1)
-                        echo "  - ${cname}"
-                    done
-                else
-                    run_batch "$algo" "${mode_configs[@]}"
+                    log_info "[DRY RUN] Would run ${#SWEEP_CONFIGS[@]} configs for ${algo}_${mode}"
                 fi
             done
         else
             # Non-AWSC algorithms
-            if [[ "$dry_run" == "true" ]]; then
-                log_info "[DRY RUN] Would run ${#SWEEP_CONFIGS[@]} configs:"
-                for config in "${SWEEP_CONFIGS[@]}"; do
-                    local config_name=$(echo "$config" | cut -d':' -f1)
+            for config in "${SWEEP_CONFIGS[@]}"; do
+                local config_name=$(echo "$config" | cut -d':' -f1)
+                local extra_args=$(echo "$config" | cut -d':' -f2-)
+                if [[ "$config_name" == "$extra_args" ]]; then
+                    extra_args=""
+                fi
+                
+                if [[ "$dry_run" == "true" ]]; then
                     echo "  - ${config_name}"
-                done
-            else
-                run_batch "$algo" "${SWEEP_CONFIGS[@]}"
+                else
+                    sweep_items+=("${algo}|${config_name}|${extra_args}")
+                fi
+            done
+            
+            if [[ "$dry_run" == "true" ]]; then
+                log_info "[DRY RUN] Would run ${#SWEEP_CONFIGS[@]} configs for ${algo}"
             fi
         fi
     done
+    
+    # Run all queued configs using global queue scheduling
+    if [[ "$dry_run" != "true" ]]; then
+        if [[ ${#sweep_items[@]} -eq 0 ]]; then
+            log_error "No configs found to run"
+            exit 1
+        fi
+        run_sweep_queue "${sweep_items[@]}"
+    fi
     
     log_success "Sweep completed!"
 }
@@ -344,7 +362,17 @@ cmd_retry() {
                 fi
             done
             
-            run_batch "$algo" "${failed_configs[@]}"
+            # Build queue from failed configs for efficient GPU scheduling
+            local retry_items=()
+            for config in "${failed_configs[@]}"; do
+                local cname=$(echo "$config" | cut -d':' -f1)
+                local cargs=$(echo "$config" | cut -d':' -f2-)
+                if [[ "$cname" == "$cargs" ]]; then
+                    cargs=""
+                fi
+                retry_items+=("${algo}|${cname}|${cargs}")
+            done
+            run_sweep_queue "${retry_items[@]}"
         fi
     done
     
