@@ -2,17 +2,18 @@
 """
 Safety Config 验证脚本
 
-验证 safety_config.json 的限制是否合理，通过在真机上执行边界测试。
+验证 safety_config.json 的限制是否合理。
 
-安全说明:
-    - 使用 MIT 模式 (mode=2) 进行控制，该模式为力矩模式，更安全
-    - 严禁使用 Position 模式 (mode=1)
-    - 测试时会缓慢移动到边界附近，不会超出限制
+测试模式:
+    - check: 检查当前位置是否在安全范围内（默认）
+    - visual: 开启拖动示教模式，实时显示安全边界状态，可拖动机械臂验证
+
+退出行为:
+    - 退出时自动在 PF 模式下回零位，然后下使能
 
 用法:
     python verify_safety_config.py --config /path/to/carm_deploy/safety_config.json
-    python verify_safety_config.py --config /path/to/carm_deploy/safety_config.json --test_mode visual  # 仅可视化
-    python verify_safety_config.py --config /path/to/carm_deploy/safety_config.json --test_mode boundary  # 边界测试
+    python verify_safety_config.py --config /path/to/carm_deploy/safety_config.json --test_mode visual
 """
 
 import os
@@ -130,12 +131,55 @@ class SafetyConfigVerifier:
             print(f"❌ 连接失败: {e}")
             return False
     
-    def disconnect(self):
-        """断开连接"""
-        if self.arm:
-            # 设置回空闲模式
+    def safe_shutdown(self):
+        """安全关闭：PF 模式回零位 → 下使能 → 断开连接"""
+        if not self.arm:
+            return
+        
+        print("\n" + "="*60)
+        print("  安全关闭流程")
+        print("="*60)
+        
+        try:
+            # 1. 复位并进入 PF 模式
+            print("\n[1/4] 设置 PF 模式准备回零位...")
+            self.arm.set_ready()
+            time.sleep(0.5)
+            ret = self.arm.set_control_mode(self.MODE_PF)
+            print(f"      PF 模式: {'✓' if ret == 0 else f'返回码 {ret}'}")
+            time.sleep(0.3)
+            
+            # 2. 回零位
+            print("[2/4] 回零位...")
+            home = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+            ret = self.arm.move_joint(home, -1, True)
+            print(f"      回零位: {'✓' if ret == 0 else f'返回码 {ret}'}")
+            time.sleep(0.5)
+            
+            # 3. 切换到 IDLE → 下使能
+            print("[3/4] 下使能...")
             self.arm.set_control_mode(self.MODE_IDLE)
-            print("机械臂已设置为空闲模式")
+            time.sleep(0.3)
+            ret = self.arm.set_servo_enable(False)
+            print(f"      下使能: {'✓' if ret == 0 else f'返回码 {ret}'}")
+            time.sleep(0.3)
+            
+            # 4. 断开连接
+            print("[4/4] 断开连接...")
+            self.arm.disconnect()
+            print("      ✓ 已断开连接")
+            
+        except Exception as e:
+            print(f"\n⚠️  安全关闭过程异常: {e}")
+            try:
+                self.arm.set_control_mode(self.MODE_IDLE)
+                self.arm.disconnect()
+            except:
+                pass
+        
+        print("\n" + "="*60)
+        print("  安全关闭完成")
+        print("="*60)
     
     def get_current_state(self) -> Tuple[np.ndarray, np.ndarray, float]:
         """
@@ -246,11 +290,23 @@ class SafetyConfigVerifier:
         print("-" * 40)
     
     def verify_visual(self):
-        """可视化验证模式 - 仅显示状态，不执行动作"""
+        """可视化验证模式 - 开启拖动示教，实时显示安全边界状态"""
         print("\n" + "="*60)
-        print("  可视化验证模式")
+        print("  可视化验证模式 (拖动示教)")
+        print("  拖动机械臂验证安全边界是否合理")
         print("  按 Ctrl+C 退出")
         print("="*60)
+        
+        # 开启拖动示教模式
+        print("\n设置拖动示教模式 (DRAG, mode=3)...")
+        self.arm.set_ready()
+        time.sleep(0.3)
+        ret = self.arm.set_control_mode(self.MODE_DRAG)
+        if ret != 0:
+            print(f"⚠️  set_control_mode 返回: {ret}")
+        else:
+            print("✓ 拖动示教已开启，可以手动拖动机械臂")
+        time.sleep(0.3)
         
         try:
             while True:
@@ -261,7 +317,7 @@ class SafetyConfigVerifier:
                 print("\033[2J\033[H")  # 清屏并移动光标到左上角
                 
                 print("="*60)
-                print("  Safety Config 实时验证")
+                print("  Safety Config 实时验证 (拖动示教模式)")
                 print("="*60)
                 
                 # 打印关节状态
@@ -283,199 +339,13 @@ class SafetyConfigVerifier:
                 else:
                     print("\n⚠️  当前位置超出安全范围!")
                 
-                print("\n按 Ctrl+C 退出...")
+                print("\n按 Ctrl+C 退出 (自动回零位并下使能)...")
                 time.sleep(0.2)
                 
         except KeyboardInterrupt:
             print("\n\n验证结束")
     
-    def verify_boundary_test(self, speed: float = 2.0):
-        """
-        边界测试模式 - 缓慢移动测试边界
-        
-        使用 MIT 模式 (mode=2) 进行安全控制
-        """
-        print("\n" + "="*60)
-        print("  边界测试模式 (MIT 模式)")
-        print("="*60)
-        
-        # 设置 MIT 模式 (绝对禁止使用 Position 模式!)
-        print("\n设置控制模式: MIT (mode=2)")
-        self.arm.set_ready()
-        ret = self.arm.set_control_mode(self.MODE_MIT)  # MIT 力矩模式
-        if ret != 0:
-            print(f"⚠️  set_control_mode 返回: {ret}")
-        
-        # 获取当前状态作为起点
-        joint_pos, end_pose, gripper = self.get_current_state()
-        
-        print("\n当前关节位置:")
-        for i, j in enumerate(joint_pos):
-            jl = self.config['joint_limits']
-            j_min, j_max = jl['joint_min'][i], jl['joint_max'][i]
-            print(f"  J{i+1}: {j:+.4f}  范围: [{j_min:+.4f}, {j_max:+.4f}]")
-        
-        # 测试选项
-        print("\n可用的测试:")
-        print("  1. 测试当前位置是否在安全范围内")
-        print("  2. 移动到工作空间中心")
-        print("  3. 沿 X 轴测试边界")
-        print("  4. 沿 Y 轴测试边界")
-        print("  5. 沿 Z 轴测试边界")
-        print("  6. 测试夹爪范围")
-        print("  q. 退出")
-        
-        while True:
-            try:
-                choice = input("\n选择测试 (1-6, q): ").strip().lower()
-                
-                if choice == 'q':
-                    break
-                elif choice == '1':
-                    self._test_current_position()
-                elif choice == '2':
-                    self._move_to_center(speed)
-                elif choice == '3':
-                    self._test_axis('x', speed)
-                elif choice == '4':
-                    self._test_axis('y', speed)
-                elif choice == '5':
-                    self._test_axis('z', speed)
-                elif choice == '6':
-                    self._test_gripper(speed)
-                else:
-                    print("无效选择")
-                    
-            except KeyboardInterrupt:
-                print("\n\n测试中断")
-                break
-        
-        # 恢复空闲模式
-        self.arm.set_control_mode(self.MODE_IDLE)
-        print("\n已恢复空闲模式")
-    
-    def _test_current_position(self):
-        """测试当前位置"""
-        results = self.check_current_position()
-        
-        print("\n关节状态:")
-        for status in results['joint_status']:
-            print(f"  {status}")
-        
-        print("\n工作空间状态:")
-        for status in results['workspace_status']:
-            print(f"  {status}")
-        
-        print(f"\n{results['gripper_status']}")
-        
-        if results['in_bounds']:
-            print("\n✅ 当前位置在安全范围内")
-        else:
-            print("\n⚠️  当前位置超出安全范围!")
-    
-    def _move_to_center(self, speed: float):
-        """移动到工作空间中心"""
-        wl = self.config['workspace_limits']
-        
-        center_x = (wl['x_min'] + wl['x_max']) / 2
-        center_y = (wl['y_min'] + wl['y_max']) / 2
-        center_z = (wl['z_min'] + wl['z_max']) / 2
-        
-        print(f"\n移动到工作空间中心: ({center_x:.4f}, {center_y:.4f}, {center_z:.4f})")
-        
-        # 获取当前位姿的四元数
-        _, end_pose, _ = self.get_current_state()
-        qx, qy, qz, qw = end_pose[3], end_pose[4], end_pose[5], end_pose[6]
-        
-        # 移动到中心位置（保持当前姿态）
-        print("⚠️  即将移动，请确保路径无障碍物")
-        confirm = input("确认移动? (y/n): ").strip().lower()
-        
-        if confirm == 'y':
-            self.arm.move_p_with_speed(
-                center_x, center_y, center_z,
-                qx, qy, qz, qw,
-                speed
-            )
-            print("移动完成")
-            self._test_current_position()
-        else:
-            print("已取消")
-    
-    def _test_axis(self, axis: str, speed: float):
-        """沿指定轴测试边界"""
-        wl = self.config['workspace_limits']
-        
-        axis_idx = {'x': 0, 'y': 1, 'z': 2}[axis]
-        v_min = wl[f'{axis}_min']
-        v_max = wl[f'{axis}_max']
-        
-        print(f"\n{axis.upper()} 轴范围: [{v_min:.4f}, {v_max:.4f}]")
-        
-        _, end_pose, _ = self.get_current_state()
-        current_val = end_pose[axis_idx]
-        
-        print(f"当前 {axis.upper()} 值: {current_val:.4f}")
-        
-        # 计算测试点（距离边界 10%）
-        range_size = v_max - v_min
-        test_min = v_min + 0.1 * range_size
-        test_max = v_max - 0.1 * range_size
-        
-        print(f"测试点 (距边界 10%): [{test_min:.4f}, {test_max:.4f}]")
-        
-        print("\n选择:")
-        print("  1. 移动到最小边界附近")
-        print("  2. 移动到最大边界附近")
-        print("  3. 返回")
-        
-        choice = input("选择: ").strip()
-        
-        if choice in ['1', '2']:
-            target_val = test_min if choice == '1' else test_max
-            target_pose = list(end_pose[:3])
-            target_pose[axis_idx] = target_val
-            
-            print(f"⚠️  即将移动到 {axis.upper()}={target_val:.4f}")
-            confirm = input("确认移动? (y/n): ").strip().lower()
-            
-            if confirm == 'y':
-                self.arm.move_p_with_speed(
-                    target_pose[0], target_pose[1], target_pose[2],
-                    end_pose[3], end_pose[4], end_pose[5], end_pose[6],
-                    speed
-                )
-                print("移动完成")
-                self._test_current_position()
-            else:
-                print("已取消")
-    
-    def _test_gripper(self, speed: float):
-        """测试夹爪范围"""
-        jl = self.config['joint_limits']
-        g_min = jl['gripper_min']
-        g_max = jl['gripper_max']
-        
-        _, _, gripper = self.get_current_state()
-        
-        print(f"\n夹爪范围: [{g_min:.4f}, {g_max:.4f}]")
-        print(f"当前夹爪: {gripper:.4f}")
-        
-        print("\n选择:")
-        print("  1. 关闭夹爪 (到最小值)")
-        print("  2. 打开夹爪 (到最大值)")
-        print("  3. 返回")
-        
-        choice = input("选择: ").strip()
-        
-        if choice == '1':
-            target = g_min + 0.005  # 留一点余量
-            self.arm.set_gripper(target)
-            print(f"夹爪设置为: {target:.4f}")
-        elif choice == '2':
-            target = g_max - 0.005
-            self.arm.set_gripper(target)
-            print(f"夹爪设置为: {target:.4f}")
+
 
 
 def main():
@@ -484,9 +354,9 @@ def main():
                         help='安全配置文件路径 (default: carm_deploy/safety_config.json)')
     parser.add_argument('--robot_ip', type=str, default='10.42.0.101',
                         help='机械臂 IP 地址')
-    parser.add_argument('--test_mode', type=str, choices=['visual', 'boundary', 'check'],
+    parser.add_argument('--test_mode', type=str, choices=['visual', 'check'],
                         default='check',
-                        help='测试模式: visual=实时可视化, boundary=边界测试, check=仅检查当前位置')
+                        help='测试模式: visual=拖动示教+实时验证, check=仅检查当前位置')
     
     args = parser.parse_args()
 
@@ -527,11 +397,8 @@ def main():
         elif args.test_mode == 'visual':
             verifier.verify_visual()
             
-        elif args.test_mode == 'boundary':
-            verifier.verify_boundary_test()
-            
     finally:
-        verifier.disconnect()
+        verifier.safe_shutdown()
 
 
 if __name__ == '__main__':

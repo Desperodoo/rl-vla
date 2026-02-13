@@ -22,3 +22,13 @@ timeline_record/
 inference_logs/
 inference_logs_old/
 .pytest_cache/
+
+# SDK Python 编译产物
+arm_control_sdk/python/src/build/
+arm_control_sdk/python/lib/build/
+arm_control_sdk/python/lib/carm.egg-info/
+arm_control_sdk/python/lib/so/
+arm_control_sdk/python/lib/carm/carm_py.so
+
+# 安全配置 (需要用户根据自己的机械臂环境录制安全边界)
+carm_ros_deploy/src/carm_deploy/safety_config.json

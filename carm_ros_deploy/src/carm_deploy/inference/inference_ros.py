@@ -1206,7 +1206,15 @@ def main():
         config['safety_config'] = default_safety
     config['safety_config'] = os.path.expandvars(os.path.expanduser(config['safety_config']))
     if not os.path.exists(config['safety_config']):
-        rospy.logerr("safety_config is required and not found: %s", config['safety_config'])
+        rospy.logfatal("=" * 60)
+        rospy.logfatal("安全配置文件不存在: %s", config['safety_config'])
+        rospy.logfatal("")
+        rospy.logfatal("首次使用必须先录制安全边界，请执行:")
+        rospy.logfatal("  cd carm_ros_deploy/src/carm_deploy/tools")
+        rospy.logfatal("  python record_workspace.py")
+        rospy.logfatal("")
+        rospy.logfatal("录制完成后重新启动推理。")
+        rospy.logfatal("=" * 60)
         raise SystemExit(1)
     
     rospy.loginfo("=" * 60)

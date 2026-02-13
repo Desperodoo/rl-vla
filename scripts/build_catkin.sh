@@ -1,8 +1,11 @@
 #!/bin/bash
-# ============================================================
-# CARM 项目 catkin 工作空间统一编译脚本
-# 使用 carm conda 环境进行编译，确保 Python 版本一致
-# ============================================================
+# =============================================================================
+# CARM catkin 工作空间编译脚本
+# =============================================================================
+# 用法:
+#   ./scripts/build_catkin.sh            # 增量编译
+#   ./scripts/build_catkin.sh --clean    # 清理后重新编译
+# =============================================================================
 
 set -e
 
@@ -18,98 +21,78 @@ BLUE='\033[0;34m'
 NC='\033[0m'
 
 echo -e "${BLUE}================================================${NC}"
-echo -e "${BLUE}  CARM Catkin Workspace Build Script${NC}"
+echo -e "${BLUE}  CARM Catkin 编译脚本${NC}"
 echo -e "${BLUE}================================================${NC}"
 
-# 检查 conda 环境
+# -------------------------
+# 加载环境 (conda + ROS + SDK)
+# -------------------------
+# setup_carm_env.sh 需要 source 执行；这里只需要其中的 conda / ROS / SDK
+# 但它会检测 BASH_SOURCE == $0，所以我们内联必要步骤
+
+# Conda
 if [[ "$CONDA_DEFAULT_ENV" != "carm" ]]; then
-    echo -e "${YELLOW}当前不在 carm 环境，尝试激活...${NC}"
-    source ~/miniconda3/etc/profile.d/conda.sh 2>/dev/null || source ~/anaconda3/etc/profile.d/conda.sh 2>/dev/null
-    conda activate carm
-    if [[ "$CONDA_DEFAULT_ENV" != "carm" ]]; then
-        echo -e "${RED}无法激活 carm 环境，请手动执行: conda activate carm${NC}"
+    source ~/miniconda3/etc/profile.d/conda.sh 2>/dev/null \
+        || source ~/anaconda3/etc/profile.d/conda.sh 2>/dev/null \
+        || true
+    conda activate carm 2>/dev/null || {
+        echo -e "${RED}无法激活 carm 环境，请先: conda create -n carm python=3.10${NC}"
         exit 1
-    fi
+    }
 fi
+echo -e "${GREEN}Conda:  $CONDA_DEFAULT_ENV$(python --version 2>/dev/null | sed 's/Python / (Python /')${GREEN})${NC}"
 
-echo -e "${GREEN}✓ 当前环境: $CONDA_DEFAULT_ENV${NC}"
-echo -e "${GREEN}✓ Python: $(python --version)${NC}"
-
-# 检查 ROS
+# ROS
 if [ -z "$ROS_DISTRO" ]; then
-    echo -e "${YELLOW}加载 ROS Noetic...${NC}"
-    source /opt/ros/noetic/setup.bash
+    source /opt/ros/noetic/setup.bash 2>/dev/null || {
+        echo -e "${RED}ROS Noetic 未安装${NC}"; exit 1
+    }
 fi
-echo -e "${GREEN}✓ ROS: $ROS_DISTRO${NC}"
+echo -e "${GREEN}ROS:    $ROS_DISTRO${NC}"
 
-# 确保 catkin 依赖已安装
-echo -e "${BLUE}检查 catkin 依赖...${NC}"
-pip show empy >/dev/null 2>&1 || pip install empy==3.3.4
-pip show catkin_pkg >/dev/null 2>&1 || pip install catkin_pkg
-pip show rospkg >/dev/null 2>&1 || pip install rospkg
-echo -e "${GREEN}✓ catkin 依赖已安装${NC}"
-
-# 创建 carm_ros_deploy 目录结构（如果不存在）
-if [ ! -d "$CATKIN_WS/src" ]; then
-    echo -e "${YELLOW}创建 catkin 工作空间...${NC}"
-    mkdir -p "$CATKIN_WS/src"
+# SDK
+SDK_DIR="$PROJECT_ROOT/arm_control_sdk"
+if [ -f "$SDK_DIR/setup.bash" ]; then
+    source "$SDK_DIR/setup.bash"
+else
+    echo -e "${RED}arm_control_sdk/setup.bash 未找到${NC}"; exit 1
 fi
 
-# 检查 ROS 包是否存在
-echo -e "${BLUE}检查 ROS 包...${NC}"
-cd "$CATKIN_WS/src"
+# -------------------------
+# 检查依赖
+# -------------------------
+pip show empy  >/dev/null 2>&1 || pip install -q empy==3.3.4
+pip show catkin_pkg >/dev/null 2>&1 || pip install -q catkin_pkg
+pip show rospkg >/dev/null 2>&1 || pip install -q rospkg
 
-if [ ! -d "realsense-ros" ]; then
-    echo -e "${RED}错误: realsense-ros 不存在于 carm_ros_deploy/src/${NC}"
-    exit 1
-fi
-echo -e "${GREEN}✓ realsense-ros${NC}"
+# -------------------------
+# 检查 ROS 包
+# -------------------------
+for pkg in realsense-ros carm_deploy; do
+    if [ ! -d "$CATKIN_WS/src/$pkg" ]; then
+        echo -e "${RED}错误: $pkg 不存在于 carm_ros_deploy/src/${NC}"; exit 1
+    fi
+done
 
-if [ ! -d "carm_deploy" ]; then
-    echo -e "${RED}错误: carm_deploy 不存在于 carm_ros_deploy/src/${NC}"
-    exit 1
-fi
-echo -e "${GREEN}✓ carm_deploy${NC}"
-
-if [ -d "carm_api" ]; then
-    echo -e "${GREEN}✓ carm_api${NC}"
-fi
-
-# 初始化 catkin 工作空间
-if [ ! -f "$CATKIN_WS/src/CMakeLists.txt" ]; then
-    cd "$CATKIN_WS"
-    catkin_make --only-pkg-with-deps=
-    echo -e "${GREEN}✓ 初始化 catkin 工作空间${NC}"
-fi
-
+# -------------------------
 # 编译
-echo -e "${BLUE}================================================${NC}"
-echo -e "${BLUE}  开始编译...${NC}"
-echo -e "${BLUE}================================================${NC}"
-
+# -------------------------
 cd "$CATKIN_WS"
 
-# 清理选项
 if [ "$1" == "--clean" ]; then
-    echo -e "${YELLOW}清理编译目录...${NC}"
+    echo -e "${YELLOW}清理 build/ devel/ ...${NC}"
     rm -rf build devel
 fi
 
-# 执行 catkin_make
-# arm_control_sdk 位于项目根目录，需要指定 CMAKE_PREFIX_PATH 以供 find_package 查找
-# SDK 自带 Poco v71 (位于 arm_control_sdk/poco/lib)，需要同时加入链接搜索路径
-SDK_DIR="$PROJECT_ROOT/arm_control_sdk"
 SDK_POCO_LIB="$SDK_DIR/poco/lib"
-export LD_LIBRARY_PATH="$SDK_POCO_LIB:$SDK_DIR/lib:${LD_LIBRARY_PATH:-}"
+
+# 将 SDK 加入 CMAKE_PREFIX_PATH（使用环境变量让 catkin_make 自动处理）
+export CMAKE_PREFIX_PATH="$SDK_DIR:${CMAKE_PREFIX_PATH:-}"
+
 catkin_make -DPYTHON_EXECUTABLE=$(which python) \
-  -DCMAKE_PREFIX_PATH="$SDK_DIR;$CMAKE_PREFIX_PATH" \
   -DCMAKE_EXE_LINKER_FLAGS="-L$SDK_POCO_LIB -Wl,-rpath,$SDK_POCO_LIB"
 
-echo -e "${BLUE}================================================${NC}"
-echo -e "${GREEN}  编译完成!${NC}"
-echo -e "${BLUE}================================================${NC}"
-
 echo -e ""
-echo -e "使用以下命令加载环境:"
-echo -e "  ${YELLOW}source $CATKIN_WS/devel/setup.bash${NC}"
+echo -e "${GREEN}编译完成!${NC}"
+echo -e "加载环境: ${YELLOW}source scripts/setup_carm_env.sh${NC}"
 echo -e ""

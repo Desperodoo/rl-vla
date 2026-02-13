@@ -1,7 +1,0 @@
-Metadata-Version: 2.4
-Name: carm
-Version: 1.0.251218
-Summary: ROS2 pybind11 example hybrid package.
-Requires-Python: >=3.6
-Dynamic: requires-python
-Dynamic: summary

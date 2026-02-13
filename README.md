@@ -43,50 +43,51 @@ rl-vla/
 
 ## 🚀 快速开始
 
-### 1. 环境准备
+### 1. 首次安装
 
 ```bash
-# 创建 conda 环境 (如果没有)
+# 1) 创建 conda 环境
 conda create -n carm python=3.10 -y
 conda activate carm
 
-# 安装 CARM SDK
-pip install arm_control_sdk/lib/amd64/carm_py-1.0-cp310-cp310-linux_x86_64.whl
-
-# 安装其他依赖
+# 2) 安装 Python 依赖
 pip install numpy scipy h5py opencv-python einops pyrealsense2
-pip install empy==3.3.4 catkin_pkg rospkg  # catkin 编译依赖
+pip install empy==3.3.4 catkin_pkg rospkg   # catkin 编译依赖
+
+# 3) 编译并安装 CARM SDK Python 绑定
+cd arm_control_sdk/python
+python build_carm.py --Release     # 从源码编译 carm_py.so
+python install_carm.py             # 安装到当前 conda 环境
+cd ../..
+
+# 4) 编译 ROS 工作空间 (自动加载 conda / ROS / SDK)
+./scripts/build_catkin.sh
 ```
 
-### 2. 编译 ROS 工作空间
+### 2. 日常使用 (每次开终端)
 
 ```bash
-conda activate carm
-source /opt/ros/noetic/setup.bash
-
-# 使用统一编译脚本
-./scripts/build_catkin.sh
-
-# 加载编译结果
-source carm_ros_deploy/devel/setup.bash
+source scripts/setup_carm_env.sh
 ```
+
+该脚本自动完成：激活 carm conda → 加载 ROS Noetic → 加载 SDK 库 → 加载 catkin 工作空间。
 
 ### 3. 验证安装
 
 ```bash
 # 测试 SDK
-python -c "import carm_py; print('carm_py OK')"
+python -c "from carm import carm_py; print('carm OK')"
 
-# 测试机械臂连接
+# 测试机械臂连接 (需要机械臂上电)
 python carm_ros_deploy/src/carm_deploy/tools/arm_test/test_connection.py
 ```
 
-### 4. 可选: 设置环境变量
+### 脚本说明
 
-```bash
-# 添加到 ~/.bashrc
-export RL_VLA_ROOT=/path/to/rl-vla
-```
+| 脚本 | 用途 |
+|------|------|
+| `scripts/setup_carm_env.sh` | **source** 一次加载全部运行环境 |
+| `scripts/build_catkin.sh` | 编译 catkin 工作空间 (`--clean` 可清理重编) |
 
 ## 🤖 机械臂操作
 
@@ -97,7 +98,7 @@ export RL_VLA_ROOT=/path/to/rl-vla
 | IP | 10.42.0.101 |
 | Port | 8090 |
 | 关节数 | 6 + 夹爪 |
-| 夹爪范围 | 0 ~ 0.08m |
+| 夹爪范围 | 0 ~ 0.073m |
 
 ### 控制模式
 
@@ -105,9 +106,9 @@ export RL_VLA_ROOT=/path/to/rl-vla
 |------|-----|------|
 | IDLE | 0 | 空闲 |
 | POSITION | 1 | **禁用** (危险) |
-| MIT | 2 | **推荐** |
+| MIT | 2 | 阻抗控制 |
 | DRAG | 3 | 拖动示教 |
-| PF | 4 | 力控 |
+| PF | 4 | 力控（**推荐**） |
 
 ### 调试脚本
 
@@ -227,19 +228,30 @@ python offline_test.py \
 
 ## 🔒 安全控制
 
-### 工作空间记录
+> **首次使用必须录制安全边界。** 推理启动时会检查 `safety_config.json` 是否存在，不存在则拒绝运行。
+
+### 1. 录制安全边界
 
 ```bash
 cd carm_ros_deploy/src/carm_deploy/tools
-# 拖动示教模式记录安全边界
-python record_workspace.py --output ~/rl-vla/carm_ros_deploy/src/carm_deploy/safety_config.json
+
+# 拖动示教模式录制工作空间边界 (退出时自动回零位并下使能)
+python record_workspace.py
 ```
 
-### 安全配置验证
+操作说明：按 Enter 开启拖动模式 → 拖动机械臂覆盖工作空间 → 按 `s` 保存 → 按 `q` 退出。
+
+### 2. 验证安全配置
 
 ```bash
-python verify_safety_config.py --config ~/rl-vla/carm_ros_deploy/src/carm_deploy/safety_config.json
+# 开启拖动示教，实时查看当前位置是否在安全范围内
+python verify_safety_config.py --test_mode visual
+
+# 仅检查当前位置 (不进入拖动模式)
+python verify_safety_config.py
 ```
+
+退出时自动回零位并下使能。
 
 ## 📖 模块说明
 
@@ -267,7 +279,9 @@ python verify_safety_config.py --config ~/rl-vla/carm_ros_deploy/src/carm_deploy
 ### carm_py 导入失败
 
 ```bash
-pip install --force-reinstall arm_control_sdk/lib/amd64/carm_py-*.whl
+cd arm_control_sdk/python
+python build_carm.py --Release
+python install_carm.py
 ```
 
 ### 机械臂连接失败
@@ -280,9 +294,7 @@ nc -zv 10.42.0.101 8090
 ### catkin_make 失败
 
 ```bash
-conda activate carm
-pip install empy==3.3.4 catkin_pkg rospkg
-./scripts/build_catkin.sh
+./scripts/build_catkin.sh --clean
 ```
 
 ### 相机无图像

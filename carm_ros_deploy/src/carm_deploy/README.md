@@ -70,7 +70,10 @@ conda activate carm
 pip install numpy scipy h5py opencv-python einops
 
 # CARM SDK
-pip install /path/to/arm_control_sdk/lib/amd64/carm_py-1.0-cp310-cp310-linux_x86_64.whl
+# 编译并安装 Python 绑定（需要 pybind11）：
+# cd /path/to/arm_control_sdk/python
+# python build_carm.py --Release
+# python install_carm.py
 ```
 
 ### 编译 ROS 包

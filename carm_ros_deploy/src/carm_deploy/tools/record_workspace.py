@@ -218,6 +218,53 @@ class WorkspaceRecorder:
         self.arm.set_control_mode(0)
         time.sleep(0.5)
     
+    def safe_shutdown(self):
+        """安全关闭：PF 模式回零位 → 下使能 → 断开连接"""
+        print("\n" + "=" * 60)
+        print("  安全关闭流程")
+        print("=" * 60)
+        
+        try:
+            # 1. 复位并进入 PF 模式
+            print("\n[1/4] 设置 PF 模式准备回零位...")
+            self.arm.set_ready()
+            time.sleep(0.5)
+            ret = self.arm.set_control_mode(4)  # PF 模式
+            print(f"      PF 模式: {'✓' if ret == 0 else f'返回码 {ret}'}")
+            time.sleep(0.3)
+            
+            # 2. 回零位
+            print("[2/4] 回零位...")
+            home = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+            ret = self.arm.move_joint(home, -1, True)
+            print(f"      回零位: {'✓' if ret == 0 else f'返回码 {ret}'}")
+            time.sleep(0.5)
+            
+            # 3. 切换到 IDLE → 下使能
+            print("[3/4] 下使能...")
+            self.arm.set_control_mode(0)  # IDLE
+            time.sleep(0.3)
+            ret = self.arm.set_servo_enable(False)
+            print(f"      下使能: {'✓' if ret == 0 else f'返回码 {ret}'}")
+            time.sleep(0.3)
+            
+            # 4. 断开连接
+            print("[4/4] 断开连接...")
+            self.arm.disconnect()
+            print("      ✓ 已断开连接")
+            
+        except Exception as e:
+            print(f"\n⚠️  安全关闭过程异常: {e}")
+            try:
+                self.arm.set_control_mode(0)
+                self.arm.disconnect()
+            except:
+                pass
+        
+        print("\n" + "=" * 60)
+        print("  安全关闭完成")
+        print("=" * 60)
+    
     def update_state(self):
         """更新当前状态"""
         try:
@@ -426,8 +473,10 @@ class WorkspaceRecorder:
         
         finally:
             self.running = False
-            self.disable_drag_mode()
+            if self.recording:
+                self.recording = False
             print("\n>>> Workspace recorder stopped.")
+            self.safe_shutdown()
     
     def _update_loop(self):
         """状态更新循环"""
