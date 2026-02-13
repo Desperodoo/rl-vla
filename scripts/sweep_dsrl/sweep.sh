@@ -136,6 +136,7 @@ cmd_run() {
             echo "  --env_id ${ENV_ID} \\"
             echo "  --total_timesteps ${TOTAL_TIMESTEPS} \\"
             echo "  --checkpoint ${CHECKPOINT} \\"
+            echo "  --pred_horizon ${PRED_HORIZON} \\"
             echo "  --exp_name ${EXP_NAME}/${algorithm}/${config_name} \\"
             if [[ -n "$extra_args" ]]; then
                 echo "  ${extra_args}"

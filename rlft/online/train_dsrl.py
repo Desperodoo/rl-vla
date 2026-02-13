@@ -93,7 +93,7 @@ class Args:
 
     # ----- model dims -----
     obs_horizon: int = 2
-    pred_horizon: int = 16
+    pred_horizon: int = 8
     act_steps: int = 8
     action_dim: int = 7
     state_dim: int = 0
@@ -109,8 +109,8 @@ class Args:
     gamma: float = 0.99
     tau: float = 0.005
     utd_ratio: int = 40
-    num_seed_steps: int = 1000
-    """Steps of zero-noise warmup before training."""
+    num_seed_steps: int = 5000
+    """Steps of zero-noise warmup before training (aligned with dsrl_official 5001)."""
     init_temperature: float = 1.0
     target_entropy: float = 0.0
     log_std_init: float = -3.0
@@ -135,25 +135,35 @@ class Args:
 # =====================================================================
 
 def _make_train_envs(args: Args):
-    """Create GPU-vectorized training environments."""
-    import gymnasium as gym
-    import mani_skill.envs  # noqa: F401
+    """Create GPU-vectorized training environments.
+
+    **Critical**: uses the same FrameStack + ManiSkillVectorEnv wrapping as
+    the eval envs so that obs_history is correctly managed by FrameStack
+    (including proper per-env reset on auto-reset).  Without FrameStack the
+    wrapper's manual obs_history roll contaminates observations across
+    episode boundaries.
+    """
     from mani_skill.utils.wrappers.flatten import FlattenRGBDObservationWrapper
 
     env_kwargs = dict(
         obs_mode="rgbd" if "rgb" in args.obs_mode else "state",
         control_mode=args.control_mode,
-        sim_backend=args.sim_backend,
-        num_envs=args.num_envs,
         reward_mode=args.reward_mode,
     )
     if args.max_episode_steps is not None:
         env_kwargs["max_episode_steps"] = args.max_episode_steps
 
-    env = gym.make(args.env_id, **env_kwargs)
-    if "rgb" in args.obs_mode:
-        env = FlattenRGBDObservationWrapper(env, rgb=True, depth=False, state=True)
-    return env
+    wrappers = [FlattenRGBDObservationWrapper] if "rgb" in args.obs_mode else []
+
+    return make_eval_envs(
+        env_id=args.env_id,
+        num_envs=args.num_envs,
+        sim_backend=args.sim_backend,
+        env_kwargs=env_kwargs,
+        other_kwargs=dict(obs_horizon=args.obs_horizon),
+        video_dir=None,
+        wrappers=wrappers,
+    )
 
 
 def _make_eval_envs(args: Args):
@@ -317,6 +327,39 @@ def _collect_warmup(env_adapter: _VecEnvAdapter, buffer: DSRLReplayBuffer, n_ste
     print(f"[Warmup] Done — {collected} transitions, "
           f"{len(ep_rews)} episodes, avg_reward={avg:.2f}")
     return collected
+
+
+# =====================================================================
+# Info extraction helper
+# =====================================================================
+
+def _extract_success(info, num_envs: int) -> np.ndarray:
+    """Extract per-env success flags from ManiSkill3 info dict.
+
+    Handles both ``ManiSkillVectorEnv`` format (``final_info``) and
+    the legacy per-step ``success`` tensor.
+    """
+    if not isinstance(info, dict):
+        return np.zeros(num_envs)
+
+    # 1. ManiSkillVectorEnv format: info["final_info"]["episode"]["success_once"]
+    final_info = info.get("final_info")
+    if isinstance(final_info, dict) and "episode" in final_info:
+        so = final_info["episode"].get("success_once")
+        if so is not None:
+            if isinstance(so, torch.Tensor):
+                return so.float().cpu().numpy()
+            return np.asarray(so, dtype=np.float32)
+
+    # 2. Fallback: per-step success tensor
+    success = info.get("success")
+    if success is not None:
+        if isinstance(success, torch.Tensor):
+            return success.float().cpu().numpy()
+        if isinstance(success, np.ndarray):
+            return success.astype(np.float32)
+
+    return np.zeros(num_envs)
 
 
 # =====================================================================
@@ -510,12 +553,12 @@ def main():
         for i in range(train_adapter.num_envs):
             ep_rews[i] += rew[i]
             if done[i]:
-                ep_successes.append(float(
-                    info.get("success", np.zeros(train_adapter.num_envs))[i]
-                    if isinstance(info.get("success"), (np.ndarray, torch.Tensor))
-                    else 0.0
-                ))
                 ep_rews[i] = 0.0
+
+        # Track success at episode boundaries (ManiSkillVectorEnv format)
+        if done.any():
+            success_vals = _extract_success(info, train_adapter.num_envs)
+            ep_successes.extend(success_vals.tolist())
 
         obs = next_obs
         total_steps += train_adapter.num_envs

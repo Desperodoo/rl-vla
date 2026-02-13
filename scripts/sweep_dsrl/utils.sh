@@ -199,6 +199,7 @@ run_experiment() {
     cmd+=" --save_freq ${SAVE_FREQ}"
     cmd+=" --num_eval_episodes ${NUM_EVAL_EPISODES}"
     cmd+=" --checkpoint ${CHECKPOINT}"
+    cmd+=" --pred_horizon ${PRED_HORIZON}"
     cmd+=" --exp_name ${EXP_NAME}/${algorithm}/${config_name}"
     cmd+=" ${wandb_args}"
     cmd+=" ${extra_args}"

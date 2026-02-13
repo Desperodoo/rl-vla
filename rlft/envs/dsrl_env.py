@@ -139,7 +139,10 @@ class ManiSkillFlowEnvWrapper(gymnasium.Wrapper):
         truncated = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         info: Dict[str, Any] = {}
 
-        for i in range(self.act_steps):
+        # Use actual number of returned actions (may be < act_steps due to
+        # temporal offset slicing when pred_horizon == act_steps).
+        n_steps = real_actions.shape[1]
+        for i in range(n_steps):
             step_action = real_actions[:, i, :]
             obs, rew, term, trunc, step_info = self.env.step(step_action)
             total_reward += rew
@@ -150,6 +153,13 @@ class ManiSkillFlowEnvWrapper(gymnasium.Wrapper):
                 break
         if not info:
             info = step_info  # type: ignore[possibly-undefined]
+
+        # Safety: clear obs_history for envs that just reset so that the
+        # manual-roll fallback path (used when FrameStack is absent) does
+        # not leak frames from the previous episode.
+        done = terminated | truncated
+        if done.any() and self._obs_history is not None:
+            self._obs_history[done] = 0.0
 
         encoded_obs = self._encode_and_update_history(obs)
         return encoded_obs, total_reward, terminated, truncated, info

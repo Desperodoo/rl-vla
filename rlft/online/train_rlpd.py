@@ -115,7 +115,7 @@ class Args:
     """Action horizon (number of action steps fed to critic). Default 8 to match
     offline pretrained checkpoints. Must align with pretrain checkpoint's critic
     input_dim = obs_dim + action_dim * act_horizon."""
-    pred_horizon: int = 16
+    pred_horizon: int = 8
     
     # Visual encoder
     visual_feature_dim: int = 256
