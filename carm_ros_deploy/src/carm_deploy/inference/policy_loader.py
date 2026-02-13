@@ -26,7 +26,7 @@ import torch.nn as nn
 from einops import rearrange
 
 from rlft.networks import (
-    PlainConv, ResNetEncoder, StateEncoder, GripperHead,
+    StateEncoder, GripperHead, create_visual_encoder,
 )
 from rlft.datasets import ActionNormalizer
 from rlft.utils.model_factory import create_agent_for_inference, SUPPORTED_ALGORITHMS
@@ -275,23 +275,15 @@ class RealPolicy(PolicyInterface):
         # 2. 创建模型 -------------------------------------------------------
         _log_info("Creating models...")
 
-        # Visual encoder
-        if visual_encoder_type == 'plain_conv':
-            self.visual_encoder = PlainConv(
-                in_channels=3, out_dim=self.visual_feature_dim, pool_feature_map=True,
-            ).to(self.device)
-        elif visual_encoder_type in ['resnet10', 'resnet18', 'resnet34', 'resnet50']:
-            self.visual_encoder = ResNetEncoder(
-                backbone_name=visual_encoder_type,
-                out_dim=self.visual_feature_dim,
-                pretrained=False, freeze_backbone=False, freeze_bn=False,
-            ).to(self.device)
-            _log_info(f"Created ResNetEncoder: {visual_encoder_type}")
-        else:
-            _log_warn(f"Unknown visual_encoder_type: {visual_encoder_type}, using plain_conv")
-            self.visual_encoder = PlainConv(
-                in_channels=3, out_dim=self.visual_feature_dim, pool_feature_map=True,
-            ).to(self.device)
+        # Visual encoder (use factory to ensure architecture matches training)
+        self.visual_encoder = create_visual_encoder(
+            encoder_type=visual_encoder_type,
+            out_dim=self.visual_feature_dim,
+            pretrained=True,
+            freeze_backbone=False,
+            freeze_bn=False,
+        ).to(self.device)
+        _log_info(f"Created visual encoder: {visual_encoder_type}")
 
         # State encoder
         encoded_state_dim = self.state_dim
@@ -309,15 +301,6 @@ class RealPolicy(PolicyInterface):
 
         # Agent
         self.agent = self._create_agent(global_cond_dim)
-
-        # GripperHead
-        gripper_input_dim = self.obs_horizon * (self.visual_feature_dim + encoded_state_dim)
-        self.gripper_head = GripperHead(
-            obs_dim=gripper_input_dim,
-            hidden_dim=self.gripper_head_hidden_dim,
-            pred_horizon=self.pred_horizon,
-        ).to(self.device)
-        _log_info(f"Created GripperHead: obs_dim={gripper_input_dim}, hidden_dim={self.gripper_head_hidden_dim}")
 
         # 3. 加载权重 -------------------------------------------------------
         _log_info(f"Loading checkpoint from: {model_path}")
@@ -355,7 +338,27 @@ class RealPolicy(PolicyInterface):
             else:
                 raise ValueError("No agent weights in checkpoint")
 
-        # gripper_head
+        # GripperHead — detect architecture from checkpoint keys
+        gripper_input_dim = self.obs_horizon * (self.visual_feature_dim + encoded_state_dim)
+        gripper_use_layernorm = True  # default: new architecture with LayerNorm
+        if "gripper_head" in ckpt:
+            ckpt_keys = set(ckpt["gripper_head"].keys())
+            # Old architecture (no LayerNorm): net has indices 0,2,4 for Linear layers
+            # New architecture (LayerNorm): net has indices 0,1,3,4,6 for Linear/LN layers
+            if "net.2.weight" in ckpt_keys and "net.1.weight" not in ckpt_keys:
+                gripper_use_layernorm = False
+                _log_info("Detected legacy GripperHead (no LayerNorm)")
+            else:
+                _log_info("Detected GripperHead with LayerNorm")
+
+        self.gripper_head = GripperHead(
+            obs_dim=gripper_input_dim,
+            hidden_dim=self.gripper_head_hidden_dim,
+            pred_horizon=self.pred_horizon,
+            use_layernorm=gripper_use_layernorm,
+        ).to(self.device)
+        _log_info(f"Created GripperHead: obs_dim={gripper_input_dim}, hidden_dim={self.gripper_head_hidden_dim}, layernorm={gripper_use_layernorm}")
+
         if "gripper_head" in ckpt:
             self.gripper_head.load_state_dict(ckpt["gripper_head"])
             _log_info("Loaded gripper_head weights")

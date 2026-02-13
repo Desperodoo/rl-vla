@@ -171,19 +171,31 @@ class GripperHead(nn.Module):
         obs_dim: int,
         pred_horizon: int = 16,
         hidden_dim: int = 256,
+        use_layernorm: bool = True,
     ):
         super().__init__()
         self.pred_horizon = pred_horizon
-        
-        self.net = nn.Sequential(
-            nn.Linear(obs_dim, hidden_dim),
-            nn.LayerNorm(hidden_dim),
-            nn.Mish(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.LayerNorm(hidden_dim),
-            nn.Mish(),
-            nn.Linear(hidden_dim, pred_horizon * 2),  # 2 classes per timestep
-        )
+        self.use_layernorm = use_layernorm
+
+        if use_layernorm:
+            self.net = nn.Sequential(
+                nn.Linear(obs_dim, hidden_dim),
+                nn.LayerNorm(hidden_dim),
+                nn.Mish(),
+                nn.Linear(hidden_dim, hidden_dim),
+                nn.LayerNorm(hidden_dim),
+                nn.Mish(),
+                nn.Linear(hidden_dim, pred_horizon * 2),  # 2 classes per timestep
+            )
+        else:
+            # Legacy architecture (ReLU, no LayerNorm — matches older checkpoints)
+            self.net = nn.Sequential(
+                nn.Linear(obs_dim, hidden_dim),
+                nn.ReLU(),
+                nn.Linear(hidden_dim, hidden_dim),
+                nn.ReLU(),
+                nn.Linear(hidden_dim, pred_horizon * 2),
+            )
     
     def forward(self, obs_features: torch.Tensor) -> torch.Tensor:
         """

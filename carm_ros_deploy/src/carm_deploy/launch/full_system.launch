@@ -28,7 +28,6 @@
   <!-- 推理参数 -->
   <arg name="pretrain" default=""/>
   <arg name="robot_ip" default="10.42.0.101"/>
-  <arg name="joint_cmd_mode" default="false"/>
   <arg name="vis" default="false"/>
   
   <!-- 启动相机 -->
@@ -61,7 +60,6 @@
     <arg name="robot_ip" value="$(arg robot_ip)"/>
     <arg name="camera_name" value="$(arg camera_name)"/>
     <arg name="sync_slop" value="$(arg sync_slop)"/>
-    <arg name="joint_cmd_mode" value="$(arg joint_cmd_mode)"/>
     <arg name="vis" value="$(arg vis)"/>
   </include>
   

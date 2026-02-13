@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
 """
-CARM 离线测试脚本
+CARM 离线评估脚本
 
 使用数据集进行离线评估，验证推理 pipeline 并评估模型性能。
 不需要机械臂，只需要 PyTorch 环境。
 
 使用方法:
-    conda activate arx-py310
-    python offline_test.py --model_path runs/consistency_flow/checkpoints/latest.pt \
-                           --data_dir ~/rl-vla/recorded_data \
-                           --output_dir offline_results
+    python -m rlft.offline.eval_carm --model_path runs/consistency_flow/checkpoints/final.pt \
+                                     --data_dir ~/rl-vla/recorded_data \
+                                     --output_dir offline_results
+
+    # EMA vs Non-EMA 对比
+    python -m rlft.offline.eval_carm --model_path runs/consistency_flow/checkpoints/final.pt \
+                                     --data_dir ~/rl-vla/recorded_data/mix \
+                                     --compare_ema
 """
 
 import argparse
@@ -17,19 +21,15 @@ import os
 import sys
 import json
 import numpy as np
+import matplotlib
+matplotlib.use('Agg')  # Non-interactive backend for server environments
 import matplotlib.pyplot as plt
 from typing import Dict, List, Optional, Tuple
 from tqdm import tqdm
 from datetime import datetime
 import h5py
 import cv2
-
-# 添加路径
-script_dir = os.path.dirname(os.path.abspath(__file__))
-carm_deploy_root = os.path.dirname(script_dir)
-rl_vla_root = os.path.dirname(os.path.dirname(os.path.dirname(carm_deploy_root)))
-sys.path.insert(0, rl_vla_root)  # 使 rlft 包可用
-sys.path.insert(0, carm_deploy_root)  # 使 carm_deploy 本地模块可用
+from collections import deque
 
 import torch
 import torch.nn as nn
@@ -102,7 +102,7 @@ class OfflinePolicy:
         self.gripper_open_val = 0.08
         self.gripper_close_val = 0.0
         self.gripper_head_hidden_dim = 128
-        self._gripper_history = []  # For hysteresis
+        self._gripper_history = deque(maxlen=5)  # For hysteresis
         
         # 观测历史
         self.obs_history = {'rgb': [], 'state': []}
@@ -134,10 +134,8 @@ class OfflinePolicy:
             self.visual_encoder_type = args.get('visual_encoder_type', self.visual_encoder_type)
             
             # 图像尺寸：检查 auto_image_size 配置
-            # 注意：训练时如果 auto_image_size=True，args.json 中的 target_image_size 可能不是实际值
             auto_image_size = args.get('auto_image_size', False)
             if auto_image_size:
-                # 根据 encoder 类型自动设置图像尺寸（与训练时保持一致）
                 self.target_image_size = get_encoder_input_size(self.visual_encoder_type)
                 print(f"Auto image size: {self.visual_encoder_type} -> {self.target_image_size}")
             else:
@@ -201,13 +199,6 @@ class OfflinePolicy:
         global_cond_dim = self.obs_horizon * (self.visual_feature_dim + encoded_state_dim)
         self.agent = self._create_agent(global_cond_dim)
         
-        # 创建 GripperHead (discrete gripper classification)
-        self.gripper_head = GripperHead(
-            obs_dim=global_cond_dim,
-            hidden_dim=self.gripper_head_hidden_dim,
-            pred_horizon=self.pred_horizon,
-        ).to(self.device)
-        
         # 加载权重
         print(f"Loading checkpoint from: {self.model_path}")
         ckpt = torch.load(self.model_path, map_location=self.device)
@@ -234,7 +225,23 @@ class OfflinePolicy:
                 print("Warning: Regular agent not found, using EMA agent")
                 self.agent.load_state_dict(ckpt["ema_agent"])
         
-        # 加载 gripper_head
+        # GripperHead — detect architecture from checkpoint keys
+        gripper_use_layernorm = True
+        if "gripper_head" in ckpt:
+            ckpt_keys = set(ckpt["gripper_head"].keys())
+            if "net.2.weight" in ckpt_keys and "net.1.weight" not in ckpt_keys:
+                gripper_use_layernorm = False
+                print("Detected legacy GripperHead (no LayerNorm)")
+            else:
+                print("Detected GripperHead with LayerNorm")
+        
+        self.gripper_head = GripperHead(
+            obs_dim=global_cond_dim,
+            hidden_dim=self.gripper_head_hidden_dim,
+            pred_horizon=self.pred_horizon,
+            use_layernorm=gripper_use_layernorm,
+        ).to(self.device)
+        
         if "gripper_head" in ckpt:
             self.gripper_head.load_state_dict(ckpt["gripper_head"])
             print("Loaded gripper_head weights")
@@ -291,7 +298,6 @@ class OfflinePolicy:
     
     def reset(self):
         """重置观测历史"""
-        from collections import deque
         self.obs_history = {'rgb': [], 'state': []}
         self._gripper_history = deque(maxlen=5)  # Reset gripper hysteresis history
     
@@ -376,7 +382,9 @@ class OfflinePolicy:
             actions_cont = torch.from_numpy(actions_denorm.reshape(batch_size, pred_horizon, action_dim)).to(self.device).float()
         
         # 3. Get discrete gripper predictions
-        gripper_logits = self.gripper_head(obs_features)  # [1, pred_horizon, 2]
+        # GripperHead expects flattened obs: (B, obs_horizon * feature_dim)
+        obs_flat = obs_features.reshape(obs_features.shape[0], -1)
+        gripper_logits = self.gripper_head(obs_flat)  # [1, pred_horizon, 2]
         gripper_cls = gripper_logits.argmax(dim=-1)  # [1, pred_horizon], 0=open, 1=close
         
         # 4. Apply hysteresis (5-frame majority voting)
@@ -401,9 +409,8 @@ class OfflinePolicy:
         Returns:
             [pred_horizon] array of gripper values
         """
-        from collections import deque
         # Ensure _gripper_history is a deque with maxlen=5
-        if not hasattr(self, '_gripper_history') or not isinstance(self._gripper_history, deque):
+        if not isinstance(self._gripper_history, deque):
             self._gripper_history = deque(maxlen=5)
         
         # 标准做法：只使用第一帧的 gripper 预测（对齐 Diffusion Policy / ACT）
@@ -523,18 +530,6 @@ class OfflineEvaluator:
         T = len(episode['qpos_joint'])
         
         # ======== 正确计算相对动作（对齐训练逻辑） ========
-        # 训练时，对于每个样本：
-        #   - ref_pose = qpos_end[t, :7]（当前帧末端位姿）
-        #   - target_pose = raw_actions[t+k, 7:14]（第 k 步的目标位姿）
-        #   - relative_pose = compute_relative_pose_transform(ref_pose, target_pose)
-        # 
-        # 离线测试时，对于每帧 t：
-        #   - 模型输出的 pred_actions[0] 是从当前位姿到 raw_actions[t, 7:14]（目标位姿）的相对变换
-        #   - GT 应该是：从 qpos_end[t] 到 raw_actions[t, 7:14] 的相对变换
-        #
-        # 注意：raw_actions[t, 7:14] 是目标位姿，qpos_end[t, :7] 是当前位姿
-        #      两者不相同！目标位姿是机械臂要去的地方，当前位姿是机械臂实际在的地方
-        
         raw_actions = episode['action']  # [T, 15] 原始动作（包含目标位姿）
         qpos_end = episode['qpos_end']   # [T, 8] 当前末端位姿 [x,y,z,qx,qy,qz,qw,gripper]
         
@@ -1002,7 +997,7 @@ class OfflineEvaluator:
             if plot_individual:
                 self.plot_episode_comparison(result, ep_idx)
                 self.plot_cumulative_error(result, ep_idx)
-                self.plot_ee_pose_detailed(result, ep_idx)  # 添加详细 EE Pose 绘图
+                self.plot_ee_pose_detailed(result, ep_idx)
             
             # 打印当前 episode 指标
             m = result['metrics']

@@ -8,7 +8,6 @@
   参数:
     pretrain: 模型路径
     robot_ip: 机器人 IP
-    joint_cmd_mode: 是否使用关节控制模式
     safety_config: 安全配置文件（必填）
     
   安全注意:
@@ -39,7 +38,6 @@
   <!-- 控制参数 -->
   <arg name="pos_lookahead_step" default="1"/>
   <arg name="pos_lookahead_duration" default="0.015"/>
-  <arg name="joint_cmd_mode" default="false"/>
   <arg name="not_origin" default="false"/>
   
   <!-- 可视化 -->
@@ -64,7 +62,6 @@
     
     <param name="pos_lookahead_step" value="$(arg pos_lookahead_step)"/>
     <param name="pos_lookahead_duration" value="$(arg pos_lookahead_duration)"/>
-    <param name="joint_cmd_mode" value="$(arg joint_cmd_mode)"/>
     <param name="not_origin" value="$(arg not_origin)"/>
     
     <param name="vis" value="$(arg vis)"/>

@@ -88,7 +88,6 @@ class InferenceNode:
         self.desire_inference_freq = config.get('desire_inference_freq', 30)  # 默认 30Hz
         self.pos_lookahead_step = config.get('pos_lookahead_step', 1)
         self.pos_lookahead_duration = config.get('pos_lookahead_duration', 0.015)
-        self.joint_cmd_mode = config.get('joint_cmd_mode', False)
         self.check_workspace = True  # 默认开启 workspace 检测
         
         # Teleop 对齐模式参数 (直接使用 teleop 默认值)
@@ -124,7 +123,7 @@ class InferenceNode:
         self.timeline_logger = None
         
         # 从策略获取 horizon 参数（如果已加载）
-        self._act_horizon = getattr(self.policy, 'pred_horizon', 16)  # 默认与 pred_horizon 相同
+        self._act_horizon = getattr(self.policy, 'pred_horizon', 8)  # 默认与 pred_horizon 相同
         self._pred_horizon = getattr(self.policy, 'pred_horizon', 16)
         self._obs_horizon = getattr(self.policy, 'obs_horizon', 2)
         # 允许通过 config 覆盖 act_horizon
@@ -160,7 +159,6 @@ class InferenceNode:
                 # 新增：关键控制参数
                 teleop_scale=self.teleop_scale,
                 control_freq=self.control_freq,
-                joint_cmd_mode=self.joint_cmd_mode,
             )
         else:
             self._timeline_path = None
@@ -472,7 +470,6 @@ class InferenceNode:
         control_config = {
             'control_freq': self.control_freq,
             'teleop_scale': self.teleop_scale,
-            'joint_cmd_mode': self.joint_cmd_mode,
             'gripper_hysteresis_window': getattr(self.policy, 'gripper_hysteresis_window', 1),
         }
         
@@ -643,7 +640,7 @@ class InferenceNode:
                     # ============================================================
                     
                     # 应用 teleop_scale 缩放 (joystick-style delta scaling)
-                    if self.teleop_scale != 1.0 and not self.joint_cmd_mode:
+                    if self.teleop_scale != 1.0:
                         # 只对 ee_delta_pose 模式应用 teleop_scale
                         is_full_mode = (self._action_dim_full == 15)
                         rel_pose_start = 7 if is_full_mode else 0
@@ -659,105 +656,71 @@ class InferenceNode:
                     safety_events = []
                     safety_clipped = False
                     
-                    if self.joint_cmd_mode:
-                        # 关节模式：对每个动作进行安全检查
-                        # 注意：ee_only mode (8D) 不包含 joint 信息，不能使用 joint_cmd_mode
-                        if self._action_dim_full != 15:
-                            rospy.logerr_once(
-                                "joint_cmd_mode is enabled but model was trained with ee_only action mode (8D). "
-                                "Joint control requires full action mode (15D). Skipping joint safety check!"
-                            )
-                        else:
-                            current_state = qpos_joint[:6]  # 当前关节位置作为参考
-                            
-                            for i in range(len(all_actions)):
-                                joint_action = all_actions[i, :7].copy()  # [6 joints + 1 gripper]
-                                
-                                # 检查关节限位并裁剪
-                                clipped_action, warnings = self.safety_controller.check_and_clip(
-                                    joint_action,
-                                    current_state,
-                                    apply_filter=(i == 0),  # 只对第一个动作应用滤波
-                                )
-                                
-                                if warnings:
-                                    safety_clipped = True
-                                    if i == 0:  # 只记录第一个动作的警告
-                                        safety_events.extend(warnings)
-                                        for w in warnings:
-                                            rospy.logwarn(f"Safety clip: {w}")
-                                
-                                # 用裁剪后的动作替换原始动作
-                                all_actions[i, :7] = clipped_action
-                                
-                                # 更新参考状态为当前裁剪后的关节位置
-                                current_state = clipped_action[:6]
-                    else:
-                        # 末端位姿模式：
-                        # 1. 检查相对位移是否过大
-                        # 2. 计算绝对位姿并检查工作空间边界
-                        # 
-                        # 根据 action_dim_full 确定索引：
-                        # - full mode (15D): [joint(6), gripper(1), rel_pose(7), gripper(1)]
-                        #   rel_pose at [7:14], gripper at [14]
-                        # - ee_only mode (8D): [rel_pose(7), gripper(1)]
-                        #   rel_pose at [0:7], gripper at [7]
-                        is_full_mode = (self._action_dim_full == 15)
-                        rel_pose_start = 7 if is_full_mode else 0
-                        rel_pose_end = 14 if is_full_mode else 7
-                        gripper_idx = 14 if is_full_mode else 7
+                    # 末端位姿模式：
+                    # 1. 检查相对位移是否过大
+                    # 2. 计算绝对位姿并检查工作空间边界
+                    # 
+                    # 根据 action_dim_full 确定索引：
+                    # - full mode (15D): [joint(6), gripper(1), rel_pose(7), gripper(1)]
+                    #   rel_pose at [7:14], gripper at [14]
+                    # - ee_only mode (8D): [rel_pose(7), gripper(1)]
+                    #   rel_pose at [0:7], gripper at [7]
+                    is_full_mode = (self._action_dim_full == 15)
+                    rel_pose_start = 7 if is_full_mode else 0
+                    rel_pose_end = 14 if is_full_mode else 7
+                    gripper_idx = 14 if is_full_mode else 7
+                    
+                    for i in range(len(all_actions)):
+                        relative_pose = all_actions[i, rel_pose_start:rel_pose_end]  # [7] 相对位姿
+                        grip = all_actions[i, gripper_idx]  # 夹爪
                         
-                        for i in range(len(all_actions)):
-                            relative_pose = all_actions[i, rel_pose_start:rel_pose_end]  # [7] 相对位姿
-                            grip = all_actions[i, gripper_idx]  # 夹爪
-                            
-                            # 检查相对位移是否过大
-                            max_trans = 0.1  # 10cm
-                            trans_norm = np.linalg.norm(relative_pose[:3])
-                            if trans_norm > max_trans:
-                                # 缩放位移到安全范围
-                                scale = max_trans / trans_norm
-                                all_actions[i, rel_pose_start:rel_pose_start+3] *= scale
-                                relative_pose = all_actions[i, rel_pose_start:rel_pose_end]  # 更新
-                                if i == 0:
-                                    safety_events.append(f"Translation scaled: {trans_norm:.3f}m -> {max_trans}m")
-                                    rospy.logwarn(f"Safety: Translation scaled from {trans_norm:.3f}m to {max_trans}m")
+                        # 检查相对位移是否过大
+                        max_trans = 0.1  # 10cm
+                        trans_norm = np.linalg.norm(relative_pose[:3])
+                        if trans_norm > max_trans:
+                            # 缩放位移到安全范围
+                            scale = max_trans / trans_norm
+                            all_actions[i, rel_pose_start:rel_pose_start+3] *= scale
+                            relative_pose = all_actions[i, rel_pose_start:rel_pose_end]  # 更新
+                            if i == 0:
+                                safety_events.append(f"Translation scaled: {trans_norm:.3f}m -> {max_trans}m")
+                                rospy.logwarn(f"Safety: Translation scaled from {trans_norm:.3f}m to {max_trans}m")
+                            safety_clipped = True
+                        
+                        # 计算目标绝对位姿
+                        target_pose = apply_relative_transform(relative_pose, qpos_end[:7], grip)
+                        target_pose_np = np.array(target_pose[:7])  # [x,y,z,qx,qy,qz,qw]
+                        
+                        # 检查工作空间边界 (如果启用)
+                        if self.check_workspace:
+                            clipped_pose, ws_warnings = self.safety_controller.check_workspace(target_pose_np)
+                            if ws_warnings:
                                 safety_clipped = True
-                            
-                            # 计算目标绝对位姿
-                            target_pose = apply_relative_transform(relative_pose, qpos_end[:7], grip)
-                            target_pose_np = np.array(target_pose[:7])  # [x,y,z,qx,qy,qz,qw]
-                            
-                            # 检查工作空间边界 (如果启用)
-                            if self.check_workspace:
-                                clipped_pose, ws_warnings = self.safety_controller.check_workspace(target_pose_np)
-                                if ws_warnings:
-                                    safety_clipped = True
-                                    if i == 0:
-                                        safety_events.extend(ws_warnings)
-                                        for w in ws_warnings:
-                                            rospy.logwarn(f"Workspace clip: {w}")
-                                    
-                                    # 重新计算相对位姿：clipped_target = current @ new_relative
-                                    # => new_relative = current^-1 @ clipped_target
-                                    T_current = pose_to_transform_matrix(qpos_end[:3], qpos_end[3:7])
-                                    T_clipped = pose_to_transform_matrix(clipped_pose[:3], clipped_pose[3:7])
-                                    T_relative_new = np.linalg.inv(T_current) @ T_clipped
-                                    new_relative_pos = T_relative_new[:3, 3]
-                                    new_relative_quat = R.from_matrix(T_relative_new[:3, :3]).as_quat()
-                                    all_actions[i, rel_pose_start:rel_pose_start+3] = new_relative_pos
-                                    all_actions[i, rel_pose_start+3:rel_pose_end] = new_relative_quat
-                            
-                            # 检查并裁剪夹爪限位
-                            gripper_action = np.array([0, 0, 0, 0, 0, 0, grip])  # dummy joints + gripper
-                            clipped_gripper, grip_warnings = self.safety_controller.check_joint_limits(gripper_action)
-                            if grip_warnings:
-                                all_actions[i, gripper_idx] = clipped_gripper[6]
-                                if is_full_mode:
-                                    all_actions[i, 6] = clipped_gripper[6]  # 第一个 gripper (full mode only)
                                 if i == 0:
-                                    safety_events.extend(grip_warnings)
-                                    safety_clipped = True
+                                    safety_events.extend(ws_warnings)
+                                    for w in ws_warnings:
+                                        rospy.logwarn(f"Workspace clip: {w}")
+                                
+                                # 重新计算相对位姿：clipped_target = current @ new_relative
+                                # => new_relative = current^-1 @ clipped_target
+                                T_current = pose_to_transform_matrix(qpos_end[:3], qpos_end[3:7])
+                                T_clipped = pose_to_transform_matrix(clipped_pose[:3], clipped_pose[3:7])
+                                T_relative_new = np.linalg.inv(T_current) @ T_clipped
+                                new_relative_pos = T_relative_new[:3, 3]
+                                new_relative_quat = R.from_matrix(T_relative_new[:3, :3]).as_quat()
+                                all_actions[i, rel_pose_start:rel_pose_start+3] = new_relative_pos
+                                all_actions[i, rel_pose_start+3:rel_pose_end] = new_relative_quat
+                        
+                        # 检查并裁剪夹爪限位
+                        gripper_action = np.array([0, 0, 0, 0, 0, 0, grip])  # dummy joints + gripper
+                        clipped_gripper, grip_warnings = self.safety_controller.check_joint_limits(gripper_action)
+                        if grip_warnings:
+                            all_actions[i, gripper_idx] = clipped_gripper[6]
+                            if is_full_mode:
+                                all_actions[i, 6] = clipped_gripper[6]  # 第一个 gripper (full mode only)
+                            if i == 0:
+                                safety_events.extend(grip_warnings)
+                                safety_clipped = True
                     
                     # 保存模型原始输出（安全检查后，干预前）
                     action_model = all_actions.copy()
@@ -768,7 +731,7 @@ class InferenceNode:
                         intervention = self.intervention_handler.get_intervention()
                         if intervention is not None:
                             # 确定 action 格式
-                            action_format = 'joint' if self.joint_cmd_mode else 'ee_delta'
+                            action_format = 'ee_delta'
                             all_actions, intervention_mask = InterventionApplier.apply_to_action_chunk(
                                 all_actions, intervention, action_format=action_format
                             )
@@ -797,27 +760,20 @@ class InferenceNode:
                     # 转换动作空间
                     # full mode (15D): [joint(6), gripper(1), relative_end_pose(7), gripper(1)]
                     # ee_only mode (8D): [relative_end_pose(7), gripper(1)]
-                    if not self.joint_cmd_mode:
-                        # 根据 action_dim_full 确定索引
-                        is_full_mode = (self._action_dim_full == 15)
-                        rel_pose_start = 7 if is_full_mode else 0
-                        rel_pose_end = 14 if is_full_mode else 7
-                        gripper_idx = 14 if is_full_mode else 7
-                        
-                        all_endactions = []
-                        for i in range(all_actions.shape[0]):
-                            relative_pose = all_actions[i][rel_pose_start:rel_pose_end]  # [7] 相对位姿
-                            grip = all_actions[i][gripper_idx]  # gripper
-                            # 将相对位姿变换应用到当前位姿，得到目标绝对位姿
-                            target_pose = apply_relative_transform(relative_pose, qpos_end[:7], grip)
-                            all_endactions.append(target_pose)
-                        all_actions = np.array(all_endactions)
-                    else:
-                        # joint mode: 取前 7D (6 joints + 1 gripper)
-                        # 注意：ee_only mode 不支持 joint_cmd_mode
-                        if self._action_dim_full != 15:
-                            rospy.logwarn_once("joint_cmd_mode requires full action mode (15D), but got ee_only (8D)")
-                        all_actions = all_actions[:, :7]
+                    # 根据 action_dim_full 确定索引
+                    is_full_mode = (self._action_dim_full == 15)
+                    rel_pose_start = 7 if is_full_mode else 0
+                    rel_pose_end = 14 if is_full_mode else 7
+                    gripper_idx = 14 if is_full_mode else 7
+                    
+                    all_endactions = []
+                    for i in range(all_actions.shape[0]):
+                        relative_pose = all_actions[i][rel_pose_start:rel_pose_end]  # [7] 相对位姿
+                        grip = all_actions[i][gripper_idx]  # gripper
+                        # 将相对位姿变换应用到当前位姿，得到目标绝对位姿
+                        target_pose = apply_relative_transform(relative_pose, qpos_end[:7], grip)
+                        all_endactions.append(target_pose)
+                    all_actions = np.array(all_endactions)
                     
                     # 创建轨迹并添加到管理器
                     obs_stamp_ros = self.latest_obs.get("stamp", None)
@@ -950,12 +906,8 @@ class InferenceNode:
 
             # 打印夹爪下发值与频率（节流）
             grip_val = None
-            if self.joint_cmd_mode:
-                if len(action) > 6:
-                    grip_val = float(action[6])
-            else:
-                if len(action) > 0:
-                    grip_val = float(action[-1])
+            if len(action) > 0:
+                grip_val = float(action[-1])
 
             now = time.time()
             if grip_val is not None and (now - self._last_gripper_log_time) >= 5.0:
@@ -967,13 +919,9 @@ class InferenceNode:
                 self._last_gripper_value = grip_val
                 self._last_gripper_log_time = now
             
-            # 执行控制
-            if self.joint_cmd_mode:
-                rospy.logdebug("Joint control")
-                self.env.joint_control_nostep(action)
-            else:
-                rospy.logdebug("End pose control")
-                self.env.end_control_nostep(action)
+            # 执行控制 (末端位姿模式)
+            rospy.logdebug("End pose control")
+            self.env.end_control_nostep(action)
 
             if self.timeline_logger is not None and (self.control_step_count % self.timeline_control_stride == 0):
                 self.timeline_logger.log(
@@ -1076,7 +1024,7 @@ def parse_args():
                         help='Desired inference frequency')
     parser.add_argument('--temporal_factor_k', type=float, default=0.05,
                         help='Temporal factor for action fusion')
-    parser.add_argument('--num_inference_steps', type=int, default=3,
+    parser.add_argument('--num_inference_steps', type=int, default=10,
                         help='Number of flow/diffusion steps for inference (default: 10, more steps = better quality but slower)')
     parser.add_argument('--use_ema', action='store_true',
                         help='Use EMA model for inference (recommended only for 1-step inference, otherwise Non-EMA is better)')
@@ -1102,7 +1050,7 @@ def parse_args():
     parser.add_argument('--pos_lookahead_duration', type=float, default=0.015,
                         help='Position lookahead duration')
     parser.add_argument('--joint_cmd_mode', action='store_true',
-                        help='Use joint command mode instead of end-effector pose')
+                        help='[DEPRECATED] Joint command mode is no longer supported. Will raise error if used.')
     
     # Teleop 对齐模式参数 (使推理行为更接近手柄遥控，默认使用 teleop 参数)
     parser.add_argument('--teleop_scale', type=float, default=1.0,
@@ -1169,7 +1117,7 @@ def main():
         'timeline_disabled', 'timeline_control_stride', 'chunk_time_base',
         'pretrain', 'algorithm', 'desire_inference_freq', 'temporal_factor_k',
         'num_inference_steps', 'use_ema', 'pos_lookahead_step', 'pos_lookahead_duration',
-        'joint_cmd_mode', 'safety_config', 'data_dir',
+        'safety_config', 'data_dir',
         'log_dir', 'save_images', 'vis',
         # Action chunk 执行模式参数
         'execution_mode', 'max_active_chunks', 'crossfade_steps', 
@@ -1223,7 +1171,16 @@ def main():
     rospy.loginfo(f"Robot IP: {config['robot_ip']}")
     rospy.loginfo(f"Camera topics: {config['camera_topics']}")
     rospy.loginfo(f"Pretrain: {config['pretrain']}")
-    rospy.loginfo(f"Joint cmd mode: {config['joint_cmd_mode']}")
+    rospy.loginfo("-" * 60)
+    
+    # 禁止使用 joint_cmd_mode
+    if config.get('joint_cmd_mode', False):
+        rospy.logfatal("=" * 60)
+        rospy.logfatal("joint_cmd_mode 当前不支持！")
+        rospy.logfatal("请移除 --joint_cmd_mode 参数，使用默认的末端位姿控制模式。")
+        rospy.logfatal("=" * 60)
+        raise SystemExit(1)
+    
     rospy.loginfo("-" * 60)
     rospy.loginfo("Inference Configuration:")
     rospy.loginfo(f"  num_inference_steps: {config['num_inference_steps']} (more = better quality)")

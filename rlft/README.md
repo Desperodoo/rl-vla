@@ -51,8 +51,9 @@ rlft/
 │   ├── make_env.py      # Environment factory
 │   └── evaluate.py      # Evaluation utilities
 │
-├── offline/             # 离线训练脚本
+├── offline/             # 离线训练与评估脚本
 │   ├── train_carm.py       # CARM 真实机器人训练
+│   ├── eval_carm.py        # CARM 离线评估 (模型性能验证)
 │   └── train_maniskill.py  # ManiSkill 仿真训练
 │
 ├── online/              # 在线训练脚本
@@ -225,7 +226,54 @@ python -m rlft.offline.train_carm \
     --demo_path ~/recorded_data/pick_place \
     --algorithm shortcut_flow \
     --max_denoising_steps 8
+
+# Consistency Policy
+python -m rlft.offline.train_carm \
+    --algorithm consistency_flow \
+    --exp_name consistency_flow_resnet10_discrete_gripper_weight_0.02_state_joint_action_full_norm_v2 \ --precompute_actions \
+    --visual_encoder_type resnet10 \
+    --gripper_ce_weight 0.02 \
+    --state_mode joint_only \
+    --action_mode full \
+    --normalize_actions \
+    --total_iters 200000
 ```
+
+#### CARM 离线评估
+
+使用录制的数据集评估已训练模型的性能（不需要机械臂），对比预测动作与 Ground Truth：
+
+```bash
+# 标准评估
+python -m rlft.offline.eval_carm \
+    --model_path runs/consistency_flow/checkpoints/final.pt \
+    --data_dir ~/rl-vla/recorded_data/mix \
+    --output_dir offline_results
+
+# EMA vs Non-EMA 模型对比
+python -m rlft.offline.eval_carm \
+    --model_path runs/consistency_flow/checkpoints/final.pt \
+    --data_dir ~/rl-vla/recorded_data/mix \
+    --compare_ema
+
+# 指定推理步数和 episode 数
+python -m rlft.offline.eval_carm \
+    --model_path runs/consistency_flow/checkpoints/final.pt \
+    --data_dir ~/rl-vla/recorded_data/mix \
+    --num_inference_steps 10 \
+    --num_episodes 5
+```
+
+评估参数：
+| 参数 | 默认值 | 描述 |
+|------|--------|------|
+| `--model_path` | (必须) | 模型 checkpoint 路径 |
+| `--data_dir` | `~/rl-vla/recorded_data` | 数据集目录 |
+| `--output_dir` | `offline_results` | 输出目录（图表 + 指标） |
+| `--use_ema` | False | 使用 EMA 模型推理 |
+| `--compare_ema` | False | EMA vs Non-EMA 对比测试 |
+| `--num_episodes` | all | 评估的 episode 数量 |
+| `--num_inference_steps` | None | 推理步数（默认使用模型配置） |
 
 支持的 IL 算法：
 | 算法 | `--algorithm` | 描述 |

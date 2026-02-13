@@ -21,8 +21,11 @@ CARM 机械臂 ROS 数据记录程序（被动模式）
 
 import argparse
 import os
+import sys
 import time
 import threading
+import signal
+import atexit
 import numpy as np
 import cv2
 import h5py
@@ -118,17 +121,40 @@ class DataRecorder:
         
         # 键盘监听
         self.keyboard_thread = None
+        self._old_terminal_settings = None  # 终端原始设置，用于恢复
         self.start_keyboard_listener()
         
         rospy.loginfo("DataRecorder initialized")
         rospy.loginfo(f"Output directory: {self.output_dir}")
         rospy.loginfo(f"Record frequency: {self.record_freq} Hz")
     
+    def _restore_terminal(self):
+        """恢复终端设置（确保任何退出方式都能恢复）"""
+        if self._old_terminal_settings is not None:
+            import termios
+            try:
+                termios.tcsetattr(sys.stdin, termios.TCSADRAIN, self._old_terminal_settings)
+            except Exception:
+                pass
+            self._old_terminal_settings = None
+
     def start_keyboard_listener(self):
         """启动键盘监听线程"""
         try:
             import termios
             import tty
+            # 保存终端设置到实例变量，用于 atexit/signal 恢复
+            self._old_terminal_settings = termios.tcgetattr(sys.stdin)
+            # 注册多重恢复保障
+            atexit.register(self._restore_terminal)
+            original_sigint = signal.getsignal(signal.SIGINT)
+            def _sigint_handler(signum, frame):
+                self._restore_terminal()
+                if callable(original_sigint) and original_sigint not in (signal.SIG_IGN, signal.SIG_DFL):
+                    original_sigint(signum, frame)
+                else:
+                    raise KeyboardInterrupt
+            signal.signal(signal.SIGINT, _sigint_handler)
             self.keyboard_thread = threading.Thread(target=self._keyboard_loop, daemon=True)
             self.keyboard_thread.start()
             rospy.loginfo("Keyboard listener started (press 's' to start/stop, 'q' to quit)")
@@ -138,31 +164,28 @@ class DataRecorder:
     
     def _keyboard_loop(self):
         """键盘监听循环"""
-        import sys
         import termios
         import tty
         
-        old_settings = termios.tcgetattr(sys.stdin)
         try:
             tty.setcbreak(sys.stdin.fileno())
             while not rospy.is_shutdown():
-                if sys.stdin in [sys.stdin]:
-                    c = sys.stdin.read(1)
-                    if self.pending_save:
-                        # 等待用户确认保存
-                        if c == 'y' or c == 'Y':
-                            self._confirm_save(True)
-                        elif c == 'n' or c == 'N':
-                            self._confirm_save(False)
-                        # 其他按键忽略
-                    else:
-                        if c == 's':
-                            self._toggle_recording()
-                        elif c == 'q':
-                            self._quit()
-                            break
+                c = sys.stdin.read(1)
+                if self.pending_save:
+                    # 等待用户确认保存
+                    if c == 'y' or c == 'Y':
+                        self._confirm_save(True)
+                    elif c == 'n' or c == 'N':
+                        self._confirm_save(False)
+                    # 其他按键忽略
+                else:
+                    if c == 's':
+                        self._toggle_recording()
+                    elif c == 'q':
+                        self._quit()
+                        break
         finally:
-            termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
+            self._restore_terminal()
     
     def _toggle_recording(self):
         """切换记录状态"""

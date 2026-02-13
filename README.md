@@ -34,6 +34,9 @@ rl-vla/
 ├── inference_logs/             # 推理日志
 │
 ├── rlft/                       # 模仿学习训练
+│   ├── offline/               # 离线训练与评估
+│   │   ├── train_carm.py     # CARM 训练脚本
+│   │   └── eval_carm.py      # CARM 离线评估
 │   ├── diffusion_policy/      # Diffusion Policy / Flow Matching
 │   ├── act/                   # ACT 算法
 │   └── ppo/                   # PPO 算法
@@ -186,45 +189,64 @@ episode_0001.hdf5
 
 ## 🧠 策略推理
 
-### 测试模式
+### 启动方式
 
 ```bash
-# 干运行模式（不执行动作，最安全）
-rosrun carm_deploy inference_ros.py --pretrain /path/to/model.pt --dry_run
-
-# 慢速模式（5Hz）
-rosrun carm_deploy inference_ros.py --pretrain /path/to/model.pt --slow_mode
-```
-
-### 正常推理
-
-```bash
-# 完整系统 (相机 + 推理)
+# 完整系统 (相机 + 推理，推荐)
 roslaunch carm_deploy full_system.launch pretrain:=/path/to/model.pt
 
 # 或分开启动
 roslaunch carm_deploy camera.launch
 roslaunch carm_deploy inference.launch pretrain:=/path/to/model.pt
+
+# 直接 rosrun (支持更灵活的参数)
+rosrun carm_deploy inference_ros.py --pretrain /path/to/model.pt
 ```
 
-### 离线测试
+### 推理配置
 
 ```bash
-cd carm_ros_deploy/src/carm_deploy/tools
-python offline_test.py \
-    --model_path /path/to/model.pt \
-    --data_dir ~/rl-vla/recorded_data/mix \
-    --compare_ema
+# 调整推理步数和 EMA
+rosrun carm_deploy inference_ros.py \
+    --pretrain /path/to/model.pt \
+    --num_inference_steps 5 \
+    --use_ema
+
+# 使用 receding horizon 执行模式 (默认)
+rosrun carm_deploy inference_ros.py \
+    --pretrain /path/to/model.pt \
+    --execution_mode receding_horizon \
+    --act_horizon 8
+
+# 启用人工干预 + 数据采集
+rosrun carm_deploy inference_ros.py \
+    --pretrain /path/to/model.pt \
+    --intervention \
+    --record_inference
 ```
 
 ### 推理参数
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
-| num_inference_steps | 5 | 推理步数 |
-| use_ema | False | 使用 EMA 模型 |
-| temporal_factor_k | 0.05 | 时序融合系数 |
-| desire_inference_freq | 30 | 推理频率 (Hz) |
+| `--pretrain` | (必须) | 模型 checkpoint 路径 |
+| `--num_inference_steps` | 3 | Flow/Diffusion 推理步数 |
+| `--use_ema` | False | 使用 EMA 模型（适合 1-step 推理） |
+| `--desire_inference_freq` | 30 | 推理频率 (Hz) |
+| `--execution_mode` | receding_horizon | 动作执行模式 (`temporal_ensemble` / `receding_horizon`) |
+| `--act_horizon` | 8 | Action chunk 执行长度 |
+| `--temporal_factor_k` | 0.05 | 时序融合系数 (temporal_ensemble 模式) |
+| `--teleop_scale` | 1.0 | Delta pose 缩放因子 |
+| `--control_freq` | 50 | 控制循环频率 (Hz) |
+
+### 干预与数据采集
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `--intervention` | False | 启用键盘干预 |
+| `--record_inference` | False | 录制推理数据 |
+| `--intervention_mode` | replace | 干预模式 (`replace` / `additive`) |
+| `--max_steps` | 99999 | 每 episode 最大步数 |
 
 ## 🔒 安全控制
 
@@ -262,7 +284,7 @@ python verify_safety_config.py
 | core/ | 环境封装、安全控制器 |
 | inference/ | 策略推理、日志记录 |
 | data/ | 数据采集、加载、分析 |
-| tools/ | 离线测试、配置验证 |
+| tools/ | 安全配置、调试工具 |
 | utils/ | 图像同步、轨迹插值、路径配置 |
 
 ### rlft - 训练模块
