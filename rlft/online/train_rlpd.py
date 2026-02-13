@@ -78,10 +78,14 @@ class Args:
     # Data settings
     demo_path: Optional[str] = "~/.maniskill/demos/LiftPegUpright-v1/rl/trajectory.rgb.pd_ee_delta_pose.physx_cuda.h5"
     num_demos: Optional[int] = None
-    online_ratio: float = 0.5
+    online_ratio: float = 0.15
+    """Fraction of online data in each batch. Sweep v3: or=0.15 best stability;
+    v4: confirmed as optimal for 250K-500K training. Lower ratio = stronger demo anchoring."""
     
     # Training settings
-    total_timesteps: int = 1_000_000
+    total_timesteps: int = 500_000
+    """Total environment steps. Sweep v4: 500K shows diminishing returns,
+    most configs plateau at 250K. 1M is unnecessarily long."""
     num_seed_steps: int = 5000
     utd_ratio: int = 20
     batch_size: int = 256
@@ -91,8 +95,11 @@ class Args:
     num_eval_episodes: int = 50
     
     # Optimizer settings
-    lr_actor: float = 3e-4
-    lr_critic: float = 3e-4
+    lr_actor: float = 1e-4
+    """Actor learning rate. Sweep v2: 3e-4 causes catastrophic forgetting;
+    v3/v4: 1e-4 optimal for 250K, 7e-5 for 500K. 1e-4 is safe default."""
+    lr_critic: float = 1e-4
+    """Critic learning rate. Should match lr_actor for AWSC."""
     lr_temp: float = 3e-4
     max_grad_norm: float = 10.0
     
@@ -131,10 +138,12 @@ class Args:
     """Whether to load critic from pretrain checkpoint (recommended for AW-SC offline checkpoints)"""
     
     # AWSC hyperparameters (unified with old version)
-    awsc_beta: float = 100.0
-    """Temperature for advantage weighting in AWSC"""
-    awsc_bc_weight: float = 1.0
-    """Weight for flow matching loss"""
+    awsc_beta: float = 50.0
+    """Temperature for advantage weighting. Sweep v2-v4: beta=50 most robust.
+    Higher beta (80+) needs accurate Q-values and amplifies noise with low K."""
+    awsc_bc_weight: float = 2.0
+    """Weight for flow matching loss. Sweep v2: bc=2.0 critical for stability
+    by anchoring actor near pretrained policy."""
     awsc_shortcut_weight: float = 0.3
     """Weight for shortcut consistency loss"""
     awsc_self_consistency_k: float = 0.25
@@ -155,11 +164,12 @@ class Args:
     """Minimum advantage for online samples in policy training"""
     
     # Advantage computation mode (AWSC)
-    awsc_advantage_mode: Literal["batch_mean", "per_state_v"] = "batch_mean"
+    awsc_advantage_mode: Literal["batch_mean", "per_state_v"] = "per_state_v"
     """How to compute advantage baseline for Q-weighting:
     - 'batch_mean': A(s,a) = Q(s,a) - mean(Q) over batch (fast, but state-independent)
     - 'per_state_v': A(s,a) = Q(s,a) - V(s) where V(s) = E_{a'~π}[Q(s,a')]
-      (proper AWAC, distinguishes good/bad actions per state, costs extra forward passes)"""
+      (proper AWAC, distinguishes good/bad actions per state, costs extra forward passes)
+    Sweep v2-v4: per_state_v consistently superior with stable training (low LR + low OR)."""
     awsc_num_v_samples: int = 4
     """Number of policy samples to estimate V(s) for per_state_v mode"""
     

@@ -95,12 +95,12 @@ class AWSCAgent(nn.Module):
         max_denoising_steps: int = 8,
         num_inference_steps: int = 8,
         # AWAC parameters
-        beta: float = 100.0,  # Sweep best (high temp for online RL)
-        bc_weight: float = 1.0,
+        beta: float = 50.0,  # Sweep v2-v4: beta=50 most robust across training budgets
+        bc_weight: float = 2.0,  # Sweep v2-v4: bc=2.0 critical for stability
         shortcut_weight: float = 0.3,
         self_consistency_k: float = 0.25,  # Match IL/offline_rl
         # RL parameters
-        gamma: float = 0.99,
+        gamma: float = 0.9,  # Match train_rlpd.py; v3: gamma=0.95 causes Q variance explosion
         tau: float = 0.005,
         reward_scale: float = 1.0,
         q_target_clip: float = 100.0,
@@ -123,7 +123,7 @@ class AWSCAgent(nn.Module):
         filter_policy_data: bool = False,
         advantage_threshold: float = 0.0,
         # Advantage computation mode
-        advantage_mode: Literal["batch_mean", "per_state_v"] = "batch_mean",
+        advantage_mode: Literal["batch_mean", "per_state_v"] = "per_state_v",  # Sweep v2-v4: per_state_v superior with stable training
         num_v_samples: int = 4,
         action_bounds: Optional[tuple] = None,
         device: str = "cuda",

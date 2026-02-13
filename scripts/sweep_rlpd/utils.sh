@@ -387,6 +387,8 @@ get_config_dir() {
         config_dir="configs_v2"
     elif [[ "$CONFIG_VERSION" == "v3" ]]; then
         config_dir="configs_v3"
+    elif [[ "$CONFIG_VERSION" == "v4" ]]; then
+        config_dir="configs_v4"
     fi
     echo "$config_dir"
 }

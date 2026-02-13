@@ -1150,8 +1150,8 @@ def main():
     parser.add_argument(
         "--config-version", "-v",
         default="v2",
-        choices=["v1", "v2", "v3"],
-        help="Config version (v1=wave1, v2=wave2)"
+        choices=["v1", "v2", "v3", "v4"],
+        help="Config version (v1=wave1, v2=wave2, v3=wave3, v4=wave4)"
     )
 
     parser.add_argument(
@@ -1175,10 +1175,13 @@ def main():
 
     # Set sweep-dir based on config-version if not specified
     if args.sweep_dir is None:
-        if args.config_version == "v2":
-            args.sweep_dir = "runs/rlpd_sweep_v2"
-        else:
-            args.sweep_dir = "runs/rlpd_sweep"
+        version_dir_map = {
+            "v1": "runs/rlpd_sweep",
+            "v2": "runs/rlpd_sweep_v2",
+            "v3": "runs/rlpd_sweep_v3",
+            "v4": "runs/rlpd_sweep_v4",
+        }
+        args.sweep_dir = version_dir_map.get(args.config_version, "runs/rlpd_sweep")
 
     if args.output_dir is None:
         args.output_dir = os.path.join(args.sweep_dir, "analysis_results")
