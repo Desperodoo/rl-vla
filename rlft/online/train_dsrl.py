@@ -5,12 +5,14 @@ DSRL-SAC trains a standard SAC agent **in the noise space** of a frozen
 ShortCut Flow policy. The environment wrapper decodes noise → real actions
 internally.
 
-Key design choices (aligned with dsrl_official):
-    * Actor: 3×2048 MLP + Tanh, log_std_init=−3.
-    * Critic: 3×2048 MLP + Tanh, 2 Q-networks.
-    * UTD = 20–40.
-    * action_magnitude = 1.5.
-    * target_entropy = 0 (protect pretrained policy).
+Key design choices (tuned via sweep on LiftPegUpright-v1):
+    * Actor: 3×2048 MLP + Tanh, log_std_init=−5.
+    * Critic: 3×2048 MLP + Tanh, 10 Q-networks.
+    * UTD = 60.
+    * action_magnitude = 2.5.
+    * gamma = 0.95 (matches 100-step episode horizon).
+    * target_entropy = −3.5 (balanced exploration in noise space).
+    * num_seed_steps = 0 (pretrained policy provides sufficient initial exploration).
     * Buffer: standard MDP (env wrapper handles action chunking).
 
 Usage::
@@ -22,8 +24,8 @@ Usage::
 
     # Custom hyperparameters
     python -m rlft.online.train_dsrl \\
-        --utd_ratio 40 \\
-        --action_magnitude 2.0 \\
+        --utd_ratio 80 \\
+        --action_magnitude 3.0 \\
         --num_envs 100
 """
 
@@ -101,25 +103,25 @@ class Args:
     visual_feature_dim: int = 256
 
     # ----- DSRL-SAC hyper-parameters -----
-    action_magnitude: float = 2.0
+    action_magnitude: float = 2.5
     total_timesteps: int = 1_000_000
     learning_rate: float = 3e-4
     buffer_size: int = 1_000_000
     batch_size: int = 256
-    gamma: float = 0.99
+    gamma: float = 0.95
     tau: float = 0.005
-    utd_ratio: int = 40
-    num_seed_steps: int = 5000
-    """Steps of zero-noise warmup before training (aligned with dsrl_official 5001)."""
-    init_temperature: float = 1.0
-    target_entropy: float = 0.0
-    log_std_init: float = -3.0
+    utd_ratio: int = 60
+    num_seed_steps: int = 0
+    """No warmup needed — pretrained policy already provides sufficient initial exploration quality."""
+    init_temperature: float = 0.5
+    target_entropy: float = -3.5
+    log_std_init: float = -5.0
     max_grad_norm: float = 10.0
 
     # ----- network architecture -----
     num_layers: int = 3
-    layer_size: int = 512
-    num_qs: int = 2
+    layer_size: int = 2048
+    num_qs: int = 10
     use_layer_norm: bool = True
 
     # ----- logging / eval / saving -----

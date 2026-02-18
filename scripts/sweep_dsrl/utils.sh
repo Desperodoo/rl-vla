@@ -67,7 +67,12 @@ get_checkpoint_path() {
 is_experiment_successful() {
     local exp_dir=$1
 
-    # Best checkpoint
+    # Best checkpoint (train_dsrl.py saves best.pt)
+    if [[ -f "${exp_dir}/checkpoints/best.pt" ]]; then
+        return 0
+    fi
+
+    # Legacy checkpoint name
     if [[ -f "${exp_dir}/checkpoints/best_eval_success_once.pt" ]]; then
         return 0
     fi
@@ -127,14 +132,74 @@ parse_metrics_from_log() {
     fi
 
     local value
+    # Try wandb summary first
     value=$(grep "wandb:.*${metric_name}" "$log_file" 2>/dev/null | tail -1 | awk '{print $NF}')
 
     if [[ "$value" == "▁" ]] || [[ -z "$value" ]]; then
+        value=""
+    fi
+
+    echo "$value"
+}
+
+# Parse best success rate from train_dsrl.py log output
+# Handles: "Done. Best success rate: 98.00%" → 0.98
+# Also handles wandb summary truncation (final/best_success_rate hidden behind "+10 ...")
+parse_best_success_rate() {
+    local log_file=$1
+
+    if [[ ! -f "$log_file" ]]; then
         echo ""
         return
     fi
 
-    echo "$value"
+    local value
+
+    # 1. Try wandb summary: final/best_success_rate (may be truncated)
+    value=$(grep 'wandb:.*final/best_success_rate' "$log_file" 2>/dev/null | tail -1 | awk '{print $NF}')
+    if [[ -n "$value" ]] && [[ "$value" != "▁" ]]; then
+        echo "$value"
+        return
+    fi
+
+    # 2. Parse "Done. Best success rate: XX.XX%" (always present at end of training)
+    value=$(grep -oP 'Done\. Best success rate: \K[\d.]+' "$log_file" 2>/dev/null | tail -1)
+    if [[ -n "$value" ]]; then
+        # Convert percentage to decimal (98.00 → 0.98)
+        value=$(echo "scale=4; $value / 100" | bc 2>/dev/null)
+        echo "$value"
+        return
+    fi
+
+    echo ""
+}
+
+# Parse success_at_end from train_dsrl.py log
+parse_success_at_end() {
+    local log_file=$1
+
+    if [[ ! -f "$log_file" ]]; then
+        echo ""
+        return
+    fi
+
+    local value
+
+    # 1. Try wandb summary: eval/success_at_end
+    value=$(grep 'wandb:.*eval/success_at_end' "$log_file" 2>/dev/null | tail -1 | awk '{print $NF}')
+    if [[ -n "$value" ]] && [[ "$value" != "▁" ]]; then
+        echo "$value"
+        return
+    fi
+
+    # 2. Parse plain text "  success_at_end: X.XXXX"
+    value=$(grep -oP '^\s+success_at_end: \K[\d.]+' "$log_file" 2>/dev/null | tail -1)
+    if [[ -n "$value" ]]; then
+        echo "$value"
+        return
+    fi
+
+    echo ""
 }
 
 # -----------------------------------------------------------------------------
@@ -509,9 +574,9 @@ analyze_algorithm_with_metrics() {
         total=$((total + 1))
 
         local success_once
-        success_once=$(parse_metrics_from_log "$log_file" "final/best_success_once")
+        success_once=$(parse_best_success_rate "$log_file")
         local success_end
-        success_end=$(parse_metrics_from_log "$log_file" "final/best_success_at_end")
+        success_end=$(parse_success_at_end "$log_file")
         local status="not_started"
 
         if is_experiment_successful "$exp_dir"; then
@@ -639,8 +704,8 @@ export_results_json() {
 
             if is_experiment_successful "$exp_dir"; then
                 status="success"
-                success_once=$(parse_metrics_from_log "$log_file" "final/best_success_once")
-                success_end=$(parse_metrics_from_log "$log_file" "final/best_success_at_end")
+                success_once=$(parse_best_success_rate "$log_file")
+                success_end=$(parse_success_at_end "$log_file")
 
                 if [[ -n "$success_once" ]]; then
                     if (( $(echo "$success_once > $algo_best_score" | bc -l 2>/dev/null || echo 0) )); then

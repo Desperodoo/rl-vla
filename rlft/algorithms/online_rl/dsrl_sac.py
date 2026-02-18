@@ -12,9 +12,10 @@ Key differences from the standard ``SACAgent``:
     * Output range is ``[-action_magnitude, +action_magnitude]`` not ``[-1,1]``.
     * Uses ``Tanh`` activation (matching DSRL official) instead of ``Mish``.
     * Default hidden dims = ``[2048, 2048, 2048]`` (wider, shallower).
-    * ``log_std_init`` defaults to −3 (very small initial exploration noise to
+    * ``log_std_init`` defaults to −5 (very small initial exploration noise to
       protect the pretrained policy).
-    * ``target_entropy`` defaults to 0 (discourages excessive exploration).
+    * ``target_entropy`` defaults to −3.5 (moderate negative entropy for
+      balanced exploration/exploitation in noise space).
 
 Reference: https://github.com/ajwagen/dsrl
 """
@@ -88,7 +89,7 @@ class DSRLActor(nn.Module):
         hidden_dims: MLP hidden layer sizes.  Default ``[2048]*3``.
         action_magnitude: Scale for tanh output.
         log_std_init: Initial value for the constant part of log-std
-            (−3 ≈ std 0.05, protects pretrained policy).
+            (−5 ≈ std 0.007, protects pretrained policy).
     """
 
     def __init__(
@@ -96,8 +97,8 @@ class DSRLActor(nn.Module):
         obs_dim: int,
         noise_dim: int,
         hidden_dims: list = None,
-        action_magnitude: float = 1.5,
-        log_std_init: float = -3.0,
+        action_magnitude: float = 2.5,
+        log_std_init: float = -5.0,
     ):
         super().__init__()
         if hidden_dims is None:
@@ -166,7 +167,7 @@ class DSRLCritic(nn.Module):
         obs_dim: int,
         noise_dim: int,
         hidden_dims: list = None,
-        num_qs: int = 2,
+        num_qs: int = 10,
         use_layer_norm: bool = False,
     ):
         super().__init__()
@@ -240,7 +241,8 @@ class DSRLSACAgent(nn.Module):
         tau: Soft-update rate.
         init_temperature: Initial entropy temperature.
         target_entropy: Target entropy for auto-tuning.
-            Default 0 (low exploration, protect pretrained policy).
+            Default −3.5 (moderate negative entropy, balances exploration
+            and exploitation in noise space).
         log_std_init: Actor initial log-std.
         use_layer_norm: Use LayerNorm in critic.
         device: Device.
@@ -251,14 +253,14 @@ class DSRLSACAgent(nn.Module):
         obs_dim: int,
         act_steps: int = 8,
         action_dim: int = 7,
-        action_magnitude: float = 1.5,
+        action_magnitude: float = 2.5,
         hidden_dims: list = None,
-        num_qs: int = 2,
-        gamma: float = 0.99,
+        num_qs: int = 10,
+        gamma: float = 0.95,
         tau: float = 0.005,
-        init_temperature: float = 1.0,
-        target_entropy: float = 0.0,
-        log_std_init: float = -3.0,
+        init_temperature: float = 0.5,
+        target_entropy: float = -3.5,
+        log_std_init: float = -5.0,
         use_layer_norm: bool = False,
         device: str = "cuda",
     ):

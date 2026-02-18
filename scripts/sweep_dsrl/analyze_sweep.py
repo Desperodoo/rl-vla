@@ -193,7 +193,14 @@ class DataExtractor:
         return params
 
     def parse_metrics_from_log(self, log_file: Path) -> Dict[str, float]:
-        """Parse metrics from train.log file"""
+        """Parse metrics from train.log file
+
+        train_dsrl.py logs:
+          - wandb Run summary: eval/success_once, eval/success_at_end (may truncate others)
+          - wandb.log: final/best_success_rate (often hidden behind '+10 ...' in log)
+          - Plain text at end: 'Done. Best success rate: XX.XX%'
+          - Plain text eval: '  success_once: X.XXXX', '  success_at_end: X.XXXX'
+        """
         metrics = {}
         if not log_file.exists():
             return metrics
@@ -201,18 +208,21 @@ class DataExtractor:
         with open(log_file, 'r', errors='ignore') as f:
             content = f.read()
 
-        patterns = [
-            (r"wandb:\s*final/best_success_once\s+([\d.]+)", "best_success_once"),
-            (r"wandb:\s*final/best_success_at_end\s+([\d.]+)", "best_success_at_end"),
+        # --- wandb Run summary metrics ---
+        wandb_patterns = [
+            # Best success rate (may be truncated in wandb summary)
+            (r"wandb:\s*final/best_success_rate\s+([\d.]+)", "best_success_once"),
+            # Final eval values from wandb summary
             (r"wandb:\s*eval/success_once\s+([\d.]+)", "final_success_once"),
             (r"wandb:\s*eval/success_at_end\s+([\d.]+)", "final_success_at_end"),
+            # Training metrics
             (r"wandb:\s*train/critic_loss\s+([\d.]+)", "critic_loss"),
             (r"wandb:\s*train/actor_loss\s+(-?[\d.]+)", "actor_loss"),
             (r"wandb:\s*train/alpha\s+([\d.]+)", "alpha"),
             (r"wandb:\s*train/entropy\s+(-?[\d.]+)", "entropy"),
         ]
 
-        for pattern, metric_name in patterns:
+        for pattern, metric_name in wandb_patterns:
             matches = re.findall(pattern, content)
             if matches:
                 try:
@@ -222,6 +232,34 @@ class DataExtractor:
                             metrics[metric_name] = value
                     else:
                         metrics[metric_name] = value
+                except ValueError:
+                    pass
+
+        # --- Fallback: parse 'Done. Best success rate: XX.XX%' ---
+        if "best_success_once" not in metrics:
+            match = re.search(r"Done\.\s*Best success rate:\s*([\d.]+)%", content)
+            if match:
+                try:
+                    pct = float(match.group(1))
+                    metrics["best_success_once"] = pct / 100.0
+                except ValueError:
+                    pass
+
+        # --- Fallback: parse plain text eval output ---
+        # '  success_once: X.XXXX' (printed by train_dsrl.py in eval blocks)
+        if "final_success_once" not in metrics:
+            matches = re.findall(r"^\s+success_once:\s+([\d.]+)", content, re.MULTILINE)
+            if matches:
+                try:
+                    metrics["final_success_once"] = float(matches[-1])
+                except ValueError:
+                    pass
+
+        if "final_success_at_end" not in metrics:
+            matches = re.findall(r"^\s+success_at_end:\s+([\d.]+)", content, re.MULTILINE)
+            if matches:
+                try:
+                    metrics["final_success_at_end"] = float(matches[-1])
                 except ValueError:
                     pass
 
@@ -271,8 +309,11 @@ class DataExtractor:
                 if key in config_json:
                     params[key] = config_json[key]
 
+        # Check status
+        # train_dsrl.py saves best.pt (not best_eval_success_once.pt)
         checkpoint_dir = exp_dir / "checkpoints"
         has_checkpoint = (
+            (checkpoint_dir / "best.pt").exists() or
             (checkpoint_dir / "best_eval_success_once.pt").exists() or
             (checkpoint_dir / "final.pt").exists()
         )
@@ -294,12 +335,21 @@ class DataExtractor:
 
         training_curves = self.load_tensorboard_data(exp_dir)
 
+        # best_success_once = final/best_success_rate (or parsed from 'Done. Best success rate')
+        # Fallback chain: best_success_once > final_success_once
+        success_once = metrics.get("best_success_once")
+        if success_once is None:
+            success_once = metrics.get("final_success_once")
+
+        # For success_at_end, use final eval value
+        success_at_end = metrics.get("final_success_at_end")
+
         return ExperimentResult(
             algorithm=algorithm,
             config_name=config_name,
             params=params,
-            success_once=metrics.get("best_success_once"),
-            success_at_end=metrics.get("best_success_at_end"),
+            success_once=success_once,
+            success_at_end=success_at_end,
             status=status,
             exp_dir=str(exp_dir),
             training_curves=training_curves,
@@ -999,7 +1049,11 @@ class SweepAnalyzer:
         """Save raw analysis data as JSON"""
 
         def to_json(obj):
-            if isinstance(obj, (np.integer, np.int64, np.int32)):
+            if isinstance(obj, (bool,)):
+                return bool(obj)
+            elif isinstance(obj, (np.bool_,)):
+                return bool(obj)
+            elif isinstance(obj, (np.integer, np.int64, np.int32)):
                 return int(obj)
             elif isinstance(obj, (np.floating, np.float64, np.float32)):
                 return float(obj)
