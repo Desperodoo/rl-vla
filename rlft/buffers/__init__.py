@@ -13,6 +13,7 @@ from .success_buffer import SuccessReplayBuffer
 from .rollout_buffer import RolloutBufferPPO, SMDPChunkCollector
 from .smdp import compute_smdp_rewards
 from .dsrl_buffer import DSRLReplayBuffer
+from .pld_buffer import PLDReplayBuffer
 
 __all__ = [
     "OnlineReplayBuffer",
@@ -22,4 +23,5 @@ __all__ = [
     "SMDPChunkCollector",
     "compute_smdp_rewards",
     "DSRLReplayBuffer",
+    "PLDReplayBuffer",
 ]

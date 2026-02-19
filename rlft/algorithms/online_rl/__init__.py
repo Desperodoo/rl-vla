@@ -10,10 +10,12 @@ from .sac import SACAgent
 from .reinflow import ReinFlowAgent
 from .awsc import AWSCAgent
 from .dsrl_sac import DSRLSACAgent
+from .pld_sac import PLDSACAgent
 
 __all__ = [
     "SACAgent",
     "ReinFlowAgent",
     "AWSCAgent",
     "DSRLSACAgent",
+    "PLDSACAgent",
 ]
