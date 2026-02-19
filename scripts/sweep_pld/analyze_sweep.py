@@ -80,7 +80,7 @@ DEFAULT_PARAMS = {
     "pld_sac": {
         # PLD-specific
         "action_scale": 0.25,
-        "calql_pretrain_steps": 5000,
+        "calql_pretrain_steps": 2000,
         "calql_alpha": 5.0,
         "offline_demo_episodes": 200,
         "probe_steps": 5,
@@ -137,16 +137,16 @@ CONFIG_PARAM_PATTERNS = {
     r"combined_no_pld_features": lambda m: {
         "calql_pretrain_steps": 0, "probe_steps": 0, "probing_alpha": 0.0, "online_ratio": 1.0},
     r"combined_aggressive_residual": lambda m: {
-        "action_scale": 0.5, "offline_demo_episodes": 500, "calql_pretrain_steps": 5000},
+        "action_scale": 0.5, "offline_demo_episodes": 500, "calql_pretrain_steps": 2000},
     r"combined_conservative": lambda m: {
-        "action_scale": 0.1, "calql_pretrain_steps": 5000, "calql_alpha": 10.0,
+        "action_scale": 0.1, "calql_pretrain_steps": 2000, "calql_alpha": 10.0,
         "probe_steps": 8, "probing_alpha": 0.8},
     r"combined_probe_only": lambda m: {
         "calql_pretrain_steps": 0, "probe_steps": 12, "probing_alpha": 1.0},
     r"combined_calql_only": lambda m: {
-        "calql_pretrain_steps": 5000, "calql_alpha": 10.0, "probe_steps": 0, "probing_alpha": 0.0},
+        "calql_pretrain_steps": 2000, "calql_alpha": 10.0, "probe_steps": 0, "probing_alpha": 0.0},
     r"combined_offline_heavy": lambda m: {
-        "online_ratio": 0.2, "offline_demo_episodes": 500, "calql_pretrain_steps": 5000},
+        "online_ratio": 0.2, "offline_demo_episodes": 500, "calql_pretrain_steps": 2000},
     r"combined_high_utd_large_batch": lambda m: {
         "utd_ratio": 100, "batch_size": 512, "num_qs": 15},
     r"combined_small_net": lambda m: {

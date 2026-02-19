@@ -54,7 +54,7 @@ PRED_HORIZON="${PRED_HORIZON:-8}"
 ACTION_SCALE="${ACTION_SCALE:-0.25}"
 
 # Cal-QL offline pretraining steps (0 = skip pretraining)
-CALQL_PRETRAIN_STEPS="${CALQL_PRETRAIN_STEPS:-5000}"
+CALQL_PRETRAIN_STEPS="${CALQL_PRETRAIN_STEPS:-2000}"
 
 # Cal-QL conservative loss coefficient
 CALQL_ALPHA="${CALQL_ALPHA:-5.0}"

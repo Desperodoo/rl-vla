@@ -7,7 +7,7 @@
 #
 # DEFAULTS (from config.sh / training code):
 #   action_scale         = 0.25
-#   calql_pretrain_steps = 5000
+#   calql_pretrain_steps = 2000
 #   calql_alpha          = 5.0
 #   probe_steps          = 5
 #   probing_alpha        = 0.6
@@ -47,17 +47,17 @@ ACTION_SCALE_CONFIGS=(
 )
 
 # =============================================================================
-# Group 2: Cal-QL Pretraining Steps (fine-grained 0–5000 range)
-# baseline uses 5000; sweep finer granularity below default.
+# Group 2: Cal-QL Pretraining Steps (sweep below and above default)
+# baseline uses 2000; test less pretraining (0–1000) and more (3000–5000).
 # =============================================================================
 CALQL_STEPS_CONFIGS=(
     "$(_make_config "calql_0"    calql_pretrain_steps 0)"
     "$(_make_config "calql_500"  calql_pretrain_steps 500)"
     "$(_make_config "calql_1000" calql_pretrain_steps 1000)"
-    "$(_make_config "calql_2000" calql_pretrain_steps 2000)"
+    # baseline uses 2000
     "$(_make_config "calql_3000" calql_pretrain_steps 3000)"
     "$(_make_config "calql_4000" calql_pretrain_steps 4000)"
-    # baseline uses 5000
+    "$(_make_config "calql_5000" calql_pretrain_steps 5000)"
 )
 
 # =============================================================================
@@ -124,15 +124,15 @@ COMBINED_CONFIGS=(
     # No pretraining, no probing — pure DSRL-like online learning
     "combined_no_pld_features:--calql_pretrain_steps 0 --probe_steps 0 --probing_alpha 0.0 --online_ratio 1.0"
     # Aggressive residual: wider action range + more demos + max pretraining
-    "combined_aggressive_residual:--action_scale 0.5 --offline_demo_episodes 500 --calql_pretrain_steps 5000"
+    "combined_aggressive_residual:--action_scale 0.5 --offline_demo_episodes 500 --calql_pretrain_steps 2000"
     # Conservative: small residual + strong pretraining + heavy probing
-    "combined_conservative:--action_scale 0.1 --calql_pretrain_steps 5000 --calql_alpha 10.0 --probe_steps 8 --probing_alpha 0.8"
+    "combined_conservative:--action_scale 0.1 --calql_pretrain_steps 2000 --calql_alpha 10.0 --probe_steps 8 --probing_alpha 0.8"
     # Probing ablation: max probe, no Cal-QL
     "combined_probe_only:--calql_pretrain_steps 0 --probe_steps 12 --probing_alpha 1.0"
     # Cal-QL ablation: max pretraining, no probing
-    "combined_calql_only:--calql_pretrain_steps 5000 --calql_alpha 10.0 --probe_steps 0 --probing_alpha 0.0"
+    "combined_calql_only:--calql_pretrain_steps 2000 --calql_alpha 10.0 --probe_steps 0 --probing_alpha 0.0"
     # Offline-heavy mixing: mostly offline data + strong pretraining
-    "combined_offline_heavy:--online_ratio 0.2 --offline_demo_episodes 500 --calql_pretrain_steps 5000"
+    "combined_offline_heavy:--online_ratio 0.2 --offline_demo_episodes 500 --calql_pretrain_steps 2000"
     # High UTD + large batch: maximize sample efficiency
     "combined_high_utd_large_batch:--utd_ratio 100 --batch_size 512 --num_qs 15"
     # Small net + low UTD: lightweight baseline

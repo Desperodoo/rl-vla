@@ -160,7 +160,7 @@ class Args:
     # ----- offline data & Cal-QL pretraining -----
     offline_demo_episodes: int = 200
     """Number of episodes to collect offline using base policy."""
-    calql_pretrain_steps: int = 5000
+    calql_pretrain_steps: int = 2000
     """Number of Cal-QL critic pretraining steps on offline data."""
     calql_alpha: float = 5.0
     """Cal-QL conservative loss coefficient."""
