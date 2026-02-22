@@ -78,14 +78,16 @@ OFFLINE_BUFFER_SIZE="${OFFLINE_BUFFER_SIZE:-200000}"
 # -----------------------------------------------------------------------------
 CONFIG_VERSION="${CONFIG_VERSION:-v1}"
 
-# Sweep base directory for experiment outputs
-SWEEP_BASE_DIR="${SWEEP_BASE_DIR:-runs/pld_sweep}"
+# Experiment name prefix (must change with CONFIG_VERSION to keep
+# SWEEP_BASE_DIR and --exp_name in sync, like RLPD)
 if [[ "$CONFIG_VERSION" == "v2" ]]; then
-    SWEEP_BASE_DIR="runs/pld_sweep_v2"
+    EXP_NAME="${EXP_NAME:-pld_sweep_v2}"
+else
+    EXP_NAME="${EXP_NAME:-pld_sweep}"
 fi
 
-# Experiment name prefix
-EXP_NAME="${EXP_NAME:-pld_sweep}"
+# Sweep base directory for experiment outputs (derived from EXP_NAME)
+SWEEP_BASE_DIR="${SWEEP_BASE_DIR:-runs/${EXP_NAME}}"
 
 # Algorithm definition (PLD only has one algorithm)
 ALL_ALGORITHMS=("pld_sac")

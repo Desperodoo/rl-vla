@@ -29,6 +29,16 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+
+# Pre-parse --config-version from all args (must happen before sourcing
+# utils.sh / config.sh so that CONFIG_VERSION is set correctly)
+ARGS=("$@")
+for ((i=0; i<${#ARGS[@]}; i++)); do
+    if [[ "${ARGS[$i]}" == "--config-version" ]]; then
+        export CONFIG_VERSION="${ARGS[$((i+1))]}"
+    fi
+done
+
 source "${SCRIPT_DIR}/utils.sh"
 
 # =============================================================================
@@ -48,9 +58,11 @@ usage() {
     echo ""
     echo "Options:"
     echo "  --dry-run                    Preview commands without executing"
+    echo "  --config-version V           Config version (v1 default, v2 SAC core params)"
     echo ""
     echo "Examples:"
-    echo "  $0 run                       # Run all pld_sac sweep configs"
+    echo "  $0 run                       # Run all pld_sac sweep configs (v1)"
+    echo "  $0 run --config-version v2   # Run v2 sweep configs"
     echo "  $0 run pld_sac --dry-run     # Preview commands"
     echo "  $0 status                    # Show all experiment status"
     echo "  $0 analyze                   # Detailed metrics analysis"
@@ -61,7 +73,6 @@ usage() {
     echo "  CHECKPOINT=...       Override pretrained checkpoint path"
     echo "  TOTAL_TIMESTEPS=N    Override training steps"
     echo "  ACTION_SCALE=0.5     Override residual action scale ξ"
-    echo "  CONFIG_VERSION=v1    Config version (default: v1)"
 }
 
 # =============================================================================
@@ -75,6 +86,7 @@ cmd_run() {
     while [[ $# -gt 0 ]]; do
         case $1 in
             --dry-run) dry_run=true; shift ;;
+            --config-version) shift; shift ;;  # already handled in pre-parse
             --*) shift ;;          # skip unknown flags
             *)  algorithm="$1"; shift ;;
         esac
