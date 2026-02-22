@@ -37,14 +37,13 @@ from einops import rearrange
 
 # rlft 训练框架中的共享模块
 from rlft.networks import (
-    PlainConv, ResNetEncoder, StateEncoder, GripperHead,
-    create_visual_encoder, get_encoder_input_size,
+    StateEncoder, GripperHead,
+    create_visual_encoder,
 )
 from rlft.datasets import (
     ActionNormalizer,
     load_carm_episode,
     compute_relative_pose_transform,
-    get_state_dim_for_mode,
 )
 from rlft.utils.model_factory import create_agent_for_inference
 
@@ -52,41 +51,71 @@ from rlft.utils.model_factory import create_agent_for_inference
 class OfflinePolicy:
     """
     离线策略推理类
-    与 RealPolicy 类似，但专门用于离线测试
+    与 RealPolicy (policy_loader.py) 完全对齐，用于离线测试验证推理 pipeline
     
     支持:
         - EMA 和非 EMA 模型推理对比
         - 不同推理步数对比
     """
     
-    def __init__(self, model_path: str, device: str = 'cuda', use_ema: bool = False):
+    # 默认参数 — 与 policy_loader.py 中 POLICY_DEFAULTS 保持一致
+    DEFAULTS = {
+        'obs_horizon': 2,
+        'pred_horizon': 16,
+        'action_dim': 13,
+        'action_dim_full': 15,
+        'state_mode': 'joint_only',
+        'target_image_size': (128, 128),
+        'visual_feature_dim': 256,
+        'state_encoder_hidden_dim': 128,
+        'state_encoder_out_dim': 256,
+        'use_state_encoder': True,
+        'algorithm': 'consistency_flow',
+        'num_inference_steps': 10,
+        'gripper_threshold': 0.05,
+        'gripper_open_val': 0.078,
+        'gripper_close_val': 0.04,
+        'gripper_head_hidden_dim': 256,
+        'gripper_hysteresis_window': 1,
+    }
+    
+    def __init__(self, model_path: str, device: str = 'cuda', use_ema: bool = False,
+                 num_inference_steps: Optional[int] = None,
+                 gripper_hysteresis_window: Optional[int] = None):
         """
         Args:
             model_path: 模型 checkpoint 路径
             device: 推理设备
             use_ema: 是否使用 EMA 模型进行推理
+            num_inference_steps: 推理步数 (None = 使用默认值 10)
+            gripper_hysteresis_window: Gripper 滞后窗口 (None = 使用默认值 1)
         """
         self.device = torch.device(device if torch.cuda.is_available() else 'cpu')
         self.model_path = model_path
         self.use_ema = use_ema
         
-        # 默认参数
-        self.obs_horizon = 2
-        self.pred_horizon = 16
-        self.action_dim = 14  # Continuous action dim (no gripper)
-        self.action_dim_full = 15  # Full action dim for output
-        self.state_dim = 7
-        self.target_image_size = (128, 128)
-        self.visual_feature_dim = 256
-        self.state_encoder_hidden_dim = 128
-        self.state_encoder_out_dim = 256
-        self.use_state_encoder = True
-        self.algorithm = 'consistency_flow'
-        self.visual_encoder_type = 'plain_conv'  # 支持 plain_conv, resnet18, resnet34, resnet50
+        _d = self.DEFAULTS
         
-        # 新增配置
-        self.state_mode = 'joint_only'  # joint_only, ee_only, both
-        self.action_mode = 'full'  # full, ee_only
+        # 默认参数（会被 _load_model -> args.json 覆盖）
+        self.obs_horizon = _d['obs_horizon']
+        self.pred_horizon = _d['pred_horizon']
+        self.action_dim = _d['action_dim']
+        self.action_dim_full = _d['action_dim_full']
+        self.state_dim = 7
+        self.target_image_size = _d['target_image_size']
+        self.visual_feature_dim = _d['visual_feature_dim']
+        self.state_encoder_hidden_dim = _d['state_encoder_hidden_dim']
+        self.state_encoder_out_dim = _d['state_encoder_out_dim']
+        self.use_state_encoder = _d['use_state_encoder']
+        self.algorithm = _d['algorithm']
+        self.visual_encoder_type = 'plain_conv'
+        
+        # 推理参数
+        self.num_inference_steps = num_inference_steps or _d['num_inference_steps']
+        
+        # State/Action mode
+        self.state_mode = _d['state_mode']
+        self.action_mode = 'full'
         self.normalize_actions = False
         self.action_norm_mode = 'standard'
         
@@ -94,15 +123,19 @@ class OfflinePolicy:
         self.visual_encoder = None
         self.state_encoder = None
         self.agent = None
-        self.gripper_head = None  # Discrete gripper head
-        self.action_normalizer = None  # Action normalizer (if used during training)
+        self.gripper_head = None
+        self.action_normalizer = None
         
-        # Gripper 配置
-        self.gripper_threshold = 0.5
-        self.gripper_open_val = 0.08
-        self.gripper_close_val = 0.0
-        self.gripper_head_hidden_dim = 128
-        self._gripper_history = deque(maxlen=5)  # For hysteresis
+        # Gripper 配置 — 与 policy_loader 一致
+        self.gripper_threshold = _d['gripper_threshold']
+        self.gripper_open_val = _d['gripper_open_val']
+        self.gripper_close_val = _d['gripper_close_val']
+        self.gripper_head_hidden_dim = _d['gripper_head_hidden_dim']
+        
+        # Hysteresis — 与 policy_loader 一致
+        self.gripper_hysteresis_window = gripper_hysteresis_window or _d['gripper_hysteresis_window']
+        self._gripper_history = deque(maxlen=self.gripper_hysteresis_window)
+        self._last_gripper_state = 0  # 0=open, 1=close
         
         # 观测历史
         self.obs_history = {'rgb': [], 'state': []}
@@ -110,15 +143,29 @@ class OfflinePolicy:
         # 加载模型
         self._load_model()
     
+    @staticmethod
+    def _get_state_dim_for_mode(state_mode: str) -> int:
+        if state_mode == 'joint_only':
+            return 7
+        elif state_mode == 'ee_only':
+            return 8
+        elif state_mode == 'both':
+            return 14
+        else:
+            print(f"Warning: Unknown state_mode: {state_mode}, defaulting to joint_only")
+            return 7
+    
     def _load_model(self):
-        """加载模型"""
+        """加载模型 — 对齐 policy_loader.py 中 RealPolicy.load_model()"""
         if not os.path.exists(self.model_path):
             raise FileNotFoundError(f"Checkpoint not found: {self.model_path}")
         
         checkpoint_dir = os.path.dirname(self.model_path)
         
-        # 加载配置
+        # 1. 加载训练配置 ------------------------------------------------
         args_path = os.path.join(checkpoint_dir, "args.json")
+        visual_encoder_type = 'plain_conv'
+        
         if os.path.exists(args_path):
             print(f"Loading config from: {args_path}")
             with open(args_path, 'r') as f:
@@ -126,67 +173,79 @@ class OfflinePolicy:
             
             self.obs_horizon = args.get('obs_horizon', self.obs_horizon)
             self.pred_horizon = args.get('pred_horizon', self.pred_horizon)
+            self.action_dim = args.get('action_dim', self.action_dim)
             self.visual_feature_dim = args.get('visual_feature_dim', self.visual_feature_dim)
             self.state_encoder_hidden_dim = args.get('state_encoder_hidden_dim', self.state_encoder_hidden_dim)
             self.state_encoder_out_dim = args.get('state_encoder_out_dim', self.state_encoder_out_dim)
             self.use_state_encoder = args.get('use_state_encoder', self.use_state_encoder)
             self.algorithm = args.get('algorithm', self.algorithm)
-            self.visual_encoder_type = args.get('visual_encoder_type', self.visual_encoder_type)
             
-            # 图像尺寸：检查 auto_image_size 配置
-            auto_image_size = args.get('auto_image_size', False)
-            if auto_image_size:
-                self.target_image_size = get_encoder_input_size(self.visual_encoder_type)
-                print(f"Auto image size: {self.visual_encoder_type} -> {self.target_image_size}")
+            # State mode
+            self.state_mode = args.get('state_mode', 'joint_only')
+            self.state_dim = self._get_state_dim_for_mode(self.state_mode)
+            
+            # Visual encoder
+            visual_encoder_type = args.get('visual_encoder_type', 'plain_conv')
+            self.visual_encoder_type = visual_encoder_type
+            
+            # Image size — 与 policy_loader 对齐: auto_image_size 默认 True
+            if args.get('auto_image_size', True):
+                if visual_encoder_type in ['resnet18', 'resnet34', 'resnet50']:
+                    self.target_image_size = (224, 224)
+                else:
+                    self.target_image_size = (128, 128)
             else:
                 target_size = args.get('target_image_size', self.target_image_size)
                 if isinstance(target_size, str):
-                    target_size = eval(target_size)
+                    import ast
+                    target_size = ast.literal_eval(target_size)
                 elif isinstance(target_size, list):
                     target_size = tuple(target_size)
                 self.target_image_size = target_size
             
-            # State mode 配置
-            self.state_mode = args.get('state_mode', 'joint_only')
-            self.state_dim = get_state_dim_for_mode(self.state_mode)
-            
-            # Action mode 配置
+            # action_mode
             self.action_mode = args.get('action_mode', 'full')
             if self.action_mode == 'full':
-                self.action_dim = 13  # joint(6)+rel_pose(7), gripper is discrete
-                self.action_dim_full = 15  # Output dimension with gripper
-            else:  # ee_only
-                self.action_dim = 7  # rel_pose(7), gripper is discrete
-                self.action_dim_full = 8  # Output dimension with gripper
+                self.action_dim = 13
+                self.action_dim_full = 15
+            else:
+                self.action_dim = 7
+                self.action_dim_full = 8
             
-            # Discrete gripper 配置
+            # Gripper
             self.gripper_threshold = args.get('gripper_threshold', self.gripper_threshold)
             self.gripper_open_val = args.get('gripper_open_val', self.gripper_open_val)
             self.gripper_close_val = args.get('gripper_close_val', self.gripper_close_val)
             self.gripper_head_hidden_dim = args.get('gripper_head_hidden_dim', self.gripper_head_hidden_dim)
             
-            # Action normalization 配置
+            # Action normalization
             self.normalize_actions = args.get('normalize_actions', False)
             self.action_norm_mode = args.get('action_norm_mode', 'standard')
             
-            print(f"Config: algorithm={self.algorithm}, action_dim={self.action_dim} (continuous)")
-            print(f"  obs_horizon={self.obs_horizon}, pred_horizon={self.pred_horizon}")
+            print(f"Config: algorithm={self.algorithm}, action_dim={self.action_dim} (continuous), "
+                  f"obs_horizon={self.obs_horizon}, pred_horizon={self.pred_horizon}")
             print(f"State mode: {self.state_mode}, state_dim={self.state_dim}")
-            print(f"Action mode: {self.action_mode}, action_dim_full={self.action_dim_full}")
             print(f"Discrete gripper: threshold={self.gripper_threshold}, open={self.gripper_open_val}, close={self.gripper_close_val}")
+            print(f"Inference config: num_steps={self.num_inference_steps}, use_ema={self.use_ema}")
+            print(f"Visual encoder: {visual_encoder_type}, image_size={self.target_image_size}")
             print(f"Action normalization: {self.normalize_actions}, mode={self.action_norm_mode}")
-            print(f"Visual encoder: {self.visual_encoder_type}, image_size={self.target_image_size}")
+        else:
+            print("Warning: args.json not found, using defaults")
         
-        # 创建 visual encoder (根据类型选择)
-        print(f"Creating visual encoder: {self.visual_encoder_type}")
+        # 2. 创建模型 ------------------------------------------------
+        print("Creating models...")
+        
+        # Visual encoder — 与 policy_loader 对齐: freeze_bn=False
         self.visual_encoder = create_visual_encoder(
-            encoder_type=self.visual_encoder_type,
+            encoder_type=visual_encoder_type,
             out_dim=self.visual_feature_dim,
             pretrained=True,
             freeze_backbone=False,
-            freeze_bn=True,
+            freeze_bn=False,
         ).to(self.device)
+        print(f"Created visual encoder: {visual_encoder_type}")
         
+        # State encoder
         encoded_state_dim = self.state_dim
         if self.use_state_encoder:
             self.state_encoder = StateEncoder(
@@ -196,36 +255,49 @@ class OfflinePolicy:
             ).to(self.device)
             encoded_state_dim = self.state_encoder_out_dim
         
+        # global_cond_dim
         global_cond_dim = self.obs_horizon * (self.visual_feature_dim + encoded_state_dim)
+        print(f"global_cond_dim={global_cond_dim} = {self.obs_horizon} * ({self.visual_feature_dim} + {encoded_state_dim})")
+        
+        # Agent
         self.agent = self._create_agent(global_cond_dim)
         
-        # 加载权重
+        # 3. 加载权重 ------------------------------------------------
         print(f"Loading checkpoint from: {self.model_path}")
         ckpt = torch.load(self.model_path, map_location=self.device)
         
+        # visual encoder
         if "visual_encoder" in ckpt:
             self.visual_encoder.load_state_dict(ckpt["visual_encoder"])
+            print("Loaded visual_encoder weights")
+        
+        # state encoder
         if self.state_encoder is not None and "state_encoder" in ckpt:
             self.state_encoder.load_state_dict(ckpt["state_encoder"])
+            print("Loaded state_encoder weights")
         
-        # 根据 use_ema 选择加载哪个 agent 权重
+        # agent
         if self.use_ema:
             if "ema_agent" in ckpt:
                 self.agent.load_state_dict(ckpt["ema_agent"])
                 print("Loaded EMA agent weights")
+            elif "agent" in ckpt:
+                print("Warning: EMA agent not found, falling back to regular agent")
+                self.agent.load_state_dict(ckpt["agent"])
             else:
-                print("Warning: EMA agent not found, using regular agent")
-                if "agent" in ckpt:
-                    self.agent.load_state_dict(ckpt["agent"])
+                raise ValueError("No agent weights in checkpoint")
         else:
             if "agent" in ckpt:
                 self.agent.load_state_dict(ckpt["agent"])
                 print("Loaded regular agent weights")
             elif "ema_agent" in ckpt:
-                print("Warning: Regular agent not found, using EMA agent")
+                print("Warning: Regular agent not found, falling back to EMA agent")
                 self.agent.load_state_dict(ckpt["ema_agent"])
+            else:
+                raise ValueError("No agent weights in checkpoint")
         
         # GripperHead — detect architecture from checkpoint keys
+        gripper_input_dim = self.obs_horizon * (self.visual_feature_dim + encoded_state_dim)
         gripper_use_layernorm = True
         if "gripper_head" in ckpt:
             ckpt_keys = set(ckpt["gripper_head"].keys())
@@ -236,11 +308,12 @@ class OfflinePolicy:
                 print("Detected GripperHead with LayerNorm")
         
         self.gripper_head = GripperHead(
-            obs_dim=global_cond_dim,
+            obs_dim=gripper_input_dim,
             hidden_dim=self.gripper_head_hidden_dim,
             pred_horizon=self.pred_horizon,
             use_layernorm=gripper_use_layernorm,
         ).to(self.device)
+        print(f"Created GripperHead: obs_dim={gripper_input_dim}, hidden_dim={self.gripper_head_hidden_dim}, layernorm={gripper_use_layernorm}")
         
         if "gripper_head" in ckpt:
             self.gripper_head.load_state_dict(ckpt["gripper_head"])
@@ -248,17 +321,15 @@ class OfflinePolicy:
         else:
             print("Warning: gripper_head not in checkpoint! Using random initialization")
         
-        # 加载 action normalizer（如果训练时使用了 normalize_actions）
+        # Action normalizer
         if self.normalize_actions:
             loaded = False
             
-            # 优先从 checkpoint 内部加载
             if "action_normalizer" in ckpt:
                 self.action_normalizer = ActionNormalizer.from_checkpoint(ckpt["action_normalizer"])
-                print(f"Loaded action normalizer from checkpoint")
+                print("Loaded action normalizer from checkpoint")
                 loaded = True
             else:
-                # Fallback: 从独立 JSON 文件加载
                 normalizer_path = os.path.join(checkpoint_dir, "action_normalizer.json")
                 if os.path.exists(normalizer_path):
                     self.action_normalizer = ActionNormalizer(mode=self.action_norm_mode)
@@ -272,8 +343,7 @@ class OfflinePolicy:
                     print(f"  Mean: {self.action_normalizer.stats['mean'][:3]}...")
                     print(f"  Std:  {self.action_normalizer.stats['std'][:3]}...")
             else:
-                print(f"Warning: normalize_actions=True but action_normalizer not found!")
-                print(f"  Neither in checkpoint nor as standalone JSON")
+                print("Warning: normalize_actions=True but action_normalizer not found!")
         
         # 评估模式
         self.visual_encoder.eval()
@@ -285,26 +355,28 @@ class OfflinePolicy:
         print(f"Model loaded successfully! (use_ema={self.use_ema})")
     
     def _create_agent(self, global_cond_dim: int) -> nn.Module:
-        """创建 agent（委托给 rlft.utils.model_factory）"""
+        """创建 agent — 使用 self.num_inference_steps（与 policy_loader 对齐）"""
         return create_agent_for_inference(
             algorithm=self.algorithm,
             action_dim=self.action_dim,
             global_cond_dim=global_cond_dim,
             obs_horizon=self.obs_horizon,
             pred_horizon=self.pred_horizon,
-            num_inference_steps=10,
+            num_inference_steps=self.num_inference_steps,
             device=str(self.device),
         ).to(self.device)
     
     def reset(self):
-        """重置观测历史"""
+        """重置观测历史和 gripper 状态"""
         self.obs_history = {'rgb': [], 'state': []}
-        self._gripper_history = deque(maxlen=5)  # Reset gripper hysteresis history
+        self._gripper_history.clear()
+        self._last_gripper_state = 0
     
     def _preprocess_image(self, image: np.ndarray) -> np.ndarray:
-        """预处理图像"""
-        h, w = self.target_image_size
-        image = cv2.resize(image, (w, h), interpolation=cv2.INTER_LINEAR)
+        """预处理图像: resize + HWC -> CHW"""
+        if self.target_image_size is not None:
+            h, w = self.target_image_size
+            image = cv2.resize(image, (w, h), interpolation=cv2.INTER_LINEAR)
         image = rearrange(image, 'h w c -> c h w')
         return image
     
@@ -349,7 +421,7 @@ class OfflinePolicy:
                 num_steps: Optional[int] = None,
                 deterministic: bool = True) -> np.ndarray:
         """
-        执行推理
+        执行推理 — 对齐 policy_loader.py 中 RealPolicy.__call__()
         
         Args:
             image: RGB 图像 [H, W, C]
@@ -364,105 +436,88 @@ class OfflinePolicy:
         image_processed = self._preprocess_image(image)
         self._update_obs_history(image_processed, qpos)
         
-        # 推理
+        # 编码观测
         obs_features = self._encode_observations()
         
-        # 1. Get continuous actions (no gripper)
+        # 1. continuous actions
         if deterministic:
             actions_cont = self.agent.get_action_deterministic(obs_features, num_steps=num_steps)
         else:
             actions_cont = self.agent.get_action(obs_features, num_steps=num_steps)
         
-        # 2. Apply inverse normalization if action_normalizer exists
+        # 2. inverse normalization
         if self.action_normalizer is not None:
             actions_np = actions_cont.cpu().numpy()
             batch_size, pred_horizon, action_dim = actions_np.shape
             actions_flat = actions_np.reshape(-1, action_dim)
             actions_denorm = self.action_normalizer.inverse_transform(actions_flat)
-            actions_cont = torch.from_numpy(actions_denorm.reshape(batch_size, pred_horizon, action_dim)).to(self.device).float()
+            actions_cont = torch.from_numpy(
+                actions_denorm.reshape(batch_size, pred_horizon, action_dim)
+            ).to(self.device).float()
         
-        # 3. Get discrete gripper predictions
-        # GripperHead expects flattened obs: (B, obs_horizon * feature_dim)
-        obs_flat = obs_features.reshape(obs_features.shape[0], -1)
-        gripper_logits = self.gripper_head(obs_flat)  # [1, pred_horizon, 2]
-        gripper_cls = gripper_logits.argmax(dim=-1)  # [1, pred_horizon], 0=open, 1=close
+        # 3. discrete gripper — flatten if 3D (对齐 policy_loader)
+        obs_flat = obs_features.reshape(obs_features.shape[0], -1) if obs_features.dim() == 3 else obs_features
+        gripper_logits = self.gripper_head(obs_flat)
+        gripper_cls = gripper_logits.argmax(dim=-1)
         
-        # 4. Apply hysteresis (5-frame majority voting)
-        gripper_vals = self._apply_gripper_hysteresis(gripper_cls[0].cpu().numpy())  # [pred_horizon]
+        # 4. hysteresis — 使用与 policy_loader 相同的逻辑
+        gripper_vals = self._apply_gripper_hysteresis(gripper_cls[0].cpu().numpy())
         
-        # 5. Reconstruct full action with gripper
-        actions_full = self._reconstruct_full_action(actions_cont[0], gripper_vals)  # [pred_horizon, action_dim_full]
+        # 5. reconstruct full action
+        actions_full = self._reconstruct_full_action(actions_cont[0], gripper_vals)
         
         return actions_full.cpu().numpy()
     
     def _apply_gripper_hysteresis(self, gripper_cls: np.ndarray) -> np.ndarray:
         """
         Apply hysteresis to gripper predictions.
+        与 policy_loader.py 中 RealPolicy._apply_gripper_hysteresis() 完全对齐。
         
-        标准做法（对齐 Diffusion Policy / ACT）:
-        - 只使用第一帧的 gripper 预测
-        - 可选的滑窗多数投票用于防止抖动
-        
-        Args:
-            gripper_cls: [pred_horizon] array of gripper class predictions (0=open, 1=close)
-            
-        Returns:
-            [pred_horizon] array of gripper values
+        逻辑：
+        1. 对 pred_horizon 前 8 帧做多数投票得到 current_vote
+        2. 加入 temporal history (deque)
+        3. 根据 gripper_hysteresis_window 做二次投票
         """
-        # Ensure _gripper_history is a deque with maxlen=5
-        if not isinstance(self._gripper_history, deque):
-            self._gripper_history = deque(maxlen=5)
+        # Step 1: horizon vote
+        horizon_vote_frames = min(8, len(gripper_cls))
+        horizon_votes = gripper_cls[:horizon_vote_frames]
+        close_in_horizon = np.sum(horizon_votes == 1)
+        current_vote = 1 if close_in_horizon > horizon_vote_frames / 2 else 0
         
-        # 标准做法：只使用第一帧的 gripper 预测（对齐 Diffusion Policy / ACT）
-        current_vote = int(gripper_cls[0])
-        
-        # Add current vote to history
         self._gripper_history.append(current_vote)
         
-        # Majority voting over history (防止抖动)
-        if len(self._gripper_history) >= 3:
-            vote_result = sum(self._gripper_history) > len(self._gripper_history) / 2
-            new_state = 1 if vote_result else 0
+        # Step 2: temporal voting
+        if self.gripper_hysteresis_window == 1:
+            new_state = current_vote
+        elif len(self._gripper_history) >= max(1, self.gripper_hysteresis_window // 2):
+            close_votes = sum(self._gripper_history)
+            total_votes = len(self._gripper_history)
+            new_state = 1 if close_votes > total_votes / 2 else 0
         else:
             new_state = current_vote
         
-        # Convert to gripper values
-        gripper_val = self.gripper_close_val if new_state == 1 else self.gripper_open_val
-        return np.full(len(gripper_cls), gripper_val)
-    
-    def _reconstruct_full_action(self, actions_cont: torch.Tensor, gripper_vals: np.ndarray) -> torch.Tensor:
-        """
-        Reconstruct full action array with gripper values.
+        self._last_gripper_state = new_state
         
-        Args:
-            actions_cont: [pred_horizon, action_dim] continuous actions (13 for full, 7 for ee_only)
-            gripper_vals: [pred_horizon] gripper values
-            
-        Returns:
-            [pred_horizon, action_dim_full] full actions (15 for full, 8 for ee_only)
+        gripper_val = self.gripper_close_val if new_state == 1 else self.gripper_open_val
+        return np.full(len(gripper_cls), gripper_val, dtype=np.float32)
+    
+    def _reconstruct_full_action(self, actions_cont: torch.Tensor,
+                                  gripper_vals: np.ndarray) -> torch.Tensor:
+        """
+        Reconstruct full action tensor by inserting gripper values.
+        与 policy_loader.py 中 RealPolicy._reconstruct_full_action() 对齐。
         """
         pred_horizon = actions_cont.shape[0]
-        gripper_tensor = torch.from_numpy(gripper_vals).to(self.device).float().unsqueeze(-1)  # [pred_horizon, 1]
+        actions_full = torch.zeros(pred_horizon, self.action_dim_full, device=actions_cont.device)
         
-        if self.action_mode == 'full':
-            # actions_cont: [pred_horizon, 13] = joint(6) + rel_pose(7), gripper is discrete
-            # output: [pred_horizon, 15] = joint(6) + gripper(1) + rel_pose(7) + ee_gripper(1)
-            joint_action = actions_cont[:, :6]  # [pred_horizon, 6]
-            rel_pose = actions_cont[:, 6:13]    # [pred_horizon, 7]
-            
-            actions_full = torch.cat([
-                joint_action,        # [pred_horizon, 6]
-                gripper_tensor,      # [pred_horizon, 1] - discrete gripper (joint channel)
-                rel_pose,            # [pred_horizon, 7]
-                gripper_tensor,      # [pred_horizon, 1] - discrete gripper (ee channel)
-            ], dim=-1)
-        else:  # ee_only
-            # actions_cont: [pred_horizon, 7] = rel_pose(7), gripper is discrete
-            # output: [pred_horizon, 8] = rel_pose(7) + gripper(1)
-            actions_full = torch.cat([
-                actions_cont,    # [pred_horizon, 7]
-                gripper_tensor,  # [pred_horizon, 1]
-            ], dim=-1)
+        if self.action_dim_full == 15:  # full mode
+            actions_full[:, :6] = actions_cont[:, :6]
+            actions_full[:, 6] = torch.from_numpy(gripper_vals).to(actions_cont.device)
+            actions_full[:, 7:14] = actions_cont[:, 6:13]
+            actions_full[:, 14] = torch.from_numpy(gripper_vals).to(actions_cont.device)
+        else:  # ee_only mode
+            actions_full[:, :7] = actions_cont[:, :7]
+            actions_full[:, 7] = torch.from_numpy(gripper_vals).to(actions_cont.device)
         
         return actions_full
 

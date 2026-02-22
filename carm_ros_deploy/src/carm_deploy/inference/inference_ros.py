@@ -1057,7 +1057,7 @@ def parse_args():
                         help='Scale factor for delta pose (default: 0.4, aligned with joystick)')
     parser.add_argument('--control_freq', type=int, default=50,
                         help='Control loop frequency in Hz (default: 50, aligned with joystick)')
-    parser.add_argument('--gripper_hysteresis_window', type=int, default=16,
+    parser.add_argument('--gripper_hysteresis_window', type=int, default=1,
                         help='Gripper hysteresis window size for voting (default: 1 = no hysteresis)')
     
     # 安全控制参数

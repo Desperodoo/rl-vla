@@ -22,6 +22,7 @@ timeline_record/
 inference_logs/
 inference_logs_old/
 .pytest_cache/
+offline_results/
 
 # SDK Python 编译产物
 arm_control_sdk/python/src/build/
