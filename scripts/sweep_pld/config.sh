@@ -50,24 +50,24 @@ PRED_HORIZON="${PRED_HORIZON:-8}"
 # -----------------------------------------------------------------------------
 # PLD-specific Defaults
 # -----------------------------------------------------------------------------
-# Residual action scale ξ ∈ [-action_scale, +action_scale] (PLD paper Table 5)
-ACTION_SCALE="${ACTION_SCALE:-0.25}"
+# Residual action scale ξ ∈ [-action_scale, +action_scale] (PLD sweep best)
+ACTION_SCALE="${ACTION_SCALE:-0.3}"
 
 # Cal-QL offline pretraining steps (0 = skip pretraining)
-CALQL_PRETRAIN_STEPS="${CALQL_PRETRAIN_STEPS:-2000}"
+CALQL_PRETRAIN_STEPS="${CALQL_PRETRAIN_STEPS:-1000}"
 
 # Cal-QL conservative loss coefficient
-CALQL_ALPHA="${CALQL_ALPHA:-5.0}"
+CALQL_ALPHA="${CALQL_ALPHA:-0.0}"
 
 # Offline demo episodes collected by base policy
-OFFLINE_DEMO_EPISODES="${OFFLINE_DEMO_EPISODES:-200}"
+OFFLINE_DEMO_EPISODES="${OFFLINE_DEMO_EPISODES:-50}"
 
 # Base policy probing (see PLD paper Section 3.2)
 PROBE_STEPS="${PROBE_STEPS:-5}"
 PROBING_ALPHA="${PROBING_ALPHA:-0.6}"
 
 # Online / offline buffer mixing ratio
-ONLINE_RATIO="${ONLINE_RATIO:-0.5}"
+ONLINE_RATIO="${ONLINE_RATIO:-1.0}"
 
 # Buffer sizes
 ONLINE_BUFFER_SIZE="${ONLINE_BUFFER_SIZE:-500000}"
@@ -78,16 +78,19 @@ OFFLINE_BUFFER_SIZE="${OFFLINE_BUFFER_SIZE:-200000}"
 # -----------------------------------------------------------------------------
 CONFIG_VERSION="${CONFIG_VERSION:-v1}"
 
-# Experiment name prefix (must change with CONFIG_VERSION to keep
-# SWEEP_BASE_DIR and --exp_name in sync, like RLPD)
+# Experiment name prefix and sweep base dir are derived unconditionally from
+# CONFIG_VERSION so that re-sourcing (e.g. with `source sweep.sh`) always
+# picks up the correct directory for the requested version.
 if [[ "$CONFIG_VERSION" == "v2" ]]; then
-    EXP_NAME="${EXP_NAME:-pld_sweep_v2}"
+    EXP_NAME="pld_sweep_v2"
+elif [[ "$CONFIG_VERSION" == "v3" ]]; then
+    EXP_NAME="pld_sweep_v3"
 else
-    EXP_NAME="${EXP_NAME:-pld_sweep}"
+    EXP_NAME="pld_sweep"
 fi
-
-# Sweep base directory for experiment outputs (derived from EXP_NAME)
-SWEEP_BASE_DIR="${SWEEP_BASE_DIR:-runs/${EXP_NAME}}"
+# Allow explicit override via environment variable
+EXP_NAME="${EXP_NAME_OVERRIDE:-$EXP_NAME}"
+SWEEP_BASE_DIR="${SWEEP_BASE_DIR_OVERRIDE:-runs/${EXP_NAME}}"
 
 # Algorithm definition (PLD only has one algorithm)
 ALL_ALGORITHMS=("pld_sac")

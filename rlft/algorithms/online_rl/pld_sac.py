@@ -17,8 +17,8 @@ Key differences from ``DSRLSACAgent``:
     * Operates in **residual action space** (additive offset) rather than noise space.
     * Supports **offline/online mixed replay** for RLPD-style training.
     * Includes **Cal-QL critic pretraining** for stable exploration warm-start.
-    * Default action_scale=0.5 (smaller than DSRL's action_magnitude=2.5).
-    * Hidden dims = [2048,2048,2048], num_qs = 10 (tuned via DSRL sweep).
+    * Default action_scale=0.3 (PLD sweep: optimal residual range).
+    * Hidden dims = [1024,1024,1024], num_qs = 5 (tuned via PLD sweep).
 
 Reference:
     - PLD: https://arxiv.org/abs/2511.00091
@@ -97,7 +97,7 @@ class PLDActor(nn.Module):
         obs_dim: int,
         residual_dim: int,
         hidden_dims: list = None,
-        action_scale: float = 0.5,
+        action_scale: float = 0.3,
         log_std_init: float = -3.0,
     ):
         super().__init__()
@@ -261,12 +261,12 @@ class PLDSACAgent(nn.Module):
         obs_dim: int,
         act_steps: int = 8,
         action_dim: int = 7,
-        action_scale: float = 0.5,
+        action_scale: float = 0.3,
         hidden_dims: list = None,
-        num_qs: int = 10,
-        gamma: float = 0.95,
+        num_qs: int = 5,
+        gamma: float = 0.99,
         tau: float = 0.005,
-        init_temperature: float = 0.5,
+        init_temperature: float = 0.1,
         target_entropy: Optional[float] = None,
         log_std_init: float = -5.0,
         use_layer_norm: bool = True,
@@ -274,7 +274,7 @@ class PLDSACAgent(nn.Module):
     ):
         super().__init__()
         if hidden_dims is None:
-            hidden_dims = [2048, 2048, 2048]
+            hidden_dims = [1024, 1024, 1024]
 
         self.obs_dim = obs_dim
         self.act_steps = act_steps

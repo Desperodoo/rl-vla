@@ -78,28 +78,28 @@ class SweepAnalysis:
 
 DEFAULT_PARAMS = {
     "pld_sac": {
-        # PLD-specific
-        "action_scale": 0.25,
-        "calql_pretrain_steps": 2000,
-        "calql_alpha": 5.0,
-        "offline_demo_episodes": 200,
+        # PLD-specific (PLD sweep v1 best)
+        "action_scale": 0.3,
+        "calql_pretrain_steps": 1000,
+        "calql_alpha": 0.0,
+        "offline_demo_episodes": 50,
         "probe_steps": 5,
         "probing_alpha": 0.6,
-        "online_ratio": 0.5,
+        "online_ratio": 1.0,
         "online_buffer_size": 500_000,
         "offline_buffer_size": 200_000,
-        # SAC core (from DSRL sweep best)
-        "learning_rate": 1e-3,
-        "gamma": 0.95,
+        # SAC core (PLD sweep v2 best)
+        "learning_rate": 1e-4,
+        "gamma": 0.99,
         "tau": 0.005,
         "utd_ratio": 60,
-        "batch_size": 256,
-        "init_temperature": 0.5,
+        "batch_size": 1024,
+        "init_temperature": 0.1,
         "target_entropy": -3.5,
         "log_std_init": -5.0,
         "num_layers": 3,
-        "layer_size": 2048,
-        "num_qs": 10,
+        "layer_size": 1024,
+        "num_qs": 5,
         "use_layer_norm": True,
         "max_grad_norm": 10.0,
     },
@@ -151,6 +151,49 @@ CONFIG_PARAM_PATTERNS = {
         "utd_ratio": 100, "batch_size": 512, "num_qs": 15},
     r"combined_small_net": lambda m: {
         "num_layers": 2, "layer_size": 512, "utd_ratio": 20, "num_qs": 5},
+
+    # v3 — Ablation configs (revert one param to old default)
+    r"ablate_lr_1e-3": lambda m: {"learning_rate": 1e-3},
+    r"ablate_batch_256": lambda m: {"batch_size": 256},
+    r"ablate_layer_2048": lambda m: {"layer_size": 2048},
+    r"ablate_num_qs_10": lambda m: {"num_qs": 10},
+    r"ablate_temp_0\.5": lambda m: {"init_temperature": 0.5},
+    r"ablate_gamma_0\.95": lambda m: {"gamma": 0.95},
+    r"ablate_as_0\.25": lambda m: {"action_scale": 0.25},
+    r"ablate_calql_alpha_5\.0": lambda m: {"calql_alpha": 5.0},
+    r"ablate_calql_2000": lambda m: {"calql_pretrain_steps": 2000},
+    r"ablate_or_0\.5": lambda m: {"online_ratio": 0.5},
+    r"ablate_demos_200": lambda m: {"offline_demo_episodes": 200},
+
+    # v3 — Interaction configs
+    r"interact_lr5e-5_batch2048": lambda m: {"learning_rate": 5e-5, "batch_size": 2048},
+    r"interact_lr3e-4_arch3x512": lambda m: {"learning_rate": 3e-4, "num_layers": 3, "layer_size": 512},
+    r"interact_temp5\.0_lr1e-4": lambda m: {"init_temperature": 5.0},
+    r"interact_gamma0\.99_tau0\.001": lambda m: {"tau": 0.001},
+    r"interact_utd80_batch1024": lambda m: {"utd_ratio": 80},
+    r"interact_utd80_lr5e-5": lambda m: {"utd_ratio": 80, "learning_rate": 5e-5},
+    r"interact_as0\.3_calql0": lambda m: {"calql_pretrain_steps": 0},
+    r"interact_as0\.2_calql1000": lambda m: {"action_scale": 0.2},
+    r"interact_nq3_batch1024": lambda m: {"num_qs": 3},
+    r"interact_nq7_lr1e-4": lambda m: {"num_qs": 7},
+    r"interact_no_offline": lambda m: {
+        "calql_pretrain_steps": 0, "offline_demo_episodes": 0, "online_ratio": 1.0},
+    r"interact_demos50_calql0": lambda m: {"calql_pretrain_steps": 0, "offline_demo_episodes": 50},
+
+    # v3 — Boundary configs
+    r"bound_lr_5e-5": lambda m: {"learning_rate": 5e-5},
+    r"bound_lr_3e-5": lambda m: {"learning_rate": 3e-5},
+    r"bound_batch_2048": lambda m: {"batch_size": 2048},
+    r"bound_arch_2x1024": lambda m: {"num_layers": 2, "layer_size": 1024},
+    r"bound_arch_3x768": lambda m: {"num_layers": 3, "layer_size": 768},
+    r"bound_arch_4x512": lambda m: {"num_layers": 4, "layer_size": 512},
+    r"bound_nq_3": lambda m: {"num_qs": 3},
+    r"bound_nq_4": lambda m: {"num_qs": 4},
+    r"bound_utd_80": lambda m: {"utd_ratio": 80},
+    r"bound_utd_100": lambda m: {"utd_ratio": 100},
+
+    # v3 — Scale configs
+    r"scale_(\d+[km]?)": lambda m: {"total_timesteps": _parse_size(m.group(1))},
 }
 
 
@@ -1196,7 +1239,7 @@ def main():
     parser.add_argument(
         "--config-version", "-v",
         default="v1",
-        choices=["v1", "v2"],
+        choices=["v1", "v2", "v3"],
         help="Config version"
     )
 
@@ -1222,6 +1265,8 @@ def main():
     if args.sweep_dir is None:
         if args.config_version == "v2":
             args.sweep_dir = "runs/pld_sweep_v2"
+        elif args.config_version == "v3":
+            args.sweep_dir = "runs/pld_sweep_v3"
         else:
             args.sweep_dir = "runs/pld_sweep"
 

@@ -206,7 +206,14 @@ cmd_run() {
 # Command: retry
 # =============================================================================
 cmd_retry() {
-    local algorithm="${1:-pld_sac}"
+    local algorithm="pld_sac"
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            --config-version) shift; shift ;;
+            --*) shift ;;
+            *) algorithm="$1"; shift ;;
+        esac
+    done
 
     echo "========================================"
     echo "PLD Sweep — Retry Failed"
@@ -260,7 +267,14 @@ cmd_retry() {
 # Command: status
 # =============================================================================
 cmd_status() {
-    local algorithm="${1:-}"
+    local algorithm=""
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            --config-version) shift; shift ;;
+            --*) shift ;;
+            *) algorithm="$1"; shift ;;
+        esac
+    done
 
     echo "========================================"
     echo "PLD Sweep — Status"
@@ -281,7 +295,14 @@ cmd_status() {
 # Command: analyze
 # =============================================================================
 cmd_analyze() {
-    local algorithm="${1:-}"
+    local algorithm=""
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            --config-version) shift; shift ;;
+            --*) shift ;;
+            *) algorithm="$1"; shift ;;
+        esac
+    done
 
     echo "========================================"
     echo "PLD Sweep — Detailed Analysis"

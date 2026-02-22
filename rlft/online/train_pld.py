@@ -6,17 +6,17 @@ base policy.  The RL agent outputs additive residual actions
 ``a_delta ∈ [-ξ, +ξ]`` which are composed with the base policy's output
 inside the ``ManiSkillResidualEnvWrapper``.
 
-Key design points (PLD paper §4.1 + DSRL sweep tuning):
-    * Actor:  3×2048 MLP + Tanh, log_std_init = -5.0.
-    * Critic: 3×2048 MLP + LayerNorm + Tanh, 10 Q-networks.
-    * action_scale (ξ) = 0.5.
+Key design points (PLD paper §4.1 + PLD sweep v1/v2 tuning):
+    * Actor:  3×1024 MLP + Tanh, log_std_init = -5.0.
+    * Critic: 3×1024 MLP + LayerNorm + Tanh, 5 Q-networks.
+    * action_scale (ξ) = 0.3.
     * UTD ratio = 60  (DSRL sweep: most impactful parameter).
-    * gamma = 0.95    (matches ~12 RL steps / episode).
+    * gamma = 0.99    (rewards long-term success retention).
     * target_entropy = -3.5  (avoids over-conservative collapse).
-    * init_temperature = 0.5  (conservative initial exploration).
-    * learning_rate = 1e-3  (faster critic convergence with high UTD).
-    * Offline/online mixed replay buffer (50/50 ratio).
-    * Cal-QL critic pretraining on offline base-policy demos.
+    * init_temperature = 0.1  (near-deterministic start preserves pretrained init).
+    * learning_rate = 1e-4  (prevents Q-divergence under high UTD).
+    * Pure online replay buffer (online_ratio=1.0).
+    * Cal-QL critic pretraining: 1000 steps, alpha=0.0 (minimal bias).
     * Base policy probing at episode start (probing_alpha = 0.6).
 
 Workflow::
@@ -125,45 +125,45 @@ class Args:
     visual_feature_dim: int = 256
 
     # ----- PLD-SAC hyper-parameters -----
-    action_scale: float = 0.5
-    """Residual action bounds [-ξ, +ξ].  PLD paper Table 5: ξ = 0.5."""
+    action_scale: float = 0.3
+    """Residual action bounds [-ξ, +ξ].  PLD sweep: ξ=0.3 optimal (at_end=0.68)."""
     total_timesteps: int = 500_000
-    learning_rate: float = 1e-3
-    """DSRL sweep: higher lr (1e-3) helps critic converge faster with high UTD."""
+    learning_rate: float = 1e-4
+    """PLD sweep: lr=1e-4 prevents Q-divergence under high UTD (at_end 0.20→0.82)."""
     online_buffer_size: int = 500_000
     offline_buffer_size: int = 200_000
-    batch_size: int = 256
-    gamma: float = 0.95
-    """DSRL sweep: γ=0.95 matches ~12 RL steps/episode (100 real steps / 8 chunk)."""
+    batch_size: int = 1024
+    gamma: float = 0.99
+    """PLD sweep: γ=0.99 rewards long-term success retention (at_end 0.20→0.56)."""
     tau: float = 0.005
     utd_ratio: int = 60
     """DSRL sweep: UTD ratio is the most impactful parameter. 60-80 optimal."""
-    init_temperature: float = 0.5
-    """DSRL sweep: lower init temp avoids over-randomization at start."""
+    init_temperature: float = 0.1
+    """PLD sweep: near-deterministic start preserves pretrained init (at_end=0.78)."""
     target_entropy: float = -3.5
     """DSRL sweep: auto (-56 for 56-dim action) is over-conservative;
     -3.5 balances exploration and exploitation."""
     log_std_init: float = -5.0
     """DSRL sweep: conservative initial exploration (std≈0.007)."""
     max_grad_norm: float = 10.0
-    online_ratio: float = 0.5
-    """Fraction of each mini-batch drawn from online buffer (rest from offline)."""
+    online_ratio: float = 1.0
+    """PLD sweep: pure online replay (at_end 0.20→0.56). 0.0 = all offline."""
 
     # ----- network architecture -----
     num_layers: int = 3
-    layer_size: int = 2048
-    """DSRL sweep: 3×2048 critic capacity is critical for fine-grained control."""
-    num_qs: int = 10
-    """DSRL sweep: num_qs=10 (min-Q ensemble) suppresses Q overestimation."""
+    layer_size: int = 1024
+    """PLD sweep: 3×1024 reduces overparameterization (at_end 0.20→0.72)."""
+    num_qs: int = 5
+    """PLD sweep: num_qs=5 balances pessimism vs exploration (at_end 0.20→0.72)."""
     use_layer_norm: bool = True
 
     # ----- offline data & Cal-QL pretraining -----
-    offline_demo_episodes: int = 200
-    """Number of episodes to collect offline using base policy."""
-    calql_pretrain_steps: int = 2000
-    """Number of Cal-QL critic pretraining steps on offline data."""
-    calql_alpha: float = 5.0
-    """Cal-QL conservative loss coefficient."""
+    offline_demo_episodes: int = 50
+    """PLD sweep: fewer demos reduce offline distribution interference (at_end=0.72)."""
+    calql_pretrain_steps: int = 1000
+    """PLD sweep: minimal critic warm-up avoids excessive offline bias (at_end=0.64)."""
+    calql_alpha: float = 0.0
+    """PLD sweep: conservative loss hurts online finetuning (at_end 0.20→0.66)."""
 
     # ----- base policy probing -----
     probe_steps: int = 5
