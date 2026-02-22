@@ -618,6 +618,16 @@ def main():
         else:
             print("  Skipped optimizer/scheduler state (resume_optimizer=False)")
         
+        # Load action normalizer stats
+        if action_normalizer is not None and "action_normalizer" in checkpoint:
+            saved_norm = checkpoint["action_normalizer"]
+            action_normalizer.mode = saved_norm["mode"]
+            action_normalizer.stats = {
+                k: np.array(v) if isinstance(v, list) else v
+                for k, v in saved_norm["stats"].items()
+            }
+            print("  Loaded action_normalizer stats")
+        
         # Get starting iteration
         if "iteration" in checkpoint:
             start_iter = checkpoint["iteration"] + 1
@@ -644,9 +654,12 @@ def main():
     if state_encoder is not None:
         state_encoder.train()
     
-    pbar = tqdm(total=args.total_iters)
+    pbar = tqdm(total=args.total_iters, initial=start_iter)
     
     for iteration, data_batch in enumerate(train_dataloader):
+        iteration = iteration + start_iter
+        if iteration >= args.total_iters:
+            break
         obs_seq = data_batch["observations"]
         action_seq = data_batch["actions_cont"]  # Continuous actions without gripper
         gripper_labels = data_batch["gripper_label"]  # Discrete gripper labels

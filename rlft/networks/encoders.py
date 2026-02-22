@@ -277,7 +277,11 @@ class ResNetEncoder(nn.Module):
             try:
                 from transformers import AutoModel
                 print("Loading ResNet10 from HuggingFace: helper2424/resnet10")
-                hf_model = AutoModel.from_pretrained("helper2424/resnet10", trust_remote_code=True)
+                hf_model = AutoModel.from_pretrained(
+                    "helper2424/resnet10", 
+                    trust_remote_code=True,
+                    output_loading_info=False
+                )
                 self.features = HuggingFaceResNet10Wrapper(
                     embedder=hf_model.embedder,
                     encoder=hf_model.encoder,
