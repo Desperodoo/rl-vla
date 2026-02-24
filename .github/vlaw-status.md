@@ -1,7 +1,7 @@
 # VLAW 复现项目 — 实时状态跟踪
 
-> **最后更新**: 2026-02-24 (WM-Agent + Data-Agent)
-> **当前迭代**: P0.1 ⚠️ 部分就绪 / P0.2 ✅ / P0.3 ✅
+> **最后更新**: 2026-02-24 (WM-Agent + Data-Agent + Reward-Agent)
+> **当前迭代**: P0.1 🔄 / P0.2 ✅ / P0.3 ✅ / P3.1 ✅
 
 ---
 
@@ -18,7 +18,7 @@
 | **P2.1** Ctrl-World 代码适配 | ⬜ 未开始 | WM-Agent | — | — |
 | **P2.2** WM 训练 (Phase A+B) | ⬜ 未开始 | WM-Agent | — | — |
 | **P2.3** WM 验证 | ⬜ 未开始 | WM-Agent | — | — |
-| **P3.1** 奖励模型实现 | ⬜ 未开始 | Reward-Agent | — | — |
+| **P3.1** 奖励模型实现 | ✅ 已完成 | Reward-Agent | 2026-02-24 | `rlft/vlaw/reward_model.py` + `train_reward_model.py`；接口全部通过 (VRAM 17GB)；等待 D_real 数据进行 P3.2 微调 |
 | **P3.2** 奖励模型微调验证 | ⬜ 未开始 | Reward-Agent | — | — |
 | **P4.1** State Predictor | ⬜ 未开始 | Imagination-Agent | — | — |
 | **P4.2** Imagination 引擎 | ⬜ 未开始 | Imagination-Agent | — | — |
@@ -70,7 +70,7 @@
 |-----|---------|------|
 | GPU 0-3 | WM-Agent (Ctrl-World 训练) | 🟢 空闲 |
 | GPU 4-5 | Data-Agent (ManiSkill Rollout) | 🟢 空闲 |
-| GPU 6-7 | Reward-Agent (VLM: Qwen2.5-VL-7B) | 🔵 P0.3 完成，等待 P3.1 |
+| GPU 6-7 | Reward-Agent (VLM: Qwen2.5-VL-7B) | 🔵 P0.3+P3.1 完成，等待 D_real 数据进行 P3.2 |
 | GPU 8-9 | Policy-Agent / Eval-Agent | 🟢 空闲 |
 
 ---
