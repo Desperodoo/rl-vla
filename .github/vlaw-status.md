@@ -1,7 +1,7 @@
 # VLAW 复现项目 — 实时状态跟踪
 
-> **最后更新**: 2026-02-24 (WM-Agent + Data-Agent + Reward-Agent)
-> **当前迭代**: P0.1 🔄 / P0.2 ✅ / P0.3 ✅ / P3.1 ✅
+> **最后更新**: 2026-02-25 (WM-Agent)
+> **当前迭代**: P0.1 ✅ / P0.2 ✅ / P0.3 ✅ / P3.1 ✅
 
 ---
 
@@ -9,7 +9,7 @@
 
 | 阶段 | 状态 | 负责 Agent | 最后更新 | 备注 |
 |------|------|-----------|---------|------|
-| **P0.1** Ctrl-World 环境搭建 | 🔄 进行中 | WM-Agent | 2026-02-24 | conda env + 全部权重就绪；待运行推理验证 |
+| **P0.1** Ctrl-World 环境搭建 | ✅ 已完成 | WM-Agent | 2026-02-25 | conda env `ctrl_world` (torch 2.6.0+cu124, diffusers 0.34.0)；全部权重就绪；推理验证通过 (VRAM 13173/24564 MiB, 返回码 0, 输出 3 个视频) |
 | **P0.2** ManiSkill RGB 验证 | ✅ 已完成 | Data-Agent | 2026-02-24 | obs/concat/state ✅；VAE PSNR=27.83 dB ✅；Latent (1,4,48,24)；代理 10.20.93.149:7890 下载 sd-vae-ft-mse |
 | **P0.3** VLM 模型获取 | ✅ 已完成 | Reward-Agent | 2026-02-24 | conda env `vlaw_reward` (Python 3.10, torch 2.8+cu128, transformers 5.2.0, peft 0.18.1); Qwen2.5-VL-7B-Instruct (16GB) @ `checkpoints/vlaw/reward_model/qwen_vl`; 推理验证通过 (VRAM 16.6/25GB, 推理 1.8s); flash-attn 待装 |
 | **P1.1** ManiSkill Rollout收集器 | ⬜ 未开始 | Data-Agent | — | — |
