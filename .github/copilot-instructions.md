@@ -50,3 +50,14 @@ scripts/                 ← 辅助脚本
 - 数据保存路径: `data/vlaw/{data_type}/`
 - 代码修改前先阅读已有模块的接口定义
 - 新增代码放在 `rlft/vlaw/` 下，入口脚本放在 `rlft/online/`
+
+## 网络访问
+- 服务器默认**无法直接访问 HuggingFace / GitHub** 等外网
+- 遇到网络问题时，设置临时 HTTP/HTTPS 代理为 `10.20.93.149:7890`：
+  ```bash
+  export http_proxy=http://10.20.93.149:7890
+  export https_proxy=http://10.20.93.149:7890
+  # HuggingFace 下载同样生效（huggingface_hub 使用系统代理）
+  ```
+- 命令行单次使用：`http_proxy=http://10.20.93.149:7890 https_proxy=http://10.20.93.149:7890 python ...`
+- 代理仅供模型/数据下载使用，训练时无需保留

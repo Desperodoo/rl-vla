@@ -1,7 +1,7 @@
 # VLAW 复现项目 — 实时状态跟踪
 
-> **最后更新**: 2026-02-24 (WM-Agent)
-> **当前迭代**: P0.1 ⚠️ 部分就绪 / P0.2 ⚠️ / P0.3 ✅
+> **最后更新**: 2026-02-24 (WM-Agent + Data-Agent)
+> **当前迭代**: P0.1 ⚠️ 部分就绪 / P0.2 ✅ / P0.3 ✅
 
 ---
 
@@ -9,8 +9,8 @@
 
 | 阶段 | 状态 | 负责 Agent | 最后更新 | 备注 |
 |------|------|-----------|---------|------|
-| **P0.1** Ctrl-World 环境搭建 | ⚠️ 需要修复 | WM-Agent | 2026-02-24 | conda env ✅；CLIP ✅；SVD ✅(+17G .cache 冗余待清理)；Ctrl-World 权重 ❌ 仅 README/config，实际 .safetensors 未下载 |
-| **P0.2** ManiSkill RGB 验证 | ⚠️ 需要修复 | Data-Agent | 2026-02-24 | obs/concat/state ✅；VAE shape链路 ✅；PSNR 验证阻塞（服务器无 HF 网络，需手动传入 VAE 权重）|
+| **P0.1** Ctrl-World 环境搭建 | 🔄 进行中 | WM-Agent | 2026-02-24 | conda env + 全部权重就绪；待运行推理验证 |
+| **P0.2** ManiSkill RGB 验证 | ✅ 已完成 | Data-Agent | 2026-02-24 | obs/concat/state ✅；VAE PSNR=27.83 dB ✅；Latent (1,4,48,24)；代理 10.20.93.149:7890 下载 sd-vae-ft-mse |
 | **P0.3** VLM 模型获取 | ✅ 已完成 | Reward-Agent | 2026-02-24 | conda env `vlaw_reward` (Python 3.10, torch 2.8+cu128, transformers 5.2.0, peft 0.18.1); Qwen2.5-VL-7B-Instruct (16GB) @ `checkpoints/vlaw/reward_model/qwen_vl`; 推理验证通过 (VRAM 16.6/25GB, 推理 1.8s); flash-attn 待装 |
 | **P1.1** ManiSkill Rollout收集器 | ⬜ 未开始 | Data-Agent | — | — |
 | **P1.2** VAE 编码管线 | ⬜ 未开始 | Data-Agent | — | — |
@@ -41,7 +41,7 @@
 | 模型 | 路径 | 状态 | 指标 |
 |------|------|------|------|
 | ShortCut Flow (Base) | `checkpoints/il/best_eval_success_once.pt` | ✅ 已有 | Base 策略 |
-| Ctrl-World (DROID pretrained) | `checkpoints/vlaw/world_model/pretrained/` | ⚠️ 部分就绪 (CLIP ✅ 581MB; SVD ✅ ~7.5G; CW ❌ 只有 config+README) | — |
+| Ctrl-World (DROID pretrained) | `checkpoints/vlaw/world_model/pretrained/` | ✅ 已就绪 (CLIP 581MB + SVD 7GB + CW checkpoint-10000.pt 8.7GB) | — |
 | Ctrl-World (ManiSkill finetuned) | `checkpoints/vlaw/world_model/` | ⬜ 待训练 | PSNR: — |
 | VLM Reward (Qwen3-VL) | `checkpoints/vlaw/reward_model/qwen_vl` | ✅ 已下载 (Qwen2.5-VL-7B) | FP: — |
 | State Predictor | `checkpoints/vlaw/state_predictor/` | ⬜ 待训练 | — |
@@ -54,7 +54,7 @@
 
 | 数据集 | 路径 | 状态 | 数量 |
 |--------|------|------|------|
-| P0.2 验证结果 | `data/vlaw/validation/p0_2_validation_results.json` | ✅ 已生成 | obs/concat/state ✅; VAE shape ✅; PSNR 待补 |
+| P0.2 验证结果 | `data/vlaw/validation/p0_2_validation_results.json` | ✅ 已完成 | ManiSkill ✅; VAE PSNR=27.83 dB ✅; Latent (1,4,48,24) |
 | ManiSkill 演示 (D_demo) | `data/vlaw/demos/` | ⬜ 待收集 | 目标: 25条/任务 |
 | 真实 Rollout (D_real) Iter 1 | `data/vlaw/rollouts/iter1/` | ⬜ 待收集 | 目标: 50条/任务 |
 | 合成数据 (D_syn) Iter 1 | `data/vlaw/synthetic/iter1/` | ⬜ 待生成 | 目标: 500条/任务 |
@@ -103,10 +103,10 @@
 | # | 日期 | 问题 | 状态 | 解决方案 |
 |---|------|------|------|---------|
 | 1 | 2026-02-24 | 根目录磁盘 100% 满，flash-attn 编译失败 | ⚠️ 部分解决 | 清理 pip cache (22GB) + conda tarballs (2.5GB)，释放 25GB；flash-attn 可在磁盘充裕时重装 |
-| 2 | 2026-02-24 | 服务器无法访问 HuggingFace，VAE 预训练权重无法下载，P0.2 PSNR 验证阻塞 | ❌ 阻塞 | 需手动将 `stabilityai/sd-vae-ft-mse` 或从 Ctrl-World 权重中提取 VAE，放至本地路径，用 `--vae_path` 参数传入验证脚本 |
+| 2 | 2026-02-24 | 服务器无法直接访问 HuggingFace，VAE 权重无法下载 | ✅ 已解决 | 设置代理 `http_proxy=http://10.20.93.149:7890` 后正常下载；已写入 copilot-instructions.md |
 | 3 | 2026-02-24 | ManiSkill3 标准任务仅有 `base_camera` 入 sensor_data，无 hand_camera | ⚠️ 已知设计限制 | P0.2 用 `env.render()` 获取第二视角做 shape 验证；P1.1 需自定义 env 子类覆盖 `_default_sensor_configs` 增加手腕相机 |
-| 4 | 2026-02-24 | `yjguo/Ctrl-World` HF 仓库下载后只有 README.md/config.json，无 .safetensors 权重文件 | 🔄 进行中 | 实际权重文件为 `checkpoint-10000.pt`，上次因磁盘满失败；已重新触发 `hf_hub_download` 后台下载 |
-| 5 | 2026-02-24 | SVD 下载产生 17G .cache 冗余(blob 重复存储) | ✅ 已解决 | 删除 `.cache/` 释放 16G，磁盘恢复至 41G可用 |
+| 4 | 2026-02-24 | `yjguo/Ctrl-World` HF 仓库下载后只有 README.md/config.json，无 .safetensors 权重文件 | ✅ 已解决 | 实际权重文件为 `checkpoint-10000.pt`；改用 `hf_hub_download` 直接下载单文件，8.7GB 下载完成 |
+| 5 | 2026-02-24 | SVD 下载产生 17G .cache 冗余(blob 重复存储) | ✅ 已解决 | 删除 `.cache/` 释放 16G；修正 download_weights.py 下载后自动清理 .cache |
 
 ---
 
