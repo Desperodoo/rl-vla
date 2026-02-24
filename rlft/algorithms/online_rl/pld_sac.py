@@ -18,7 +18,7 @@ Key differences from ``DSRLSACAgent``:
     * Supports **offline/online mixed replay** for RLPD-style training.
     * Includes **Cal-QL critic pretraining** for stable exploration warm-start.
     * Default action_scale=0.3 (PLD sweep: optimal residual range).
-    * Hidden dims = [1024,1024,1024], num_qs = 5 (tuned via PLD sweep).
+    * Hidden dims = [768,768,768], num_qs = 5 (tuned via PLD sweep v1-v3).
 
 Reference:
     - PLD: https://arxiv.org/abs/2511.00091
@@ -265,8 +265,8 @@ class PLDSACAgent(nn.Module):
         hidden_dims: list = None,
         num_qs: int = 5,
         gamma: float = 0.99,
-        tau: float = 0.005,
-        init_temperature: float = 0.1,
+        tau: float = 0.001,
+        init_temperature: float = 0.5,
         target_entropy: Optional[float] = None,
         log_std_init: float = -5.0,
         use_layer_norm: bool = True,
@@ -274,7 +274,7 @@ class PLDSACAgent(nn.Module):
     ):
         super().__init__()
         if hidden_dims is None:
-            hidden_dims = [1024, 1024, 1024]
+            hidden_dims = [768, 768, 768]
 
         self.obs_dim = obs_dim
         self.act_steps = act_steps

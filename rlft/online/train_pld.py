@@ -7,16 +7,17 @@ base policy.  The RL agent outputs additive residual actions
 inside the ``ManiSkillResidualEnvWrapper``.
 
 Key design points (PLD paper §4.1 + PLD sweep v1/v2 tuning):
-    * Actor:  3×1024 MLP + Tanh, log_std_init = -5.0.
-    * Critic: 3×1024 MLP + LayerNorm + Tanh, 5 Q-networks.
+    * Actor:  3×768 MLP + Tanh, log_std_init = -5.0.
+    * Critic: 3×768 MLP + LayerNorm + Tanh, 5 Q-networks.
     * action_scale (ξ) = 0.3.
     * UTD ratio = 60  (DSRL sweep: most impactful parameter).
     * gamma = 0.99    (rewards long-term success retention).
     * target_entropy = -3.5  (avoids over-conservative collapse).
-    * init_temperature = 0.1  (near-deterministic start preserves pretrained init).
+    * init_temperature = 0.5  (moderate exploration; v3 ablation: +0.14).
     * learning_rate = 1e-4  (prevents Q-divergence under high UTD).
+    * tau = 0.001  (slow target update stabilizes high-UTD training; v3: +0.12).
     * Pure online replay buffer (online_ratio=1.0).
-    * Cal-QL critic pretraining: 1000 steps, alpha=0.0 (minimal bias).
+    * Cal-QL critic pretraining: 1000 steps, alpha=5.0 (beneficial regularization).
     * Base policy probing at episode start (probing_alpha = 0.6).
 
 Workflow::
@@ -135,11 +136,20 @@ class Args:
     batch_size: int = 1024
     gamma: float = 0.99
     """PLD sweep: γ=0.99 rewards long-term success retention (at_end 0.20→0.56)."""
+<<<<<<< Updated upstream
     tau: float = 0.005
     utd_ratio: int = 60
     """DSRL sweep: UTD ratio is the most impactful parameter. 60-80 optimal."""
     init_temperature: float = 0.1
     """PLD sweep: near-deterministic start preserves pretrained init (at_end=0.78)."""
+=======
+    tau: float = 0.001
+    """PLD sweep v3: tau=0.001 slows target network update under high UTD (at_end +0.12)."""
+    utd_ratio: int = 60
+    """DSRL sweep: UTD ratio is the most impactful parameter. 60-80 optimal."""
+    init_temperature: float = 0.5
+    """PLD sweep v3: moderate exploration; temp=0.1 is redundantly conservative with lr=1e-4 (at_end +0.14)."""
+>>>>>>> Stashed changes
     target_entropy: float = -3.5
     """DSRL sweep: auto (-56 for 56-dim action) is over-conservative;
     -3.5 balances exploration and exploitation."""
@@ -151,8 +161,13 @@ class Args:
 
     # ----- network architecture -----
     num_layers: int = 3
+<<<<<<< Updated upstream
     layer_size: int = 1024
     """PLD sweep: 3×1024 reduces overparameterization (at_end 0.20→0.72)."""
+=======
+    layer_size: int = 768
+    """PLD sweep v3: 3×768 converges faster under lr=1e-4 (at_end=0.74 vs 0.66)."""
+>>>>>>> Stashed changes
     num_qs: int = 5
     """PLD sweep: num_qs=5 balances pessimism vs exploration (at_end 0.20→0.72)."""
     use_layer_norm: bool = True
@@ -162,8 +177,13 @@ class Args:
     """PLD sweep: fewer demos reduce offline distribution interference (at_end=0.72)."""
     calql_pretrain_steps: int = 1000
     """PLD sweep: minimal critic warm-up avoids excessive offline bias (at_end=0.64)."""
+<<<<<<< Updated upstream
     calql_alpha: float = 0.0
     """PLD sweep: conservative loss hurts online finetuning (at_end 0.20→0.66)."""
+=======
+    calql_alpha: float = 5.0
+    """PLD sweep v3: with lr=1e-4, conservative loss becomes beneficial regularization (at_end +0.08)."""
+>>>>>>> Stashed changes
 
     # ----- base policy probing -----
     probe_steps: int = 5

@@ -112,22 +112,6 @@ BOUNDARY_CONFIGS=(
 )
 
 # =============================================================================
-# Group 4: Training Scale (does the best config scale with more timesteps?)
-# =============================================================================
-SCALE_CONFIGS=(
-    # Shorter runs (compute-efficient validation)
-    "scale_50k:--total_timesteps 50000"
-    # Default is 500k; test intermediate scales
-    "scale_200k:--total_timesteps 200000"
-    "scale_300k:--total_timesteps 300000"
-    # Longer runs
-    "scale_750k:--total_timesteps 750000"
-    "scale_1m:--total_timesteps 1000000"
-    # Very long run
-    "scale_2m:--total_timesteps 2000000"
-)
-
-# =============================================================================
 # Assemble All Configs
 # =============================================================================
 SWEEP_CONFIGS=(
@@ -135,7 +119,6 @@ SWEEP_CONFIGS=(
     "${ABLATION_CONFIGS[@]}"
     "${INTERACTION_CONFIGS[@]}"
     "${BOUNDARY_CONFIGS[@]}"
-    "${SCALE_CONFIGS[@]}"
 )
 
 echo "Loaded ${#SWEEP_CONFIGS[@]} PLD-SAC v3 sweep configs (combination & ablation)"

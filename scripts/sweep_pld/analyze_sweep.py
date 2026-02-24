@@ -78,27 +78,27 @@ class SweepAnalysis:
 
 DEFAULT_PARAMS = {
     "pld_sac": {
-        # PLD-specific (PLD sweep v1 best)
+        # PLD-specific (PLD sweep v1+v3 best)
         "action_scale": 0.3,
         "calql_pretrain_steps": 1000,
-        "calql_alpha": 0.0,
+        "calql_alpha": 5.0,
         "offline_demo_episodes": 50,
         "probe_steps": 5,
         "probing_alpha": 0.6,
         "online_ratio": 1.0,
         "online_buffer_size": 500_000,
         "offline_buffer_size": 200_000,
-        # SAC core (PLD sweep v2 best)
+        # SAC core (PLD sweep v2+v3 best)
         "learning_rate": 1e-4,
         "gamma": 0.99,
-        "tau": 0.005,
+        "tau": 0.001,
         "utd_ratio": 60,
         "batch_size": 1024,
-        "init_temperature": 0.1,
+        "init_temperature": 0.5,
         "target_entropy": -3.5,
         "log_std_init": -5.0,
         "num_layers": 3,
-        "layer_size": 1024,
+        "layer_size": 768,
         "num_qs": 5,
         "use_layer_norm": True,
         "max_grad_norm": 10.0,
