@@ -1,7 +1,7 @@
 # VLAW 复现项目 — 实时状态跟踪
 
-> **最后更新**: 2026-02-26 (Data-Agent)
-> **当前迭代**: P0.1 ✅ / P0.2 ✅ / P0.3 ✅ / P1.1 ✅ / P1.2 ✅ / P1.3 ✅ / P3.1 ✅
+> **最后更新**: 2026-02-26 (WM-Agent)
+> **当前迭代**: P0.1 ✅ / P0.2 ✅ / P0.3 ✅ / P1.1 ✅ / P1.2 ✅ / P1.3 ✅ / P2.1 ✅ / P3.1 ✅
 
 ---
 
@@ -15,7 +15,7 @@
 | **P1.1** ManiSkill Rollout收集器 | ✅ 已完成 | Data-Agent | 2026-02-26 | `rlft/vlaw/data_collector.py`：`VLAWDataCollector` + `CollectorConfig`；随机策略 dry_run ✅；HDF5 格式验证通过 (rgb_base 192×192 uint8, state 29D, actions 7D)；GPU 向量化 num_envs=64 |
 | **P1.2** VAE 编码管线 | ✅ 已完成 | Data-Agent | 2026-02-26 | `rlft/vlaw/data_pipeline.py`：`VLAWDataPipeline` + `PipelineConfig`；latent_concat (T,4,48,24) float16 ✅；垂直拼接 (384,192,3) → latent；3条轨迹编码 3.0s；VAE 缓存: `~/.cache/huggingface/hub/models--stabilityai--sd-vae-ft-mse` |
 | **P1.3** 演示数据准备 | ✅ 已完成 | Data-Agent | 2026-02-26 | `rlft/vlaw/demo_prep.py`: LiftPegUpright-v1 25条 ✅ (100%成功); 128→192 resize; `data/vlaw/demos/LiftPegUpright-v1/`; PickCube/StackCube 待 `--auto_replay` |
-| **P2.1** Ctrl-World 代码适配 | ⬜ 未开始 | WM-Agent | — | — |
+| **P2.1** Ctrl-World 代码适配 | ✅ 已完成 | WM-Agent | 2026-02-26 | `ctrl_world/config.py` (wm_args_maniskill); `ctrl_world/dataset/dataset_maniskill.py` (HDF5 loader); `rlft/vlaw/ctrl_world_adapter.py` (推理封装); `ctrl_world/scripts/train_wm.py` (ManiSkill分支+Phase-A/B冻结); `scripts/train_ctrl_world.sh`; h5py 已装; 语法验证全通过 |
 | **P2.2** WM 训练 (Phase A+B) | ⬜ 未开始 | WM-Agent | — | — |
 | **P2.3** WM 验证 | ⬜ 未开始 | WM-Agent | — | — |
 | **P3.1** 奖励模型实现 | ✅ 已完成 | Reward-Agent | 2026-02-24 | `rlft/vlaw/reward_model.py` + `train_reward_model.py`；接口全部通过 (VRAM 17GB)；等待 D_real 数据进行 P3.2 微调 |
