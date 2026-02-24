@@ -1,7 +1,7 @@
 # VLAW 复现项目 — 实时状态跟踪
 
-> **最后更新**: 2026-02-25 (WM-Agent)
-> **当前迭代**: P0.1 ✅ / P0.2 ✅ / P0.3 ✅ / P3.1 ✅
+> **最后更新**: 2026-02-26 (Data-Agent)
+> **当前迭代**: P0.1 ✅ / P0.2 ✅ / P0.3 ✅ / P1.1 ✅ / P1.2 ✅ / P3.1 ✅
 
 ---
 
@@ -12,8 +12,8 @@
 | **P0.1** Ctrl-World 环境搭建 | ✅ 已完成 | WM-Agent | 2026-02-25 | conda env `ctrl_world` (torch 2.6.0+cu124, diffusers 0.34.0)；全部权重就绪；推理验证通过 (VRAM 13173/24564 MiB, 返回码 0, 输出 3 个视频) |
 | **P0.2** ManiSkill RGB 验证 | ✅ 已完成 | Data-Agent | 2026-02-24 | obs/concat/state ✅；VAE PSNR=27.83 dB ✅；Latent (1,4,48,24)；代理 10.20.93.149:7890 下载 sd-vae-ft-mse |
 | **P0.3** VLM 模型获取 | ✅ 已完成 | Reward-Agent | 2026-02-24 | conda env `vlaw_reward` (Python 3.10, torch 2.8+cu128, transformers 5.2.0, peft 0.18.1); Qwen2.5-VL-7B-Instruct (16GB) @ `checkpoints/vlaw/reward_model/qwen_vl`; 推理验证通过 (VRAM 16.6/25GB, 推理 1.8s); flash-attn 待装 |
-| **P1.1** ManiSkill Rollout收集器 | ⬜ 未开始 | Data-Agent | — | — |
-| **P1.2** VAE 编码管线 | ⬜ 未开始 | Data-Agent | — | — |
+| **P1.1** ManiSkill Rollout收集器 | ✅ 已完成 | Data-Agent | 2026-02-26 | `rlft/vlaw/data_collector.py`：`VLAWDataCollector` + `CollectorConfig`；随机策略 dry_run ✅；HDF5 格式验证通过 (rgb_base 192×192 uint8, state 29D, actions 7D)；GPU 向量化 num_envs=64 |
+| **P1.2** VAE 编码管线 | ✅ 已完成 | Data-Agent | 2026-02-26 | `rlft/vlaw/data_pipeline.py`：`VLAWDataPipeline` + `PipelineConfig`；latent_concat (T,4,48,24) float16 ✅；垂直拼接 (384,192,3) → latent；3条轨迹编码 3.0s；VAE 缓存: `~/.cache/huggingface/hub/models--stabilityai--sd-vae-ft-mse` |
 | **P1.3** 演示数据准备 | ⬜ 未开始 | Data-Agent | — | — |
 | **P2.1** Ctrl-World 代码适配 | ⬜ 未开始 | WM-Agent | — | — |
 | **P2.2** WM 训练 (Phase A+B) | ⬜ 未开始 | WM-Agent | — | — |
@@ -58,7 +58,7 @@
 | ManiSkill 演示 (D_demo) | `data/vlaw/demos/` | ⬜ 待收集 | 目标: 25条/任务 |
 | 真实 Rollout (D_real) Iter 1 | `data/vlaw/rollouts/iter1/` | ⬜ 待收集 | 目标: 50条/任务 |
 | 合成数据 (D_syn) Iter 1 | `data/vlaw/synthetic/iter1/` | ⬜ 待生成 | 目标: 500条/任务 |
-| VAE 编码数据 | `data/vlaw/encoded/` | ⬜ 待编码 | — |
+| VAE 编码数据 | `data/vlaw/encoded/` | 🔄 管线就绪，待批量执行 | latent (T,4,48,24) float16 |
 | 真实 Rollout (D_real) Iter 2 | `data/vlaw/rollouts/iter2/` | ⬜ 待收集 | 目标: 50条/任务 |
 | 合成数据 (D_syn) Iter 2 | `data/vlaw/synthetic/iter2/` | ⬜ 待生成 | 目标: 500条/任务 |
 
