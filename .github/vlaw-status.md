@@ -1,7 +1,7 @@
 # VLAW 复现项目 — 实时状态跟踪
 
-> **最后更新**: 2026-02-24
-> **当前迭代**: 尚未开始 (Pre-P0)
+> **最后更新**: 2026-02-24 (WM-Agent)
+> **当前迭代**: P0.1 进行中
 
 ---
 
@@ -9,7 +9,7 @@
 
 | 阶段 | 状态 | 负责 Agent | 最后更新 | 备注 |
 |------|------|-----------|---------|------|
-| **P0.1** Ctrl-World 环境搭建 | ⬜ 未开始 | WM-Agent | — | — |
+| **P0.1** Ctrl-World 环境搭建 | 🔄 进行中 | WM-Agent | 2026-02-24 | conda env `ctrl_world` 已就绪；权重下载中 |
 | **P0.2** ManiSkill RGB 验证 | ⬜ 未开始 | Data-Agent | — | — |
 | **P0.3** VLM 模型获取 | ⬜ 未开始 | Reward-Agent | — | — |
 | **P1.1** ManiSkill Rollout收集器 | ⬜ 未开始 | Data-Agent | — | — |
@@ -41,7 +41,7 @@
 | 模型 | 路径 | 状态 | 指标 |
 |------|------|------|------|
 | ShortCut Flow (Base) | `checkpoints/il/best_eval_success_once.pt` | ✅ 已有 | Base 策略 |
-| Ctrl-World (DROID pretrained) | — | ⬜ 待下载 | — |
+| Ctrl-World (DROID pretrained) | `checkpoints/vlaw/world_model/pretrained/` | 🔄 下载中 (SVD+CW ~16GB) | — |
 | Ctrl-World (ManiSkill finetuned) | `checkpoints/vlaw/world_model/` | ⬜ 待训练 | PSNR: — |
 | VLM Reward (Qwen3-VL) | `checkpoints/vlaw/reward_model/` | ⬜ 待训练 | FP: — |
 | State Predictor | `checkpoints/vlaw/state_predictor/` | ⬜ 待训练 | — |

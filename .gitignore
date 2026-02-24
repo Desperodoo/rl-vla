@@ -23,7 +23,11 @@ inference_logs/
 inference_logs_old/
 .pytest_cache/
 offline_results/
-.github/
+
+# 预训练权重 (大文件，不入 git)
+checkpoints/vlaw/world_model/pretrained/
+checkpoints/vlaw/reward_model/
+data/vlaw/
 
 # SDK Python 编译产物
 arm_control_sdk/python/src/build/
