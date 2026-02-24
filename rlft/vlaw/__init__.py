@@ -9,11 +9,14 @@ rlft.vlaw — VLAW 复现模块
     CollectorConfig       — 数据收集配置
     VLAWDataPipeline      — VAE 编码管线 (P1.2)
     PipelineConfig        — VAE 管线配置
+    DemoConverter         — ManiSkill Demo 转 VLAW 格式 (P1.3)
+    DemoPrepConfig        — Demo 准备配置
 """
 
 from .reward_model import VLAWRewardConfig, VLAWRewardModel, uniform_sample_frames
 from .data_collector import CollectorConfig, VLAWDataCollector
 from .data_pipeline import PipelineConfig, VLAWDataPipeline
+from .demo_prep import DemoPrepConfig, DemoConverter
 
 __all__ = [
     "VLAWRewardConfig",
@@ -23,4 +26,6 @@ __all__ = [
     "VLAWDataCollector",
     "PipelineConfig",
     "VLAWDataPipeline",
+    "DemoPrepConfig",
+    "DemoConverter",
 ]
