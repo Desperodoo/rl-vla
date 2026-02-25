@@ -54,8 +54,9 @@ class PipelineConfig:
     vae_model_id: str = "stabilityai/sd-vae-ft-mse"
     """HuggingFace 模型 ID 或本地路径"""
 
-    vae_local_path: str = "/home/wjz/.cache/huggingface/hub/models--stabilityai--sd-vae-ft-mse/snapshots/31f26fdeee1355a5c34592e401dd41e45d25a493"
-    """VAE 本地缓存路径 (优先于 vae_model_id); 默认为服务器缓存路径"""
+    # VLAW MODIFICATION: 移除硬编码用户路径，改为空字符串并自动查找 HF 缓存
+    vae_local_path: str = ""
+    """VAE 本地缓存路径 (优先于 vae_model_id); 空字符串则尝试自动从 HF 缓存查找，找不到则用 vae_model_id 在线下载"""
 
     # 图像
     camera_height: int = 192
@@ -109,6 +110,19 @@ def load_vae(
         eval 模式下的 AutoencoderKL
     """
     from diffusers import AutoencoderKL
+
+    # VLAW MODIFICATION: 支持自动查找 HF 缓存，避免硬编码路径
+    if not vae_local_path:
+        try:
+            from huggingface_hub import try_to_load_from_cache
+            cached = try_to_load_from_cache(vae_model_id, filename="config.json")
+            if cached is not None:
+                import os
+                # try_to_load_from_cache 返回文件路径，取其目录作为模型路径
+                vae_local_path = str(os.path.dirname(cached))
+                print(f"[VLAW-P1.2] 自动发现 VAE 缓存: {vae_local_path}")
+        except Exception:
+            pass
 
     load_from = vae_local_path if vae_local_path else vae_model_id
     print(f"[VLAW-P1.2] 加载 VAE: {load_from}")

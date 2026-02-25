@@ -80,6 +80,7 @@ VLAW 复现项目包含 8 个阶段 (P0-P7)，模块间有明确的依赖关系�
 | `imagination-agent.agent.md` | Imagination-Agent | Imagination 引擎专家 | edit,search,read,run_in_terminal | — |
 | `policy-agent.agent.md` | Policy-Agent | 策略更新专家 | edit,search,read,run_in_terminal | — |
 | `eval-agent.agent.md` | Eval-Agent | 评估专家 | edit,search,read,run_in_terminal | — |
+| `test-agent.agent.md` | Test-Agent | 测试/调试专家 | edit,search,read,run_in_terminal | WM/Data/Reward Agent |
 
 ### 2.2 Prompt 文件 (`.github/prompts/`)
 
@@ -90,6 +91,8 @@ VLAW 复现项目包含 8 个阶段 (P0-P7)，模块间有明确的依赖关系�
 | `train-world-model.prompt.md` | `/train-world-model` | 训练 Ctrl-World | WM-Agent |
 | `run-imagination.prompt.md` | `/run-imagination` | 运行 Imagination 引擎 | Imagination-Agent |
 | `vlaw-iteration.prompt.md` | `/vlaw-iteration` | 执行一轮完整迭代 | VLAW-Coordinator |
+| `run-smoke-tests.prompt.md` | `/run-smoke-tests` | 冒烟测试 | Test-Agent |
+| `run-integration-tests.prompt.md` | `/run-integration-tests` | 集成测试 | Test-Agent |
 
 ### 2.3 Instruction 文件 (`.github/instructions/`)
 
@@ -98,6 +101,7 @@ VLAW 复现项目包含 8 个阶段 (P0-P7)，模块间有明确的依赖关系�
 | `vlaw-module.instructions.md` | `rlft/vlaw/**/*.py` | VLAW 模块编码规范 |
 | `ctrl-world.instructions.md` | `ctrl_world/**/*.py` | Ctrl-World 修改规范 |
 | `python-standards.instructions.md` | `**/*.py` | 全局 Python 规范 |
+| `testing-standards.instructions.md` | `rlft/tests/**/*.py` | 测试规范 |
 
 ### 2.4 全局指令
 
@@ -127,6 +131,7 @@ VLAW 复现项目包含 8 个阶段 (P0-P7)，模块间有明确的依赖关系�
 5. **Imagination-Agent**: 专攻 Imagination 引擎
 6. **Policy-Agent**: 专攻策略更新
 7. **Eval-Agent**: 专攻评估
+8. **Test-Agent**: 适用于模块验证、接口调试、集成测试
 
 ### 3.2 方式二：通过 Prompt File 斜杠命令
 
@@ -205,6 +210,11 @@ Imagination-Agent → Reward-Agent: "Label Synthetic Data"
 Imagination-Agent → Policy-Agent: "Update Policy"
 Policy-Agent → Eval-Agent:     "Evaluate Policy"
 Reward-Agent → Imagination-Agent: "Start Imagination"
+WM-Agent → Test-Agent: "Verify WM Training Data"
+Data-Agent → Test-Agent: "Verify Data Pipeline"
+Test-Agent → WM-Agent: "Fix WM Bug"
+Test-Agent → Data-Agent: "Fix Data Bug"
+Test-Agent → Reward-Agent: "Fix Reward Bug"
 ```
 
 ---

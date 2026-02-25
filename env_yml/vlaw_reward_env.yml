@@ -1,0 +1,8 @@
+name: vlaw_reward
+channels:
+  - defaults
+  - https://mirrors.tuna.tsinghua.edu.cn/anaconda/pkgs/free
+  - https://mirrors.tuna.tsinghua.edu.cn/anaconda/pkgs/main
+dependencies:
+  - python=3.10
+  - pip

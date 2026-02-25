@@ -2,7 +2,7 @@
 name: Eval-Agent
 description: "评估 Agent — 负责 Baselines、消融实验、指标计算与结果可视化"
 tools: ['edit', 'search', 'read', 'runCommands']
-model: ['Claude Opus 4.6 (copilot)', 'Claude Sonnet 4.6 (copilot)']
+model: ['Claude Sonnet 4.6 (copilot)']
 ---
 
 # 评估 Agent

@@ -1,7 +1,23 @@
 # VLAW 复现项目 — 实时状态跟踪
 
-> **最后更新**: 2026-02-26 (WM-Agent)
+> **最后更新**: 2026-02-25 (Data-Agent — P1.3 全任务数据 + VAE 编码 + stat.json)
 > **当前迭代**: P0.1 ✅ / P0.2 ✅ / P0.3 ✅ / P1.1 ✅ / P1.2 ✅ / P1.3 ✅ / P2.1 ✅ / P3.1 ✅
+>
+> **代码审查修复记录 (2026-02-25)**
+> - 🔴 [BugFix] `ctrl_world/scripts/train_wm.py` `validate_video_generation()` 3 处 DROID 硬编码修复：latent shape assert → 动态计算；height 倍数 → task_type 分支；rearrange m=3 → n_cams 变量
+> - 🟡 [BugFix] `rlft/vlaw/data_pipeline.py` `vae_local_path` 硬编码绝对路径 → 空字符串 + 自动 HF 缓存查找
+> - 🟡 [BugFix] `ctrl_world/dataset/dataset_maniskill.py` stat.json 缺失 train 模式静默跳过 → 强制 FileNotFoundError
+> - 🟢 [Opt] `train_wm.py` DataLoader 增加 `num_workers=4, pin_memory=True`
+>
+> **Test-Agent 体系搭建 (2026-02-25)**
+> - 🆕 `.github/agents/test-agent.agent.md` — Test-Agent 定义（冒烟/单元/集成/训练前验证）
+> - 🆕 `.github/prompts/run-smoke-tests.prompt.md` — `/run-smoke-tests` 斜杠命令
+> - 🆕 `.github/prompts/run-integration-tests.prompt.md` — `/run-integration-tests` 斜杠命令
+> - 🆕 `.github/instructions/testing-standards.instructions.md` — 自动注入 `rlft/tests/**/*.py`
+> - 🆕 `rlft/tests/vlaw/conftest.py` — pytest fixtures (mock HDF5/latent/action/PIL)
+> - 🆕 `rlft/tests/vlaw/test_data_pipeline.py` — data_pipeline 单元测试
+> - 🆕 `rlft/tests/vlaw/test_shapes.py` — 跨模块形状一致性集成测试
+> - 🔄 `.github/VLAW_AGENT_SYSTEM.md` — 更新 Agent/Prompt/Instruction 表格 + Handoff 规则
 
 ---
 
@@ -14,7 +30,7 @@
 | **P0.3** VLM 模型获取 | ✅ 已完成 | Reward-Agent | 2026-02-24 | conda env `vlaw_reward` (Python 3.10, torch 2.8+cu128, transformers 5.2.0, peft 0.18.1); Qwen2.5-VL-7B-Instruct (16GB) @ `checkpoints/vlaw/reward_model/qwen_vl`; 推理验证通过 (VRAM 16.6/25GB, 推理 1.8s); flash-attn 待装 |
 | **P1.1** ManiSkill Rollout收集器 | ✅ 已完成 | Data-Agent | 2026-02-26 | `rlft/vlaw/data_collector.py`：`VLAWDataCollector` + `CollectorConfig`；随机策略 dry_run ✅；HDF5 格式验证通过 (rgb_base 192×192 uint8, state 29D, actions 7D)；GPU 向量化 num_envs=64 |
 | **P1.2** VAE 编码管线 | ✅ 已完成 | Data-Agent | 2026-02-26 | `rlft/vlaw/data_pipeline.py`：`VLAWDataPipeline` + `PipelineConfig`；latent_concat (T,4,48,24) float16 ✅；垂直拼接 (384,192,3) → latent；3条轨迹编码 3.0s；VAE 缓存: `~/.cache/huggingface/hub/models--stabilityai--sd-vae-ft-mse` |
-| **P1.3** 演示数据准备 | ✅ 已完成 | Data-Agent | 2026-02-26 | `rlft/vlaw/demo_prep.py`: LiftPegUpright-v1 25条 ✅ (100%成功); 128→192 resize; `data/vlaw/demos/LiftPegUpright-v1/`; PickCube/StackCube 待 `--auto_replay` |
+| **P1.3** 演示数据准备 | ✅ 已完成 | Data-Agent | 2026-02-25 | `rlft/vlaw/demo_prep.py`: LiftPegUpright-v1 25条 ✅ + PickCube-v1 25条 ✅ + StackCube-v1 25条 ✅, 全部100%成功; VAE编码 latent(T,4,48,24)float16 ✅; stat.json ✅; 修复`replay_to_rgb`重复CUDA_VISIBLE_DEVICES bug |
 | **P2.1** Ctrl-World 代码适配 | ✅ 已完成 | WM-Agent | 2026-02-26 | `ctrl_world/config.py` (wm_args_maniskill); `ctrl_world/dataset/dataset_maniskill.py` (HDF5 loader); `rlft/vlaw/ctrl_world_adapter.py` (推理封装); `ctrl_world/scripts/train_wm.py` (ManiSkill分支+Phase-A/B冻结); `scripts/train_ctrl_world.sh`; h5py 已装; 语法验证全通过 |
 | **P2.2** WM 训练 (Phase A+B) | ⬜ 未开始 | WM-Agent | — | — |
 | **P2.3** WM 验证 | ⬜ 未开始 | WM-Agent | — | — |
@@ -55,10 +71,13 @@
 | 数据集 | 路径 | 状态 | 数量 |
 |--------|------|------|------|
 | P0.2 验证结果 | `data/vlaw/validation/p0_2_validation_results.json` | ✅ 已完成 | ManiSkill ✅; VAE PSNR=27.83 dB ✅; Latent (1,4,48,24) |
-| ManiSkill 演示 (D_demo) | `data/vlaw/demos/LiftPegUpright-v1/` | ✅ 已完成 | 25条 / 100%成功率 / 192×192 rgb |
+| ManiSkill 演示 LiftPegUpright-v1 | `data/vlaw/demos/LiftPegUpright-v1/` | ✅ 已完成 | 25条 / 100%成功率 / 192×192 rgb |
+| ManiSkill 演示 PickCube-v1 | `data/vlaw/demos/PickCube-v1/` | ✅ 已完成 | 25条 / 100%成功率 / 192×192 rgb |
+| ManiSkill 演示 StackCube-v1 | `data/vlaw/demos/StackCube-v1/` | ✅ 已完成 | 25条 / 100%成功率 / 192×192 rgb |
 | 真实 Rollout (D_real) Iter 1 | `data/vlaw/rollouts/iter1/` | ⬜ 待收集 | 目标: 50条/任务 |
 | 合成数据 (D_syn) Iter 1 | `data/vlaw/synthetic/iter1/` | ⬜ 待生成 | 目标: 500条/任务 |
-| VAE 编码数据 | `data/vlaw/encoded/` | 🔄 管线就绪，待批量执行 | latent (T,4,48,24) float16 |
+| VAE 编码数据 | `data/vlaw/encoded/demos/` | ✅ 已完成 | 3任务×25条; latent (T,4,48,24) float16; 编码耗时 ~17s 总计 |
+| stat.json (action p01/p99) | `data/vlaw/meta_info/maniskill/stat.json` | ✅ 已完成 | 7维动作, p01=[-1.31,-1.65,-2.04,-2.54,-3.23,-2.57,-3.16], p99=[0.67,1.84,1.51,2.32,0.49,3.12,4.17] |
 | 真实 Rollout (D_real) Iter 2 | `data/vlaw/rollouts/iter2/` | ⬜ 待收集 | 目标: 50条/任务 |
 | 合成数据 (D_syn) Iter 2 | `data/vlaw/synthetic/iter2/` | ⬜ 待生成 | 目标: 500条/任务 |
 
@@ -102,6 +121,7 @@
 
 | # | 日期 | 问题 | 状态 | 解决方案 |
 |---|------|------|------|---------|
+| 1 | 2026-02-25 | `demo_prep.py` `replay_to_rgb()` 中 `dict(**os.environ, CUDA_VISIBLE_DEVICES=...)` 当环境中已有 CUDA_VISIBLE_DEVICES 时抛 TypeError | ✅ 已修复 | 改为 `env_vars = dict(os.environ); env_vars["CUDA_VISIBLE_DEVICES"] = str(cfg.gpu_id)` |
 | 1 | 2026-02-24 | 根目录磁盘 100% 满，flash-attn 编译失败 | ⚠️ 部分解决 | 清理 pip cache (22GB) + conda tarballs (2.5GB)，释放 25GB；flash-attn 可在磁盘充裕时重装 |
 | 2 | 2026-02-24 | 服务器无法直接访问 HuggingFace，VAE 权重无法下载 | ✅ 已解决 | 设置代理 `http_proxy=http://10.20.93.149:7890` 后正常下载；已写入 copilot-instructions.md |
 | 3 | 2026-02-24 | ManiSkill3 标准任务仅有 `base_camera` 入 sensor_data，无 hand_camera | ⚠️ 已知设计限制 | P0.2 用 `env.render()` 获取第二视角做 shape 验证；P1.1 需自定义 env 子类覆盖 `_default_sensor_configs` 增加手腕相机 |

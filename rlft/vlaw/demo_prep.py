@@ -154,7 +154,9 @@ def replay_to_rgb(cfg: DemoPrepConfig, none_path: Path) -> Path:
         "--use-first-env-state",
         "--save-traj",
     ]
-    env_vars = dict(**__import__("os").environ, CUDA_VISIBLE_DEVICES=str(cfg.gpu_id))
+    import os as _os
+    env_vars = dict(_os.environ)
+    env_vars["CUDA_VISIBLE_DEVICES"] = str(cfg.gpu_id)
     result = subprocess.run(cmd, env=env_vars, check=True)
     if result.returncode != 0:
         raise RuntimeError(f"replay_trajectory 失败 (返回码 {result.returncode})")

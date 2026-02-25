@@ -2,7 +2,7 @@
 name: Policy-Agent
 description: "策略更新 Agent — 负责 Weighted Flow Matching 损失实现和 ShortCut Flow 策略微调"
 tools: ['edit', 'search', 'read', 'runCommands']
-model: ['Claude Opus 4.6 (copilot)', 'Claude Sonnet 4.6 (copilot)']
+model: ['Claude Sonnet 4.6 (copilot)']
 handoffs:
   - label: Evaluate Policy
     agent: Eval-Agent

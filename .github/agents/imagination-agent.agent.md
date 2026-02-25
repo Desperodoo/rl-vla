@@ -2,7 +2,7 @@
 name: Imagination-Agent
 description: "Imagination 引擎 Agent — 负责 Policy-in-the-Loop Rollout、State Predictor、合成数据生成"
 tools: ['edit', 'search', 'read', 'runCommands']
-model: ['Claude Opus 4.6 (copilot)', 'Claude Sonnet 4.6 (copilot)']
+model: ['Claude Sonnet 4.6 (copilot)']
 handoffs:
   - label: Label Synthetic Data
     agent: Reward-Agent

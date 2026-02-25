@@ -2,7 +2,7 @@
 name: WM-Agent
 description: "Ctrl-World 世界模型 Agent — 负责模型适配、训练、验证"
 tools: ['edit', 'search', 'read', 'runCommands', 'fetch']
-model: ['Claude Opus 4.6 (copilot)', 'Claude Sonnet 4.6 (copilot)']
+model: ['Claude Sonnet 4.6 (copilot)']
 handoffs:
   - label: Verify WM Quality
     agent: Eval-Agent

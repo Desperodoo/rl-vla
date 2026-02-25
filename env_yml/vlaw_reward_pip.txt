@@ -1,0 +1,44 @@
+# vlaw_reward 环境 pip 依赖
+# 用法: pip install -r env_yml/vlaw_reward_pip.txt
+
+# PyTorch 2.8 + CUDA 12.8 (与 roboreward 环境一致)
+--index-url https://download.pytorch.org/whl/cu128
+torch==2.8.0
+torchvision==0.23.0
+torchaudio==2.8.0
+
+# Transformers (需要 >=4.50 支持 Qwen2.5-VL)
+# 当 PyPI 上的稳定版本不足时从 git 安装:
+#   pip install git+https://github.com/huggingface/transformers@main
+transformers>=4.50.0
+
+# LoRA 微调
+peft>=0.14.0
+
+# 多 GPU 训练
+accelerate>=1.0.0
+
+# Qwen-VL 工具
+qwen-vl-utils==0.0.14
+
+# 视觉处理
+Pillow>=10.0.0
+opencv-python-headless>=4.8.0
+av>=11.0.0
+
+# 数据处理
+h5py>=3.9.0
+numpy>=1.24.0
+safetensors>=0.4.0
+
+# 工具
+tqdm>=4.65.0
+huggingface_hub>=0.20.0
+hf-xet>=1.0.0
+tyro>=0.7.0
+wandb>=0.16.0
+psutil>=5.9.0
+PyYAML>=6.0
+
+# 量化推理 (INT4/INT8, 可选; 需要 CUDA)
+bitsandbytes>=0.42.0
