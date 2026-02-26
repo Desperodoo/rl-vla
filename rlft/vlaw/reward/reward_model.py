@@ -110,7 +110,7 @@ class VLAWRewardModel:
     """
     VLAW 二分类 VLM 奖励模型。
 
-    使用 Qwen2.5-VL 提取 P('yes') 概率，判定轨迹是否成功。
+    使用 Qwen3-VL 提取 P('yes') 概率，判定轨迹是否成功。
     支持 LoRA adapter 加载。
 
     Example::
@@ -125,15 +125,17 @@ class VLAWRewardModel:
         self.config = config or VLAWRewardConfig()
         self.model = None
         self.processor = None
-        self._yes_token_id: Optional[int] = None
+        self._yes_token_id: Optional[int] = None    # 向后兼容
         self._no_token_id: Optional[int] = None
+        self._yes_token_ids: List[int] = []         # 所有 yes 变体
+        self._no_token_ids: List[int] = []
         self._loaded = False
 
     # ── 模型加载 ──────────────────────────────────────────────────────────────
 
     def load_model(self, lora_path: Optional[str] = None) -> None:
         """
-        加载 Qwen2.5-VL 模型和处理器。
+        加载 Qwen3-VL 模型和处理器。
 
         Args:
             lora_path: LoRA adapter 路径 (None = 不加载 LoRA)
@@ -141,7 +143,7 @@ class VLAWRewardModel:
         if self._loaded:
             return
 
-        from transformers import AutoProcessor, Qwen2_5_VLForConditionalGeneration
+        from transformers import AutoProcessor, Qwen3VLForConditionalGeneration
 
         dtype_map = {
             "float16": torch.float16,
@@ -163,7 +165,7 @@ class VLAWRewardModel:
             self.config.model_path, trust_remote_code=True
         )
 
-        self.model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+        self.model = Qwen3VLForConditionalGeneration.from_pretrained(
             self.config.model_path,
             torch_dtype=torch_dtype,
             device_map=self.config.device,
@@ -180,16 +182,22 @@ class VLAWRewardModel:
 
         self.model.eval()
 
-        # 缓存 yes/no token id (取第一个 token，避免 BPE 差异)
-        self._yes_token_id = self.processor.tokenizer.encode(
-            "yes", add_special_tokens=False
-        )[0]
-        self._no_token_id = self.processor.tokenizer.encode(
-            "no", add_special_tokens=False
-        )[0]
+        # 缓存 yes/no 所有变体的 token id（lowercase / Title / 前置空格）
+        tok = self.processor.tokenizer
+        self._yes_token_ids: List[int] = list({
+            tok.encode(w, add_special_tokens=False)[0]
+            for w in ["yes", "Yes", "YES", " yes"]
+        })
+        self._no_token_ids: List[int] = list({
+            tok.encode(w, add_special_tokens=False)[0]
+            for w in ["no", "No", "NO", " no"]
+        })
+        # 向后兼容旧代码
+        self._yes_token_id = self._yes_token_ids[0]
+        self._no_token_id  = self._no_token_ids[0]
         print(
             f"[VLAW] 模型就绪 | device={self.model.device} "
-            f"| yes_id={self._yes_token_id} no_id={self._no_token_id}"
+            f"| yes_ids={self._yes_token_ids} no_ids={self._no_token_ids}"
         )
         self._loaded = True
 
@@ -209,7 +217,7 @@ class VLAWRewardModel:
     def _build_messages(
         self, frames: List[Image.Image], instruction: str
     ) -> list:
-        """构建 Qwen2.5-VL 多图 chat messages"""
+        """构建 Qwen3-VL 多图 chat messages"""
         n = len(frames)
         image_content = [{"type": "image", "image": f} for f in frames]
         text = self.config.prompt_template.format(
@@ -229,26 +237,60 @@ class VLAWRewardModel:
         """
         前向传播，提取 P('yes') 概率。
 
+        使用 qwen_vl_utils.process_vision_info（如可用）正确处理多图输入。
+        P('yes') = Σ logits[yes_variants] / (Σ logits[yes_variants] + Σ logits[no_variants])
+        采用 log-sum-exp 数值稳定版本。
+
         Returns:
             P('yes') ∈ [0, 1]
         """
         messages = self._build_messages(frames, instruction)
-        text_input = self.processor.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
-        )
-        inputs = self.processor(
-            text=[text_input],
-            images=frames,
-            return_tensors="pt",
-        ).to(self.model.device)
+        # Qwen3-VL 是思维链模型，必须关闭 thinking 模式
+        # 否则第一个生成 token 是 <think>，而非 yes/no
+        try:
+            text_input = self.processor.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
+                enable_thinking=False,  # 关闭 CoT，直接生成 yes/no
+            )
+        except TypeError:
+            # 旧版 processor 不支持 enable_thinking 参数
+            text_input = self.processor.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True
+            )
+
+        # 优先使用 process_vision_info 正确解耦图像
+        try:
+            from qwen_vl_utils import process_vision_info
+            image_inputs, video_inputs = process_vision_info(messages)
+            inputs = self.processor(
+                text=[text_input],
+                images=image_inputs,
+                videos=video_inputs if video_inputs else None,
+                return_tensors="pt",
+            ).to(self.model.device)
+        except (ImportError, Exception):
+            # 降级：直接传入 PIL frames（Qwen3-VL processor 支持）
+            inputs = self.processor(
+                text=[text_input],
+                images=frames,
+                return_tensors="pt",
+            ).to(self.model.device)
 
         outputs = self.model(**inputs)
-        # 取最后一个位置的 logits → softmax over yes/no
-        logits = outputs.logits[:, -1, :]  # [1, vocab]
-        yes_logit = logits[0, self._yes_token_id].float()
-        no_logit = logits[0, self._no_token_id].float()
-        probs = torch.softmax(torch.stack([yes_logit, no_logit]), dim=0)
-        return probs[0].item()
+        # 取最后一个位置的 logits（第一个预测 token）
+        logits = outputs.logits[0, -1, :].float()  # [vocab]
+
+        # 聚合所有 yes/no 变体的 logits（log-sum-exp 数值稳定）
+        yes_logits = logits[self._yes_token_ids]  # [num_yes_variants]
+        no_logits  = logits[self._no_token_ids]   # [num_no_variants]
+
+        # softmax over {yes_variants ∪ no_variants}
+        all_logits = torch.cat([yes_logits, no_logits])  # [n_yes + n_no]
+        all_probs  = torch.softmax(all_logits, dim=0)
+        p_yes = all_probs[:len(self._yes_token_ids)].sum().item()
+        return p_yes
 
     # ── 公开接口 ──────────────────────────────────────────────────────────────
 
@@ -270,11 +312,31 @@ class VLAWRewardModel:
                 reward   (int)    — 0 或 1，由阈值 α 判定
                 threshold(float)  — 当前阈值 α
                 num_frames(int)   — 实际使用的帧数
+
+        Notes:
+            TODO(P3.2-finetune): 当前为 zero-shot 推理，p_yes 通常 < 0.15（见 BUG-011）。
+            VLAW 论文 (Sec 4.1 + Appendix C) 明确要求:
+              1. 在 Iter-1 D_real (50条/任务) 上进行 LoRA fine-tune (200 steps, batch=128)
+              2. 微调后 α=0.8 阈值才有实际意义（零样本 p_yes < 0.15，threshold=0.8 → reward=0 永远）
+            临时方案 (D_real 标注):
+              - 使用 env_success_at_end 替代 reward 字段（ManiSkill 仿真完全可信，等价论文 r_τ）
+              - 或使用 p_yes 作为连续软权重用于 FM loss 加权（方向正确，~3x success/failure ratio）
+            D_syn 标注必须等 fine-tuned 奖励模型就绪后才有效。
+            Fine-tuning 实现: train_reward_model.py（待实现 @ P3.2）
         """
         if not self._loaded:
             self.load_model()
 
-        sampled = uniform_sample_frames(frames, self.config.num_frames)
+        # 如果传入的帧数已 ≤ num_frames，直接使用（尊重外部采样策略，如末尾帧保留）
+        # 否则均匀采样到 num_frames
+        if isinstance(frames, np.ndarray):
+            _n = frames.shape[0]
+        else:
+            _n = len(frames)
+        if _n <= self.config.num_frames:
+            sampled = uniform_sample_frames(frames, _n)
+        else:
+            sampled = uniform_sample_frames(frames, self.config.num_frames)
         p_yes = self._forward_p_yes(sampled, instruction)
         reward = int(p_yes > self.config.threshold)
 

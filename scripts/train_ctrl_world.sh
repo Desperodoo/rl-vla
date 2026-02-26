@@ -20,9 +20,9 @@ NUM_GPUS=4
 # 路径
 CTRL_WORLD="${ROOT}/ctrl_world"
 SCRIPTS_DIR="${CTRL_WORLD}/scripts"
-DATA_ROOT="${ROOT}/data/vlaw"
+DATA_ROOT="${ROOT}/data/vlaw/encoded"
 OUTPUT_DIR="${ROOT}/checkpoints/vlaw/world_model"
-META_INFO="${DATA_ROOT}/meta_info"
+META_INFO="${ROOT}/data/vlaw/meta_info"
 
 # conda 环境
 CONDA_ENV=ctrl_world
@@ -77,6 +77,7 @@ conda run -n "${CONDA_ENV}" \
         --dataset_root_path "${DATA_ROOT}" \
         --dataset_names "demos" \
         --dataset_meta_info_path "${META_INFO}" \
+        --data_stat_path "${META_INFO}/maniskill/stat.json" \
         --output_dir "${OUTPUT_DIR}/${PHASE}" \
         --tag "${TAG}" \
         --width 192 \

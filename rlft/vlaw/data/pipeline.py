@@ -126,7 +126,7 @@ def load_vae(
 
     load_from = vae_local_path if vae_local_path else vae_model_id
     print(f"[VLAW-P1.2] 加载 VAE: {load_from}")
-    vae = AutoencoderKL.from_pretrained(load_from, torch_dtype=torch.float32)
+    vae = AutoencoderKL.from_pretrained(load_from, torch_dtype=torch.float32, low_cpu_mem_usage=False)
     vae = vae.to(device).eval()
     for p in vae.parameters():
         p.requires_grad_(False)

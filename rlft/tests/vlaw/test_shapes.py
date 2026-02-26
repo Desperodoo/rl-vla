@@ -171,7 +171,7 @@ class TestUniformSampleFrames:
 
     def test_uniform_sample_frames_count(self) -> None:
         """采样结果长度应等于 min(num_frames, total_frames)。"""
-        from rlft.vlaw.reward_model import uniform_sample_frames
+        from rlft.vlaw.reward.reward_model import uniform_sample_frames
 
         arr = np.random.randint(0, 255, (20, 192, 192, 3), dtype=np.uint8)
         frames = uniform_sample_frames(arr, num_frames=8)
@@ -179,7 +179,7 @@ class TestUniformSampleFrames:
 
     def test_uniform_sample_frames_count_less_than_total(self) -> None:
         """num_frames > total 时，应返回 total 帧（不重复采样）。"""
-        from rlft.vlaw.reward_model import uniform_sample_frames
+        from rlft.vlaw.reward.reward_model import uniform_sample_frames
 
         arr = np.random.randint(0, 255, (5, 64, 64, 3), dtype=np.uint8)
         frames = uniform_sample_frames(arr, num_frames=20)
@@ -188,7 +188,7 @@ class TestUniformSampleFrames:
     def test_uniform_sample_frames_numpy_input(self) -> None:
         """numpy 数组输入也应返回 PIL.Image 列表。"""
         from PIL import Image
-        from rlft.vlaw.reward_model import uniform_sample_frames
+        from rlft.vlaw.reward.reward_model import uniform_sample_frames
 
         arr = np.random.randint(0, 255, (10, 192, 192, 3), dtype=np.uint8)
         frames = uniform_sample_frames(arr, num_frames=4)
@@ -201,7 +201,7 @@ class TestUniformSampleFrames:
     def test_uniform_sample_frames_pil_input(self, mock_pil_frames: list) -> None:
         """PIL 列表输入也应正常工作，返回 PIL.Image 列表。"""
         from PIL import Image
-        from rlft.vlaw.reward_model import uniform_sample_frames
+        from rlft.vlaw.reward.reward_model import uniform_sample_frames
 
         frames = uniform_sample_frames(mock_pil_frames, num_frames=4)
         assert len(frames) == 4, f"期望 4 帧，实际 {len(frames)} 帧"
@@ -211,7 +211,7 @@ class TestUniformSampleFrames:
 
     def test_uniform_sample_frames_empty_input_raises(self) -> None:
         """空输入应抛出 ValueError。"""
-        from rlft.vlaw.reward_model import uniform_sample_frames
+        from rlft.vlaw.reward.reward_model import uniform_sample_frames
 
         arr = np.zeros((0, 192, 192, 3), dtype=np.uint8)
         with pytest.raises(ValueError, match="不能为空"):

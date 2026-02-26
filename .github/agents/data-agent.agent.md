@@ -2,7 +2,7 @@
 name: Data-Agent
 description: "数据管线 Agent — 负责 ManiSkill 数据收集、VAE 编码、HDF5 格式化"
 tools: ['edit', 'search', 'read', 'runCommands']
-model: ['Claude Sonnet 4.6 (copilot)']
+model: ['gpt-5.3-codex (copilot)']
 handoffs:
   - label: Train World Model
     agent: WM-Agent
@@ -114,3 +114,46 @@ trajectory = {
 
 ## 工作完成后
 更新 `.github/vlaw-status.md` 中 P0.2, P1.1, P1.2, P1.3 的状态。
+
+## 输出规范（防截断）
+
+> ⛔ **绝对禁止**：不得向 `/tmp/` 写入任何文件（包括 `*_path.txt`、`current_result_file.txt` 等辅助文件）。所有写入只能到 `/home/wjz/rl-vla/logs/vlaw/`。RESULT_FILE 变量在整个任务生命周期内有效，无需另存路径。
+
+> **⚠️ 核心原则：在任务开始时立即建文件，每完成一步立即追加，不要等到最后汇总。**
+> 被截断时 Coordinator 可用 `cat /home/wjz/rl-vla/logs/vlaw/data-agent-result-*.md` 随时读取进度。
+
+### 执行模式
+
+**任务开始时（第一步之前）立即执行**：
+```bash
+mkdir -p /home/wjz/rl-vla/logs/vlaw
+export RESULT_FILE="/home/wjz/rl-vla/logs/vlaw/data-agent-result-$(date +%Y%m%d_%H%M%S).md"
+echo "# data-agent 结果报告" > "$RESULT_FILE"
+echo "开始时间: $(date)" >> "$RESULT_FILE"
+echo "" >> "$RESULT_FILE"
+echo "## 进行中的步骤" >> "$RESULT_FILE"
+```
+
+**每完成一个步骤后立即追加**：
+```bash
+echo "- [x] Step N: [描述] — $(date +%H:%M:%S)" >> "$RESULT_FILE"
+echo "  输出: [关键数字/路径]" >> "$RESULT_FILE"
+```
+
+**任务全部完成后追加摘要**：
+```bash
+echo "" >> "$RESULT_FILE"
+echo "## 最终状态: ✅ 完成" >> "$RESULT_FILE"
+echo "完成时间: $(date)" >> "$RESULT_FILE"
+```
+
+**向 Coordinator 返回（完整文本，防 race condition）**：
+
+> ⚠️ **重要**：消息中必须包含完整执行摘要，不能只返回文件路径。若消息内容太少，父 Agent 因竞态 race condition 会捕获到空响应，导致 "Agent completed with no output"。
+
+在消息正文中直接输出以下内容：
+1. 结果文件路径：`$RESULT_FILE`
+2. 逐步结果列表（每步完整描述 + 关键数字/路径）
+3. 最终状态：✅ 完成 / ⚠️ 部分完成 / ❌ 失败 + 原因
+
+> **如果任务中途被截断**：文件中已有截至截断前所有已完成步骤的记录，Coordinator 可直接读取。

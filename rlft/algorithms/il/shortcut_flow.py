@@ -311,7 +311,112 @@ class ShortCutFlowAgent(nn.Module):
             "flow_loss": flow_loss,
             "shortcut_loss": shortcut_loss,
         }
-    
+
+    def compute_weighted_loss(
+        self,
+        obs_features: torch.Tensor,
+        actions: torch.Tensor,
+        weights: Optional[torch.Tensor] = None,
+    ) -> Dict[str, torch.Tensor]:
+        """VLAW Eq.4 — 带 per-sample 权重的 flow matching 损失.
+
+        与 compute_loss() 逻辑相同，但支持对每个样本加权（用于 filtered BC）。
+        权重通常是 VLM P('yes') 概率或二值 0/1 mask。
+
+        Args:
+            obs_features: Encoded observation features [B, obs_horizon, obs_dim]
+            actions: Expert actions [B, pred_horizon, action_dim]
+            weights: (B,) float tensor，每个样本的权重；None 时退化为标准
+                compute_loss（等权重）
+
+        Returns:
+            Dict with keys "loss" (scalar), "flow_loss", "shortcut_loss"，
+            其中 "loss" 已按 weights 加权。
+        """
+        batch_size = actions.shape[0]
+        device = actions.device
+
+        if weights is None:
+            return self.compute_loss(obs_features, actions)
+
+        # --- 验证 weights 形状 ---
+        assert weights.shape == (batch_size,), (
+            f"weights 形状应为 ({batch_size},)，实际为 {weights.shape}"
+        )
+        weights = weights.to(device=device, dtype=actions.dtype)
+
+        # ----------------------------------------------------------------
+        # Flow matching loss (per-sample)
+        # ----------------------------------------------------------------
+        x_0 = torch.randn_like(actions)
+        d = self._sample_step_size(batch_size, device)
+        t = self._sample_time(batch_size, device, d)
+        t_expand = t.view(-1, 1, 1)
+        x_t = (1 - t_expand) * x_0 + t_expand * actions
+
+        v_target = actions - x_0
+        v_pred = self.velocity_net(x_t, t, d, obs_features)
+
+        # per-sample MSE: (B, pred_horizon, action_dim) → (B,)
+        flow_loss_per_sample = F.mse_loss(v_pred, v_target, reduction="none").mean(dim=(1, 2))
+
+        # 归一化权重后加权平均
+        w_sum = weights.sum().clamp(min=1e-8)
+        flow_loss = (weights * flow_loss_per_sample).sum() / w_sum
+
+        # ----------------------------------------------------------------
+        # Self-consistency (shortcut) loss (per-sample)
+        # ----------------------------------------------------------------
+        shortcut_loss = torch.tensor(0.0, device=device)
+
+        if self.shortcut_weight > 0 and self.self_consistency_k > 0:
+            n_consistency = max(1, int(batch_size * self.self_consistency_k))
+            idx = torch.randperm(batch_size)[:n_consistency]
+
+            x_t_sub = x_t[idx]
+            t_sub = t[idx]
+            d_sub = d[idx]
+            obs_sub = obs_features[idx]
+            x_0_sub = x_0[idx]
+            actions_sub = actions[idx]
+            w_sub = weights[idx]
+
+            d_double = 2 * d_sub
+            valid_mask = (t_sub + d_double) <= 1.0
+
+            if valid_mask.sum() > 0:
+                x_t_valid = x_t_sub[valid_mask]
+                t_valid = t_sub[valid_mask]
+                d_valid = d_sub[valid_mask]
+                d_double_valid = d_double[valid_mask]
+                obs_valid = obs_sub[valid_mask]
+                x_0_valid = x_0_sub[valid_mask]
+                actions_valid = actions_sub[valid_mask]
+                w_valid = w_sub[valid_mask]
+
+                shortcut_target = self._compute_shortcut_target(
+                    x_t_valid, t_valid, d_valid, obs_valid, x_0_valid, actions_valid
+                )
+                v_pred_2d = self.velocity_net(x_t_valid, t_valid, d_double_valid, obs_valid)
+
+                if self.target_mode == "velocity":
+                    sc_per_sample = F.mse_loss(v_pred_2d, shortcut_target, reduction="none").mean(dim=(1, 2))
+                else:
+                    d_double_expand = d_double_valid.view(-1, 1, 1)
+                    pred_endpoint = x_t_valid + d_double_expand * v_pred_2d
+                    sc_per_sample = F.mse_loss(pred_endpoint, shortcut_target, reduction="none").mean(dim=(1, 2))
+
+                w_valid_sum = w_valid.sum().clamp(min=1e-8)
+                shortcut_loss = (w_valid * sc_per_sample).sum() / w_valid_sum
+
+        total_loss = self.flow_weight * flow_loss + self.shortcut_weight * shortcut_loss
+
+        return {
+            "loss": total_loss,
+            "flow_loss": flow_loss,
+            "shortcut_loss": shortcut_loss,
+        }
+
     def update_ema(self):
         """Update EMA velocity network.
         

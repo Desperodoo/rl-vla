@@ -118,6 +118,63 @@ def mock_hdf5_file(tmp_path: Path) -> Path:
 
 
 # ---------------------------------------------------------------------------
+# mock_hdf5_rollout fixture
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def mock_hdf5_rollout(tmp_path: Path) -> Path:
+    """创建 mock HDF5 rollout 文件，含 3 条轨迹，每条 T=10 帧。
+
+    每条轨迹字段：
+      - rgb_base:    (10, 192, 192, 3) uint8
+      - rgb_render:  (10, 192, 192, 3) uint8
+      - state:       (10, 25) float32
+      - actions:     (10, 7) float32
+      - env_success: (10,) bool
+
+    第 0 条：vlm_reward=1,  success attr=True
+    第 1 条：vlm_reward=0,  success attr=False
+    第 2 条：vlm_reward=1,  success attr=True
+    """
+    h5_path = tmp_path / "mock_rollout.h5"
+    rng = np.random.default_rng(seed=42)
+    T = 10
+
+    with h5py.File(str(h5_path), "w") as f:
+        # meta info
+        meta = f.create_group("meta")
+        meta.attrs["num_trajectories"] = 3
+        meta.attrs["env_id"] = "PickCube-v1"
+
+        vlm_rewards = [1, 0, 1]
+        for i in range(3):
+            grp = f.create_group(f"traj_{i:04d}")
+            grp.create_dataset(
+                "rgb_base",
+                data=rng.integers(0, 255, (T, 192, 192, 3), dtype=np.uint8),
+            )
+            grp.create_dataset(
+                "rgb_render",
+                data=rng.integers(0, 255, (T, 192, 192, 3), dtype=np.uint8),
+            )
+            grp.create_dataset(
+                "state",
+                data=rng.standard_normal((T, 25)).astype(np.float32),
+            )
+            grp.create_dataset(
+                "actions",
+                data=rng.uniform(-0.05, 0.05, (T, 7)).astype(np.float32),
+            )
+            env_success = np.zeros(T, dtype=bool)
+            env_success[-1] = bool(vlm_rewards[i])
+            grp.create_dataset("env_success", data=env_success)
+            grp.attrs["vlm_reward"] = vlm_rewards[i]
+            grp.attrs["success"] = bool(vlm_rewards[i])
+
+    return h5_path
+
+
+# ---------------------------------------------------------------------------
 # stat.json fixture
 # ---------------------------------------------------------------------------
 

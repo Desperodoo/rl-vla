@@ -16,7 +16,7 @@ _ROOT = str(Path(__file__).parents[3])
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
-from rlft.vlaw.data_pipeline import PipelineConfig, concat_cameras
+from rlft.vlaw.data.pipeline import PipelineConfig, concat_cameras
 
 
 # ---------------------------------------------------------------------------

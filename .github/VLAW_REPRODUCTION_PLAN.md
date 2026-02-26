@@ -218,7 +218,45 @@ gradient_accumulation_steps = 8  # batch_per_gpu=1 × 4gpu × 8acc = 32
 
 ### 3.3 奖励模型
 
-#### 3.3.1 架构设计 — VLAW 式二分类
+> **⚠️ 关键澄清 (BUG-011 根因)**: VLAW 论文明确指出零样本 VLM 效果不足，必须在第一轮迭代用真实 rollout 数据微调后才能使用 α=0.8 阈值。见论文 Section 4.1 + Appendix C。
+
+#### 3.3.0 论文原文要求 (Appendix C)
+
+> **原文**: "Each trajectory is **temporally downsampled into a 16-frame video** before being fed to the model. We **fine-tune the Qwen3-VL-4B-Instruct model for 200 steps with batch size 128**."
+>
+> "We observe that directly prompting the reward model to output a **binary yes/no decision can be overly optimistic**. We instead examine the model-assigned **probability of the 'yes' token** and only label a trajectory as successful when this probability exceeds a **threshold of 0.8**"
+>
+> Section 4.1: "we find that the **zero-shot VLM is not accurate enough**, so in the first iteration, we **fine-tune the VLM** with the success labels r_τ in D_real."
+
+关键要点：
+- **零样本不可用**（论文原话："zero-shot VLM is not accurate enough"）
+- **16帧**均匀下采样（论文明确指定，当前 `reward_model.py` 配置 `num_frames=16` 已正确）
+- **先微调，后使用 α=0.8 阈值**（阈值是微调后模型的配置，零样本 p_yes < 0.15 无意义）
+- Table 3 数据：微调+阈值后 FP=2，直接生成二值答案 FP=8（减少 75%）
+- **微调数据**: K=50 条/任务 的真实 rollout + ManiSkill `info["success"]` 标签
+
+#### 3.3.1 两阶段设计（零样本过渡 → 微调正式）
+
+```
+阶段 0 (Iter-0, 零样本, 当前状态):
+  - 仅用于 sanity check / 相关性验证，不作为正式奖励信号
+  - p_yes 可作为连续软权重（不做二值化），方向上有 3x ratio (0.0009 vs 0.0003)
+  - D_real 奖励标注: 使用 env_success_at_end 替代（ManiSkill 完全可信）
+  - 不使用 α=0.8 阈值（零样本 p_yes < 0.15，阈值将导致 vlm_success=0%）
+
+阶段 1 (Iter-1, 微调后 — 论文实际做法):
+  - 收集 D_real (50条/任务) → 用 ManiSkill env_success 构造 (video16帧, instruction, yes/no)
+  - fine-tune Qwen3-VL-4B-Instruct: 200 steps, batch=128 (gradient_accumulation 实现)
+  - 微调后验证: confusion matrix on held-out ~40 条轨迹，目标 FP < 20%
+  - 微调后使用 α=0.8 → 标注 D_syn（否则 D_syn 全部被标为失败）
+```
+
+**当前项目状态 (2026-02-25)**:
+- ✅ `rlft/vlaw/reward_model.py` — 零样本推理已实现
+- ❌ `rlft/vlaw/train_reward_model.py` — **待实现** (P3.2)
+- Iter-1 过渡方案: `vlm_reward = env_success_at_end`（绕过零样本 VLM 问题）
+
+#### 3.3.2 架构设计 — VLAW 式二分类
 
 严格遵循 VLAW 论文 (Section 4.1, Eq. 3):
 
@@ -226,57 +264,86 @@ gradient_accumulation_steps = 8  # batch_per_gpu=1 × 4gpu × 8acc = 32
 class VLAWRewardModel:
     """
     VLAW 论文式 VLM 奖励模型:
-    - 输入: 轨迹视频帧 + 任务指令
-    - 输出: P('yes') 概率
-    - 判定: R(τ) = 1[P('yes'|τ, I) > α], α=0.8
+    - 输入: 轨迹视频帧 + 任务指令 (16帧均匀采样, 论文 Appendix C)
+    - 输出: P('yes') 概率  (提取 'yes' token logit, 非生成)
+    - 判定: R(τ) = 1[P('yes'|τ, I) > α], α=0.8  (仅微调后有效)
     """
     def __init__(self, model_name="Qwen/Qwen3-VL-4B-Instruct"):
         self.model = load_qwen3vl(model_name)  # ~10GB on 4090
-        self.threshold = 0.8
+        self.threshold = 0.8  # 仅在 fine-tuned 版本中有意义
 
     def score_trajectory(self, frames: List[Image], instruction: str) -> dict:
-        prompt = f"Is the task '{instruction}' successfully completed? Answer yes or no."
-        # 输入 16 帧均匀采样
+        # 16 帧均匀采样（论文 Appendix C 明确）
         logits = self.model.forward(frames, prompt)
-        prob_yes = softmax(logits)['yes']
+        prob_yes = softmax(logits)['yes']  # P('yes' token), 非生成概率
         return {
-            "success": prob_yes > self.threshold,
+            "success": prob_yes > self.threshold,  # 零样本时 p_yes < 0.15, 不可信
             "prob": prob_yes,
         }
 ```
 
-#### 3.3.2 VLM 微调
+#### 3.3.3 VLM 微调 (P3.2 — 论文必要步骤)
 
-**时机**: 仅第一轮迭代开始时微调一次。
+**时机**: **第一轮迭代收集 D_real 后立即微调**，微调后的模型用于 D_syn 标注。
 
-**标签来源**: 
-- 第一轮 rollout 50 条/任务 → ManiSkill `info["success"]` 作为 ground truth
-- 构造 (视频, 指令, yes/no) 三元组
+**标签来源**:
+- K=50 条/任务 rollout → ManiSkill `info["success"]` 作为 ground truth (r_τ)
+- ManiSkill 仿真优势: 精确的 success 信号，无需人工标注
+- 构造 (视频16帧, 任务指令, yes/no) 三元组
 
-**微调方法** (与 VLAW 论文一致):
+**微调超参** (论文 Appendix C):
 ```python
-# LoRA 微调 Qwen3-VL 的 LLM 部分
-# 训练: 200 steps, batch 128 (用 gradient accumulation 在 4090 上实现)
-# LoRA rank=16, alpha=32, 仅微调 q_proj, v_proj
+# 核心超参（与 VLAW 论文 Appendix C 完全一致）
+# 训练步数: 200 steps
+# 批大小:   batch_size=128 (gradient_accumulation_steps=128 on 单张 4090)
+# LoRA:     r=16, alpha=32, target_modules=["q_proj", "v_proj"]
 from peft import LoraConfig, get_peft_model
 lora_config = LoraConfig(
     r=16, lora_alpha=32, target_modules=["q_proj", "v_proj"],
     task_type="CAUSAL_LM",
 )
 model = get_peft_model(model, lora_config)
-# 训练数据: ~250 条 (50 × 5 任务) × 16 帧/条
+# 单任务: 50 条 rollout × 16 帧/条 = ~50 训练样本，200 steps 约等于 training 4 epochs
+# 多任务: 50条/任务 × N_tasks 条，200 steps 仍足够（每步 batch=128 覆盖大部分样本）
 ```
 
+**微调验证** (对照 VLAW Table 3):
+- 准备 40 条 held-out 轨迹，人工确认 ground truth
+- 计算 confusion matrix (TP/FP/TN/FN)
+- 目标: FP < 20%（论文 Table 3 微调+阈值后 FP=2/40=5%）
+
 **合成轨迹评估**:
-- 世界模型生成的 latent → VAE decode → RGB 帧 → 降采样 16 帧 → VLM 评估
-- decode 操作在推理 GPU 上分块执行 (decode_chunk_size=4)
+- 世界模型 latent → VAE decode → RGB 帧 → 均匀下采样 **16 帧** → 微调后 VLM 评估
+- decode 分块执行 (decode_chunk_size=4)
 
-#### 3.3.3 与 RoboReward 的关系
+#### 3.3.4 Iter-1 权宜方案（train_reward_model.py 未就绪时）
 
-不使用现有 `rlft/roboreward/` (1-5 分评分)，新建独立的 VLAW 式奖励模型模块。但可复用:
-- `roboreward/config.py` 中的模型加载逻辑
-- `roboreward/dataset_converter.py` 中的帧采样工具
-- `roboreward/labeler.py` 中的 Qwen3-VL 推理管线
+```python
+# 方案 A（推荐）: 使用 env_success_at_end 作为 vlm_reward
+# ManiSkill 仿真中 env_success 完全可信，与论文 r_τ 等价，精度 > VLM
+for traj in d_real:
+    traj["vlm_reward"] = int(traj["env_success_at_end"])
+
+# 方案 B: 连续 p_yes 作为软权重（不二值化）
+# 即使零样本 p_yes=0.03, 成功/失败间仍有正向 ratio (~3x)，可加权 FM loss
+for traj in d_real:
+    traj["vlm_weight"] = traj["p_yes"]  # soft weight
+```
+
+> **重要结论**: 本项目用 ManiSkill 仿真，env_success 完全可用。  
+> VLM fine-tuning 的**主要价值在于 D_syn 标注**（世界模型生成的合成轨迹无 env_success 可用）。  
+> Iter-1 D_real 策略更新可直接用 env_success 方案 A；D_syn 标注必须等 fine-tuned 奖励模型就绪。
+
+#### 3.3.5 与 RoboReward 的关系
+
+VLAW 论文参考文献中引用了 RoboReward (Lee et al., 2026, arXiv:2601.00675)。  
+设计思想一致（VLM二分类 + P('yes') token），实现上：
+- **不使用** `rlft/roboreward/` 的1-5分连续评分体系
+- **新建** 独立的 VLAW 式二分类模块 (`rlft/vlaw/reward_model.py` + `train_reward_model.py`)
+- **可复用**:
+  - `roboreward/config.py` 中的模型加载逻辑
+  - `roboreward/dataset_converter.py` 中的帧采样工具
+  - `roboreward/labeler.py` 中的 Qwen3-VL 推理管线
 
 ### 3.4 Imagination 引擎 — 策略 ↔ Ctrl-World 闭环
 
@@ -304,12 +371,14 @@ model = get_peft_model(model, lora_config)
 **(a) 策略输入的 agent_state 问题**:
 - ShortCut Flow 的 obs = [visual_feature, agent_state]
 - 在 imagination 中,我们有 predicted image (→ visual_feature) 但无 ground_truth agent_state
-- **解决方案 1**: 训练一个轻量 state predictor $\hat{s}_{t+1} = f(s_t, a_t)$ (2-layer MLP, ~0.1MB)
-  - 训练数据来自真实 rollout
-  - 仅用于 imagination 中跟踪 agent state
-- **解决方案 2**: 在 imagination 中只用 visual_feature 作为 obs, 忽略 agent_state
-  - 训练一个 vision-only 版本的 ShortCut Flow
-- **推荐方案 1**: 轻量 state predictor 更简单且更 faithful
+
+| 方案 | 描述 | 状态 |
+|------|------|------|
+| **方案 A（最终）**: `env.step()` | ManiSkill 仿真直接调用，精确获取 $s_{t+1}$，支持 `num_envs=1..N` 并行 | **P4.3 必须实现** |
+| **方案 B（临时）**: State Predictor MLP | 残差 MLP $\hat{s}_{t+1} = s_t + f(s_t, a_t)$，~0.1MB，无需环境 | **当前 P4.1/P4.2，仅用于跑通流程** |
+| 方案 C（放弃）: vision-only obs | 忽略 agent_state | 信息损失，不采用 |
+
+> **⚠️ 重要**: 本项目用 ManiSkill **仿真**替代真机，`env.step()` 完全可用且精确。State Predictor MLP 仅是"先跑通代码再优化"的临时脚手架。P4.3 必须完成从方案 B → 方案 A 的迁移。迁移后可通过控制 `num_envs` 和合成数据数量来系统测试数据效率（这正是使用仿真的最大优势）。
 
 **(b) Imagination 速度**:
 - 原版 Ctrl-World: A100 上 ~10s/step → H100 上 ~5s/step

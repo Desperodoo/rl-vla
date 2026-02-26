@@ -24,8 +24,10 @@ inference_logs_old/
 .pytest_cache/
 offline_results/
 
-# 预训练权重 (大文件，不入 git)
+# 预训练权重和checkpoint (大文件，不入 git)
 checkpoints/vlaw/world_model/pretrained/
+checkpoints/vlaw/world_model/phase_a/
+checkpoints/vlaw/policy/
 checkpoints/vlaw/reward_model/
 data/vlaw/
 
@@ -38,3 +40,6 @@ arm_control_sdk/python/lib/carm/carm_py.so
 
 # 安全配置 (需要用户根据自己的机械臂环境录制安全边界)
 carm_ros_deploy/src/carm_deploy/safety_config.json
+
+# 其他大型资源文件
+ctrl_world/models/
