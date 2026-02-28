@@ -38,5 +38,10 @@ arm_control_sdk/python/lib/carm/carm_py.so
 # 安全配置 (需要用户根据自己的机械臂环境录制安全边界)
 carm_ros_deploy/src/carm_deploy/safety_config.json
 
-# 其他大型资源文件
+# ctrl_world 大型资源 (不跟踪)
 ctrl_world/models/
+ctrl_world/dataset_example/
+ctrl_world/synthetic_traj/
+ctrl_world/wandb/
+ctrl_world/swanlog/
+ctrl_world/__pycache__/
