@@ -187,7 +187,8 @@ def main() -> None:
     parser.add_argument("--lora_path", type=str, default=None)
     parser.add_argument("--rollout_dir", type=str, default="data/vlaw/rollouts/iter1/")
     parser.add_argument("--output_dir", type=str, default="data/vlaw/labeled/iter1_lora/")
-    parser.add_argument("--tasks", type=str, default="LiftPegUpright-v1,PickCube-v1,StackCube-v1")
+    parser.add_argument("--tasks", type=str, default="LiftPegUpright-v1",
+                        help="任务列表（默认 Lift-only；PickCube/StackCube deferred）")
     parser.add_argument("--max_trajectories", type=int, default=20, help="每任务最多处理轨迹数")
     parser.add_argument("--max_frames", type=int, default=16)
     parser.add_argument("--threshold", type=float, default=0.8)

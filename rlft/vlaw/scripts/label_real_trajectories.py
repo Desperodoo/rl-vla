@@ -30,6 +30,7 @@ HDF5 结构 (我们的格式):
 from __future__ import annotations
 
 import argparse
+import importlib
 import json
 import os
 import sys
@@ -44,24 +45,9 @@ import torch
 # ── TASK 指令映射 ─────────────────────────────────────────────────────────────
 
 TASK_INSTRUCTIONS: dict[str, str] = {
-    "LiftPegUpright-v1": (
-        "Look at the FINAL frame of this robot manipulation sequence. "
-        "The robot's goal is to lift the peg and insert it upright into the holder. "
-        "Based on the last frame, has the robot fully completed this task with the peg standing upright in the holder? "
-        "Answer only 'yes' or 'no'."
-    ),
-    "PickCube-v1": (
-        "Look at the FINAL frame of this robot manipulation sequence. "
-        "The robot's goal is to pick up the red cube from the table. "
-        "Based on the last frame, is the robot currently holding the cube above the table? "
-        "Answer only 'yes' or 'no'."
-    ),
-    "StackCube-v1": (
-        "Look at the FINAL frame of this robot manipulation sequence. "
-        "The robot's goal is to stack the red cube on top of the green cube. "
-        "Based on the last frame, is the red cube resting stably on top of the green cube? "
-        "Answer only 'yes' or 'no'."
-    ),
+    "LiftPegUpright-v1": "Lift the peg and insert it upright into the holder.",
+    "PickCube-v1": "Pick up the cube and place it on the target location.",
+    "StackCube-v1": "Stack the red cube on top of the green cube.",
 }
 
 
@@ -123,19 +109,12 @@ def process_hdf5_file(
             try:
                 frames = load_traj_frames(grp)         # (T, H, W, 3)
 
-                # 采样策略：必须包含最后3帧，其余均匀填充到 max_frames
+                # 采样策略：均匀采样 max_frames 帧（论文 Appendix C: "16-frame video"）
                 T = len(frames)
                 if T <= max_frames:
                     sampled = frames
                 else:
-                    # 最后3帧 + 从前面均匀取 max_frames-3 帧
-                    n_head = max_frames - 3
-                    if n_head > 0 and T > 3:
-                        head_idxs = np.linspace(0, T - 4, n_head, dtype=int)
-                        tail_idxs = np.array([T - 3, T - 2, T - 1])
-                        idxs = np.concatenate([head_idxs, tail_idxs])
-                    else:
-                        idxs = np.array([T - 3, T - 2, T - 1])
+                    idxs = np.linspace(0, T - 1, max_frames, dtype=int)
                     sampled = frames[idxs]
 
                 # VLM 评分
@@ -241,8 +220,8 @@ def main() -> None:
     parser.add_argument("--output_dir", type=str, default="data/vlaw/labeled/iter1",
                         help="标注结果输出目录")
     parser.add_argument("--iter_id", type=int, default=1, help="迭代轮次")
-    parser.add_argument("--tasks", type=str, default="LiftPegUpright-v1,PickCube-v1,StackCube-v1",
-                        help="任务列表, 逗号分隔")
+    parser.add_argument("--tasks", type=str, default="LiftPegUpright-v1",
+                        help="任务列表, 逗号分隔（默认 Lift-only；PickCube/StackCube deferred）")
     parser.add_argument("--model_path", type=str,
                         default="checkpoints/vlaw/reward_model/qwen_vl",
                         help="VLM 模型路径")
@@ -293,7 +272,17 @@ def main() -> None:
 
     # ── 加载 VLM 模型 ──────────────────────────────────────────────────────
     sys.path.insert(0, str(workspace))
-    from rlft.vlaw.reward_model import VLAWRewardConfig, VLAWRewardModel
+    reward_module = None
+    for module_name in ("rlft.vlaw.reward.reward_model", "rlft.vlaw.reward_model"):
+        try:
+            reward_module = importlib.import_module(module_name)
+            break
+        except ModuleNotFoundError:
+            continue
+    if reward_module is None:
+        raise ModuleNotFoundError("无法导入 VLAWRewardModel，请检查 reward_model 模块路径")
+    VLAWRewardConfig = reward_module.VLAWRewardConfig
+    VLAWRewardModel = reward_module.VLAWRewardModel
 
     print(f"\n[P3.2] 加载 VLM 模型: {model_path}")
     t0 = time.time()

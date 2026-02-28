@@ -149,6 +149,16 @@ def concat_cameras(
     Returns:
         拼接后 uint8 数组
     """
+    if rgb_base.shape[-1] != rgb_render.shape[-1]:
+        min_c = min(rgb_base.shape[-1], rgb_render.shape[-1])
+        rgb_base = rgb_base[..., :min_c]
+        rgb_render = rgb_render[..., :min_c]
+
+    if rgb_base.shape[-1] > 3:
+        rgb_base = rgb_base[..., :3]
+    if rgb_render.shape[-1] > 3:
+        rgb_render = rgb_render[..., :3]
+
     if mode == "vertical":
         return np.concatenate([rgb_base, rgb_render], axis=1)
     elif mode == "horizontal":

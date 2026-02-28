@@ -23,9 +23,11 @@
 | 模型 | 路径 | 大小 |
 |------|------|------|
 | Ctrl-World pretrained | `checkpoints/vlaw/world_model/pretrained/Ctrl-World/checkpoint-10000.pt` | 8.7GB |
+| Ctrl-World Phase-A | `checkpoints/vlaw/world_model/phase_a/` | ~17GB |
 | SVD (stable-video-diffusion) | `checkpoints/vlaw/world_model/pretrained/stable-video-diffusion-img2vid/` | ~7GB |
 | CLIP (ViT-B/32) | `checkpoints/vlaw/world_model/pretrained/clip-vit-base-patch32/` | 581MB |
-| Qwen2.5-VL-7B-Instruct | `checkpoints/vlaw/reward_model/qwen_vl/` | 16GB (5 shard) |
+| Qwen3-VL-4B-Instruct | `checkpoints/vlaw/reward_model/qwen_vl/` | 8.3GB |
+| Qwen3-VL LoRA Iter1 | `checkpoints/vlaw/reward_model/lora_iter1/final/` | 23.6MB |
 | sd-vae-ft-mse | `~/.cache/huggingface/hub/models--stabilityai--sd-vae-ft-mse/` | ~335MB |
 | ShortCut Flow (Base) | `checkpoints/il/best_eval_success_once.pt` | — |
 
@@ -42,14 +44,16 @@ export https_proxy=http://10.20.93.149:7890
 
 ---
 
-## GPU 分配（训练期间）
+## GPU 分配（默认方案）
 
-| GPU | 当前用途 | 状态 |
-|-----|---------|------|
-| 0-3 | Ctrl-World Phase-A 训练（`ctrl_world` env） | 🔴 占用中 |
-| 4-5 | ManiSkill 数据收集 / VAE 编码（`rlft_ms3` env） | 🟢 空闲 |
-| 6-7 | VLM 奖励模型（`vlaw_reward` env） | 🟢 空闲 |
-| 8-9 | 策略训练 + 评估（`rlft_ms3` env） | 🟢 空闲 |
+| GPU | 用途 | conda 环境 |
+|-----|------|------------|
+| 0-3 | Ctrl-World WM 训练 | `ctrl_world` |
+| 4-5 | ManiSkill 数据收集 / VAE 编码 / Imagination | `rlft_ms3` |
+| 6-7 | VLM 奖励模型推理/微调 | `vlaw_reward` |
+| 8-9 | 策略训练 + 评估 | `rlft_ms3` |
+
+> GPU 全部空闲时可按需灵活分配，上表为默认分配方案。
 
 ---
 

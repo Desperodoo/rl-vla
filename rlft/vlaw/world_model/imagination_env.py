@@ -417,7 +417,9 @@ class ImaginationEnvEngine:
 
             cam0 = pred_latents[0]  # (T, 4, lat_h_single, lat_w)
             cam1 = pred_latents[1] if pred_latents.shape[0] > 1 else cam0
-            new_latents = torch.cat([cam0, cam1], dim=2)  # (T, 4, 48, 24)
+            new_latents = torch.cat(
+                [cam0.to(self.device), cam1.to(self.device)], dim=2
+            )  # (T, 4, 48, 24) — 确保与 lat_buf 同设备
 
             # ========================================================
             # Step 5 (P4.3 核心): 用 env.step() 替代 State Predictor
@@ -695,7 +697,9 @@ class ImaginationEnvEngine:
                     )
                     cam0 = pred_latents[0]
                     cam1 = pred_latents[1] if pred_latents.shape[0] > 1 else cam0
-                    new_latents = torch.cat([cam0, cam1], dim=2)
+                    new_latents = torch.cat(
+                        [cam0.to(self.device), cam1.to(self.device)], dim=2
+                    )
 
                     # ---- Step 5 (P4.3): env.step() ----
                     state_seq: list[np.ndarray] = []

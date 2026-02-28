@@ -25,11 +25,8 @@ inference_logs_old/
 offline_results/
 
 # 预训练权重和checkpoint (大文件，不入 git)
-checkpoints/vlaw/world_model/pretrained/
-checkpoints/vlaw/world_model/phase_a/
-checkpoints/vlaw/policy/
-checkpoints/vlaw/reward_model/
-data/vlaw/
+checkpoints
+data
 
 # SDK Python 编译产物
 arm_control_sdk/python/src/build/

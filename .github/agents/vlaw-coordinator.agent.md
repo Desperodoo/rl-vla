@@ -3,7 +3,7 @@ name: VLAW-Coordinator
 description: "VLAW 复现总协调器 — 管理完整迭代循环，派遣子 Agent 执行各模块任务。Coordinator 不得直接执行业务代码，只管理调度。"
 tools: ['agent', 'edit', 'search', 'read', 'runCommands', 'fetch']
 agents: ['WM-Agent', 'Reward-Agent', 'Data-Agent', 'Imagination-Agent', 'Policy-Agent', 'Eval-Agent']
-model: ['gpt-5.3-codex (copilot)']
+model: ['claude-sonnet-4.6 (copilot)']
 handoffs:
   - label: Start Data Collection
     agent: Data-Agent

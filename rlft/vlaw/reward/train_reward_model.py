@@ -107,6 +107,7 @@ class TrainConfig:
     """LoRA 微调超参 (VLAW 论文 Appendix C)"""
 
     data_dir: str = "data/vlaw/rollouts/iter1"
+    data_dirs: List[str] = field(default_factory=list)
     tasks: List[str] = field(
         default_factory=lambda: ["LiftPegUpright-v1", "PickCube-v1", "StackCube-v1"]
     )
@@ -132,8 +133,8 @@ class TrainConfig:
 
     # 训练
     train_steps: int = 200
-    per_device_batch_size: int = 4
-    gradient_accumulation_steps: int = 32
+    per_device_batch_size: int = 1
+    gradient_accumulation_steps: int = 128
     lr: float = 2e-5
     warmup_steps: int = 20
     weight_decay: float = 0.01
@@ -193,24 +194,25 @@ def _log(msg: str, accelerator=None) -> None:
 # 数据加载：per-task HDF5，episodes 为 key
 # ────────────────────────────────────────────────────────────────────────────
 
-def _find_task_h5(data_dir: Path, task_id: str) -> Optional[Path]:
-    """在 data_dir/ 下寻找与 task_id 匹配的 HDF5 文件。"""
+def _find_task_h5_files(data_dir: Path, task_id: str) -> List[Path]:
+    """在 data_dir/ 下寻找与 task_id 匹配的所有 HDF5 文件。"""
+    result: List[Path] = []
     task_dir = data_dir / task_id
     if task_dir.is_dir():
         for ext in ["*.h5", "*.hdf5"]:
-            found = sorted(task_dir.glob(ext))
-            if found:
-                return found[0]
+            result.extend(sorted(task_dir.glob(ext)))
+        if result:
+            return result
     # 模糊匹配
     for d in sorted(data_dir.iterdir()):
         if not d.is_dir():
             continue
         if task_id in d.name or d.name in task_id:
             for ext in ["*.h5", "*.hdf5"]:
-                found = sorted(d.glob(ext))
-                if found:
-                    return found[0]
-    return None
+                result.extend(sorted(d.glob(ext)))
+            if result:
+                return result
+    return result
 
 
 class _Episode:
@@ -283,41 +285,63 @@ class RewardDataset(Dataset):
         return list(frames_list), list(instructions), list(labels)
 
 
+def _load_episodes_from_dir(data_dir: Path, task_ids: List[str],
+                           num_frames: int) -> List["_Episode"]:
+    """从单个 data_dir 加载所有 episodes（支持多个 h5 文件）。"""
+    eps: List[_Episode] = []
+    for task_id in task_ids:
+        h5_paths = _find_task_h5_files(data_dir, task_id)
+        if not h5_paths:
+            continue
+        instruction = get_instruction(task_id)
+        for h5_path in h5_paths:
+            print(f"[VLAW] {task_id}: {h5_path}  inst='{instruction[:50]}'")
+            try:
+                with h5py.File(str(h5_path), "r") as f:
+                    for ep_key in sorted(f.keys()):
+                        grp = f[ep_key]
+                        label = None
+                        for sk in ["env_success", "success"]:
+                            if sk in grp:
+                                v = grp[sk][()]
+                                if isinstance(v, np.ndarray):
+                                    v = v.flat[-1]
+                                label = int(bool(v))
+                                break
+                        if label is None and "success" in grp.attrs:
+                            label = int(bool(grp.attrs["success"]))
+                        if label is None:
+                            continue
+                        eps.append(_Episode(h5_path, ep_key, instruction, label, num_frames))
+            except Exception as exc:
+                print(f"[WARN] 打开 {h5_path} 失败: {exc}")
+    return eps
+
+
 def build_datasets(cfg: TrainConfig) -> Tuple[RewardDataset, RewardDataset]:
-    """构建训练/验证数据集。"""
-    data_dir = Path(cfg.data_dir)
-    assert data_dir.exists(), f"data_dir 不存在: {data_dir}"
+    """构建训练/验证数据集。支持多个 data_dir。"""
+    # 收集所有要搜索的目录
+    dirs: List[Path] = []
+    if cfg.data_dirs:
+        for d in cfg.data_dirs:
+            p = Path(d)
+            if p.exists():
+                dirs.append(p)
+            else:
+                print(f"[WARN] data_dirs 中不存在: {d}")
+    else:
+        dirs.append(Path(cfg.data_dir))
+
+    for d in dirs:
+        assert d.exists(), f"data_dir 不存在: {d}"
 
     task_ids = cfg.tasks
     all_eps: List[_Episode] = []
-
-    for task_id in task_ids:
-        h5_path = _find_task_h5(data_dir, task_id)
-        if h5_path is None:
-            print(f"[WARN] 未找到 {task_id} 的 HDF5，跳过")
-            continue
-        instruction = get_instruction(task_id)
-        print(f"[VLAW] {task_id}: {h5_path.name}  inst='{instruction[:50]}'")
-
-        try:
-            with h5py.File(str(h5_path), "r") as f:
-                for ep_key in sorted(f.keys()):
-                    grp = f[ep_key]
-                    label = None
-                    for sk in ["env_success", "success"]:
-                        if sk in grp:
-                            v = grp[sk][()]
-                            if isinstance(v, np.ndarray):
-                                v = v.flat[-1]
-                            label = int(bool(v))
-                            break
-                    if label is None and "success" in grp.attrs:
-                        label = int(bool(grp.attrs["success"]))
-                    if label is None:
-                        continue
-                    all_eps.append(_Episode(h5_path, ep_key, instruction, label, cfg.num_frames))
-        except Exception as exc:
-            print(f"[WARN] 打开 {h5_path} 失败: {exc}")
+    for data_dir in dirs:
+        print(f"[VLAW] 从 {data_dir} 加载 ...")
+        eps = _load_episodes_from_dir(data_dir, task_ids, cfg.num_frames)
+        all_eps.extend(eps)
+        print(f"[VLAW]   → {len(eps)} 条")
 
     n_pos = sum(e.label for e in all_eps)
     print(f"[VLAW] 总计 {len(all_eps)} 条轨迹  (+={n_pos}, -={len(all_eps)-n_pos})")
@@ -543,6 +567,13 @@ def train(cfg: TrainConfig) -> None:
     no_id  = processor.tokenizer.encode("no",  add_special_tokens=False)[-1]
     _log(f"[VLAW] yes_token_id={yes_id}, no_token_id={no_id}", accelerator)
 
+    # ── Gradient Checkpointing (节省显存) ────────────────────────────────
+    if hasattr(model, "gradient_checkpointing_enable"):
+        model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+        _log("[VLAW] gradient checkpointing 已启用", accelerator)
+    if hasattr(model, "enable_input_require_grads"):
+        model.enable_input_require_grads()
+
     # ── LoRA ──────────────────────────────────────────────────────────────
     _log("[VLAW] 应用 LoRA ...", accelerator)
     model = setup_lora(model, cfg)
@@ -719,6 +750,8 @@ def main() -> None:
     import argparse
     p = argparse.ArgumentParser(description="VLAW VLM LoRA 微调")
     p.add_argument("--data_dir",   default="data/vlaw/rollouts/iter1")
+    p.add_argument("--data_dirs",  nargs="*", default=[],
+                   help="多个数据目录 (优先于 --data_dir)")
     p.add_argument("--tasks",      nargs="+",
                    default=["LiftPegUpright-v1", "PickCube-v1", "StackCube-v1"])
     p.add_argument("--model_path", default="checkpoints/vlaw/reward_model/qwen_vl")
@@ -742,7 +775,7 @@ def main() -> None:
     a = p.parse_args()
 
     cfg = TrainConfig(
-        data_dir=a.data_dir, tasks=a.tasks,
+        data_dir=a.data_dir, data_dirs=a.data_dirs, tasks=a.tasks,
         model_path=a.model_path, output_dir=a.output_dir,
         num_frames=a.num_frames, lora_r=a.lora_r, lora_alpha=a.lora_alpha,
         train_steps=a.train_steps,

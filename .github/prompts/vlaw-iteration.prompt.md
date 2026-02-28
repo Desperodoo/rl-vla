@@ -9,6 +9,8 @@ tools: ['agent', 'runCommands', 'read', 'edit', 'search']
 
 执行一轮完整的 VLAW Algorithm 1 迭代循环。
 
+> 当前阶段策略：默认仅执行 LiftPegUpright-v1；PickCube-v1 与 StackCube-v1 在 Lift-only 验证通过后再执行。
+
 ## 迭代步骤
 按照 [VLAW_REPRODUCTION_PLAN.md](../VLAW_REPRODUCTION_PLAN.md) 第 3.6 节:
 

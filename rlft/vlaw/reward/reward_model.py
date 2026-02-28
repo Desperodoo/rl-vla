@@ -53,6 +53,14 @@ class VLAWRewardConfig:
         "Answer only 'yes' or 'no'."
     )
 
+    # 视频格式: 使用 Qwen3-VL 原生 video 输入 (temporal position embedding)
+    # True = 论文默认 (16帧视频序列, 有时序 PE)
+    # False = 多张独立 image (向后兼容，与 train_reward_model.py 一致)
+    use_video_format: bool = True
+
+    # 视频 FPS (仅 use_video_format=True 时生效)
+    video_fps: float = 2.0
+
     # 推理参数
     max_new_tokens: int = 8
     do_sample: bool = False
@@ -217,16 +225,38 @@ class VLAWRewardModel:
     def _build_messages(
         self, frames: List[Image.Image], instruction: str
     ) -> list:
-        """构建 Qwen3-VL 多图 chat messages"""
+        """构建 Qwen3-VL chat messages。
+
+        支持两种模式:
+        1. 多图模式 (use_video_format=False): 每帧作为独立 image，
+           与 train_reward_model.py 训练格式一致。
+        2. 视频模式 (use_video_format=True): 使用 Qwen3-VL 原生
+           {"type": "video"} 输入，帧序列被视为有时序关系的视频。
+        """
         n = len(frames)
-        image_content = [{"type": "image", "image": f} for f in frames]
         text = self.config.prompt_template.format(
             n=n, instruction=instruction
         )
+
+        if self.config.use_video_format and n > 1:
+            # Qwen3-VL 原生视频输入: 帧列表 → video content (带时序 PE)
+            content = [
+                {
+                    "type": "video",
+                    "video": frames,
+                    "fps": self.config.video_fps,
+                },
+                {"type": "text", "text": text},
+            ]
+        else:
+            # 多图模式 (默认, 与训练一致)
+            image_content = [{"type": "image", "image": f} for f in frames]
+            content = image_content + [{"type": "text", "text": text}]
+
         return [
             {
                 "role": "user",
-                "content": image_content + [{"type": "text", "text": text}],
+                "content": content,
             }
         ]
 

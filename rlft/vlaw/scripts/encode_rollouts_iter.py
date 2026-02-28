@@ -22,7 +22,8 @@ def main() -> None:
     parser.add_argument("--output_dir", type=str, required=True,
                         help="输出 latent 目录")
     parser.add_argument("--tasks", type=str,
-                        default="LiftPegUpright-v1,PickCube-v1,StackCube-v1")
+                        default="LiftPegUpright-v1",
+                        help="任务列表（默认 Lift-only；PickCube/StackCube deferred）")
     parser.add_argument("--iter_id", type=int, default=1)
     parser.add_argument("--vae_model_path", type=str,
                         default="checkpoints/vlaw/world_model/pretrained/stable-video-diffusion-img2vid")

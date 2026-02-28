@@ -5,10 +5,12 @@
 项目核心是：在 ManiSkill3 仿真环境中，用 ShortCut Flow 策略 + Ctrl-World 视频扩散世界模型 + VLM 奖励模型实现策略与世界模型的迭代共同改进。
 
 ## 复现计划
-完整计划见 [VLAW_REPRODUCTION_PLAN.md](VLAW_REPRODUCTION_PLAN.md)，涵盖 8 个阶段 (P0-P7)、GPU 分配、技术方案等。
+- 完整技术方案见 [VLAW_REPRODUCTION_PLAN.md](VLAW_REPRODUCTION_PLAN.md)，涵盖 8 个阶段 (P0-P7)、GPU 分配、技术方案等。
+- **当前推进计划**见 [VLAW_NEXT_STEPS.md](VLAW_NEXT_STEPS.md)，聚焦数据清理 → 基线报告 → 多轮迭代微调。
 
 ## 项目状态
-实时状态跟踪见 [vlaw-status.md](vlaw-status.md)。每个 Agent 在完成任务后应更新此文件。
+- 实时状态跟踪见 [vlaw-status.md](vlaw-status.md)。每个 Agent 在完成任务后应更新此文件。
+- 执行看板见 [VLAW_EXECUTION_BOARD.md](VLAW_EXECUTION_BOARD.md)，追踪当前迭代任务。
 
 ## 代码库结构
 ```

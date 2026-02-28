@@ -2,7 +2,7 @@
 name: Data-Agent
 description: "数据管线 Agent — 负责 ManiSkill 数据收集、VAE 编码、HDF5 格式化"
 tools: ['edit', 'search', 'read', 'runCommands']
-model: ['gpt-5.3-codex (copilot)']
+model: ['claude-sonnet-4.6 (copilot)']
 handoffs:
   - label: Train World Model
     agent: WM-Agent

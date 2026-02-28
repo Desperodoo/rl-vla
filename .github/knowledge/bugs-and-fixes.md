@@ -129,6 +129,7 @@
 
 ## BUG-012: 零样本 VLM 不适用于 D_syn 标注（必须先 fine-tune）
 
+
 - **发现**: 2026-02-25 查阅 VLAW 论文 Section 4.1 + Appendix C
 - **文件**: `rlft/vlaw/reward/reward_model.py`, `rlft/vlaw/reward/train_reward_model.py`
 - **症状**: iter1_v2 标注后 p_yes_max=0.148，alpha=0.8 → vlm_success=0/150，LiftPeg 8条真实成功也未被识别
@@ -151,3 +152,54 @@
 - **数据量需求**: 50条/任务 × 3任务 = 150条，其中成功约 8条（LiftPeg）
   - 注意：150条中仅 8 条为正样本，类别严重不平衡，fine-tuning 时需加权
 - **参考**: VLAW arXiv:2602.12063, Appendix C; RoboReward arXiv:2601.00675
+
+---
+
+## BUG-013: config.py SVD/CLIP 模型路径缺少 `../` 前缀
+
+- **发现**: 2026-02-28 V1.1 WM 验证视频测试
+- **文件**: `ctrl_world/config.py` (L189-190, `wm_args_maniskill` dataclass)
+- **症状**: `OSError: checkpoints/vlaw/world_model/pretrained/svd is not a local folder and is not a valid model identifier`
+- **根因**: `wm_args_maniskill` 中 `svd_model_path` 和 `clip_model_path` 默认值为 `checkpoints/...`（相对于项目根），但 `train_wm.py` 从 `ctrl_world/` 目录运行，实际需要 `../checkpoints/...`
+- **修复**:
+  ```python
+  # 修复前:
+  svd_model_path: str = "checkpoints/vlaw/world_model/pretrained/svd"
+  clip_model_path: str = "checkpoints/vlaw/world_model/pretrained/clip"
+  # 修复后:
+  svd_model_path: str = "../checkpoints/vlaw/world_model/pretrained/svd"
+  clip_model_path: str = "../checkpoints/vlaw/world_model/pretrained/clip"
+  ```
+- **预防**: Ctrl-World 的训练脚本统一从 `ctrl_world/` 子目录运行，所有 config 路径默认值需添加 `../` 前缀
+
+---
+
+## BUG-014: tmux 会话中 ffmpeg 不在 PATH
+
+- **发现**: 2026-02-28 V1.1 初次运行
+- **文件**: `ctrl_world/scripts/train_wm.py` (validate_video_generation 通过 mediapy 调用 ffmpeg)
+- **症状**: `RuntimeError: Program ffmpeg is not found` (mediapy 内部调用)
+- **根因**: tmux 新建会话不自动加载 conda 环境，ffmpeg (安装在 conda env ctrl_world) 不在 PATH 中
+- **修复**:
+  1. tmux 命令中显式: `eval "$(conda shell.bash hook 2>/dev/null)" && conda activate ctrl_world`
+  2. `train_wm.py` L30-34 已有硬编码 PATH hack（作为双保险）
+- **预防**: 所有 tmux 启动的训练命令，必须在开头显式激活 conda 环境
+
+---
+
+## BUG-015: train_wm.py 训练循环不在 max_train_steps 处中断
+
+- **发现**: 2026-02-28 V1.1 测试期间
+- **文件**: `ctrl_world/scripts/train_wm.py` (L194-197)
+- **症状**: `--max_train_steps=6` 时训练跑完整个 dataloader epoch (~4378 步) 而非在 6 步停止
+- **根因**: 内层和外层循环均缺少 `if global_step >= max_train_steps: break` 条件
+- **修复**: 在 inner loop 和 outer loop 各添加一处 break 判断:
+  ```python
+  # inner loop (梯度累积完成后):
+  if global_step >= args.max_train_steps:
+      break
+  # outer loop (epoch 循环):
+  if global_step >= args.max_train_steps:
+      break
+  ```
+- **预防**: 任何训练循环必须在 `global_step >= max_steps` 时有显式 break，不能只靠 tqdm 显示

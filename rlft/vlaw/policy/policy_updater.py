@@ -355,21 +355,31 @@ class VLAWPolicyUpdater:
             )
 
         combined = ConcatDataset(all_datasets)
+        n_samples = len(combined)
         print(
-            f"[VLAW-P5.1] 混合数据集: {len(combined)} 样本 "
+            f"[VLAW-P5.1] 混合数据集: {n_samples} 样本 "
             f"(real={sum(len(d) for d in real_datasets)}, "
             f"syn={sum(len(d) for d in syn_datasets)})"
         )
 
+        # 当样本数不足 batch_size 时自动降级
+        actual_bs = min(cfg.batch_size, n_samples)
+        drop_last = n_samples > actual_bs  # 只在够2个batch时drop_last
+        if actual_bs < cfg.batch_size:
+            print(
+                f"[VLAW-P5.1] 警告: 样本({n_samples}) < batch_size({cfg.batch_size}), "
+                f"自动降为 batch_size={actual_bs}, drop_last={drop_last}"
+            )
+
         loader = DataLoader(
             combined,
-            batch_size=cfg.batch_size,
+            batch_size=actual_bs,
             shuffle=True,
-            num_workers=4,
+            num_workers=min(4, max(1, n_samples // actual_bs)),
             pin_memory=True,
-            drop_last=True,
+            drop_last=drop_last,
             collate_fn=_collate_fn,
-            persistent_workers=True,
+            persistent_workers=n_samples > actual_bs,
         )
         return loader
 

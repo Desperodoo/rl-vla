@@ -49,7 +49,8 @@ def main() -> None:
     parser.add_argument("--output_dir", type=str, required=True,
                         help="输出 checkpoint 目录")
     parser.add_argument("--tasks", type=str,
-                        default="LiftPegUpright-v1,PickCube-v1,StackCube-v1")
+                        default="LiftPegUpright-v1",
+                        help="任务列表（默认 Lift-only；PickCube/StackCube deferred）")
     parser.add_argument("--num_steps", type=int, default=2000)
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--learning_rate", type=float, default=1e-5)

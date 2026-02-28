@@ -2,7 +2,7 @@
 name: Reward-Agent
 description: "VLM 奖励模型 Agent — 负责 Qwen3-VL 二分类奖励模型的实现、微调和推理"
 tools: ['edit', 'search', 'read', 'runCommands', 'fetch']
-model: ['gpt-5.3-codex (copilot)']
+model: ['claude-sonnet-4.6 (copilot)']
 handoffs:
   - label: Start Imagination
     agent: Imagination-Agent

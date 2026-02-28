@@ -80,8 +80,8 @@ class VLAWConfig:
     """总迭代轮次 K_iter"""
 
     # ── 任务设置 ────────────────────────────────────────────────────────────
-    tasks: str = "LiftPegUpright-v1,PickCube-v1,StackCube-v1"
-    """任务列表，逗号分隔"""
+    tasks: str = "LiftPegUpright-v1"
+    """任务列表，逗号分隔（PickCube/StackCube deferred）"""
 
     # ── 策略 checkpoint ──────────────────────────────────────────────────────
     base_policy_ckpt: str = "checkpoints/il/best_eval_success_once.pt"
@@ -592,7 +592,8 @@ def main() -> None:
     # 主配置
     parser.add_argument("--num_iters", type=int, default=2)
     parser.add_argument("--tasks", type=str,
-                        default="LiftPegUpright-v1,PickCube-v1,StackCube-v1")
+                        default="LiftPegUpright-v1",
+                        help="任务列表（默认 Lift-only；PickCube/StackCube deferred）")
     parser.add_argument("--base_policy_ckpt", type=str,
                         default="checkpoints/il/best_eval_success_once.pt")
     parser.add_argument("--num_rollout_episodes", type=int, default=50)
