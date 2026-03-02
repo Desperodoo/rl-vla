@@ -28,6 +28,10 @@ offline_results/
 checkpoints
 data
 
+# 结果中的大型可视化图片目录
+results/vlaw/dsyn_diagnosis_frames/
+results/vlaw/wm_baseline/
+
 # SDK Python 编译产物
 arm_control_sdk/python/src/build/
 arm_control_sdk/python/lib/build/

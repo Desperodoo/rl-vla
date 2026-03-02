@@ -1,0 +1,1250 @@
+{
+  "task": "T-DIAG-SYN-003",
+  "description": "VLM cross-validation with fine-tuned 16-frame LoRA on real trajectories",
+  "config": {
+    "data_dir": "data/vlaw/rollouts/iter1_highsuc",
+    "task": "LiftPegUpright-v1",
+    "model_path": "checkpoints/vlaw/reward_model/qwen_vl",
+    "lora_path": "checkpoints/vlaw/reward_model/lora_iter1_16frame",
+    "num_frames": 16,
+    "threshold": 0.8,
+    "use_video_format": false
+  },
+  "summary": {
+    "total_trajectories": 120,
+    "success_count": 51,
+    "fail_count": 69,
+    "total_scoring_time_s": 19.4,
+    "avg_time_per_traj_s": 0.16
+  },
+  "success_group_pyes": {
+    "count": 51,
+    "mean": 0.6993,
+    "median": 0.7058,
+    "min": 0.5,
+    "max": 0.867,
+    "std": 0.0909
+  },
+  "fail_group_pyes": {
+    "count": 69,
+    "mean": 0.4955,
+    "median": 0.5312,
+    "min": 0.0851,
+    "max": 0.8355,
+    "std": 0.2407
+  },
+  "classification": {
+    "threshold": 0.8,
+    "tp": 4,
+    "fn": 47,
+    "fp": 3,
+    "tn": 66,
+    "accuracy": 0.5833,
+    "precision": 0.5714,
+    "recall": 0.0784,
+    "f1": 0.1379,
+    "fp_rate": 0.0435
+  },
+  "per_trajectory": [
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772087806.h5",
+      "traj_key": "traj_0000",
+      "env_success_last": false,
+      "num_steps": 17,
+      "p_yes": 0.6791930794715881,
+      "reward": 0,
+      "num_frames_used": 16,
+      "inference_time_s": 0.61
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772087806.h5",
+      "traj_key": "traj_0001",
+      "env_success_last": false,
+      "num_steps": 23,
+      "p_yes": 0.7773059606552124,
+      "reward": 0,
+      "num_frames_used": 16,
+      "inference_time_s": 0.17
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772087806.h5",
+      "traj_key": "traj_0002",
+      "env_success_last": false,
+      "num_steps": 36,
+      "p_yes": 0.622474730014801,
+      "reward": 0,
+      "num_frames_used": 16,
+      "inference_time_s": 0.17
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772087806.h5",
+      "traj_key": "traj_0003",
+      "env_success_last": false,
+      "num_steps": 35,
+      "p_yes": 0.6224800944328308,
+      "reward": 0,
+      "num_frames_used": 16,
+      "inference_time_s": 0.17
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772087806.h5",
+      "traj_key": "traj_0004",
+      "env_success_last": false,
+      "num_steps": 66,
+      "p_yes": 0.4688175320625305,
+      "reward": 0,
+      "num_frames_used": 16,
+      "inference_time_s": 0.17
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772087806.h5",
+      "traj_key": "traj_0005",
+      "env_success_last": false,
+      "num_steps": 66,
+      "p_yes": 0.29425546526908875,
+      "reward": 0,
+      "num_frames_used": 16,
+      "inference_time_s": 0.17
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772087806.h5",
+      "traj_key": "traj_0006",
+      "env_success_last": false,
+      "num_steps": 66,
+      "p_yes": 0.1645408719778061,
+      "reward": 0,
+      "num_frames_used": 16,
+      "inference_time_s": 0.17
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772087806.h5",
+      "traj_key": "traj_0007",
+      "env_success_last": false,
+      "num_steps": 66,
+      "p_yes": 0.4378604292869568,
+      "reward": 0,
+      "num_frames_used": 16,
+      "inference_time_s": 0.17
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772087806.h5",
+      "traj_key": "traj_0008",
+      "env_success_last": false,
+      "num_steps": 66,
+      "p_yes": 0.3486798405647278,
+      "reward": 0,
+      "num_frames_used": 16,
+      "inference_time_s": 0.17
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772087806.h5",
+      "traj_key": "traj_0009",
+      "env_success_last": false,
+      "num_steps": 66,
+      "p_yes": 0.13297602534294128,
+      "reward": 0,
+      "num_frames_used": 16,
+      "inference_time_s": 0.17
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772087806.h5",
+      "traj_key": "traj_0010",
+      "env_success_last": false,
+      "num_steps": 66,
+      "p_yes": 0.22272709012031555,
+      "reward": 0,
+      "num_frames_used": 16,
+      "inference_time_s": 0.17
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772087806.h5",
+      "traj_key": "traj_0011",
+      "env_success_last": false,
+      "num_steps": 66,
+      "p_yes": 0.46881797909736633,
+      "reward": 0,
+      "num_frames_used": 16,
+      "inference_time_s": 0.18
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772087806.h5",
+      "traj_key": "traj_0012",
+      "env_success_last": false,
+      "num_steps": 66,
+      "p_yes": 0.22272567451000214,
+      "reward": 0,
+      "num_frames_used": 16,
+      "inference_time_s": 0.18
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772087806.h5",
+      "traj_key": "traj_0013",
+      "env_success_last": false,
+      "num_steps": 66,
+      "p_yes": 0.3208433985710144,
+      "reward": 0,
+      "num_frames_used": 16,
+      "inference_time_s": 0.18
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772087806.h5",
+      "traj_key": "traj_0014",
+      "env_success_last": false,
+      "num_steps": 66,
+      "p_yes": 0.2689657509326935,
+      "reward": 0,
+      "num_frames_used": 16,
+      "inference_time_s": 0.18
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772087806.h5",
+      "traj_key": "traj_0015",
+      "env_success_last": false,
+      "num_steps": 66,
+      "p_yes": 0.20182934403419495,
+      "reward": 0,
+      "num_frames_used": 16,
+      "inference_time_s": 0.18
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772087806.h5",
+      "traj_key": "traj_0016",
+      "env_success_last": false,
+      "num_steps": 66,
+      "p_yes": 0.13298232853412628,
+      "reward": 0,
+      "num_frames_used": 16,
+      "inference_time_s": 0.18
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772087806.h5",
+      "traj_key": "traj_0017",
+      "env_success_last": false,
+      "num_steps": 67,
+      "p_yes": 0.4688259959220886,
+      "reward": 0,
+      "num_frames_used": 16,
+      "inference_time_s": 0.18
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772087806.h5",
+      "traj_key": "traj_0018",
+      "env_success_last": false,
+      "num_steps": 26,
+      "p_yes": 0.7310701608657837,
+      "reward": 0,
+      "num_frames_used": 16,
+      "inference_time_s": 0.18
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772087806.h5",
+      "traj_key": "traj_0019",
+      "env_success_last": true,
+      "num_steps": 27,
+      "p_yes": 0.705796480178833,
+      "reward": 0,
+      "num_frames_used": 16,
+      "inference_time_s": 0.17
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772087806.h5",
+      "traj_key": "traj_0020",
+      "env_success_last": false,
+      "num_steps": 32,
+      "p_yes": 0.8175790905952454,
+      "reward": 1,
+      "num_frames_used": 16,
+      "inference_time_s": 0.18
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772087806.h5",
+      "traj_key": "traj_0021",
+      "env_success_last": false,
+      "num_steps": 67,
+      "p_yes": 0.18244820833206177,
+      "reward": 0,
+      "num_frames_used": 16,
+      "inference_time_s": 0.18
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772087806.h5",
+      "traj_key": "traj_0022",
+      "env_success_last": true,
+      "num_steps": 23,
+      "p_yes": 0.7773083448410034,
+      "reward": 0,
+      "num_frames_used": 16,
+      "inference_time_s": 0.17
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772087806.h5",
+      "traj_key": "traj_0023",
+      "env_success_last": false,
+      "num_steps": 67,
+      "p_yes": 0.6224843263626099,
+      "reward": 0,
+      "num_frames_used": 16,
+      "inference_time_s": 0.18
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772087806.h5",
+      "traj_key": "traj_0024",
+      "env_success_last": false,
+      "num_steps": 67,
+      "p_yes": 0.10670194029808044,
+      "reward": 0,
+      "num_frames_used": 16,
+      "inference_time_s": 0.18
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772087806.h5",
+      "traj_key": "traj_0025",
+      "env_success_last": false,
+      "num_steps": 67,
+      "p_yes": 0.3775671124458313,
+      "reward": 0,
+      "num_frames_used": 16,
+      "inference_time_s": 0.18
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772087806.h5",
+      "traj_key": "traj_0026",
+      "env_success_last": false,
+      "num_steps": 67,
+      "p_yes": 0.4688265919685364,
+      "reward": 0,
+      "num_frames_used": 16,
+      "inference_time_s": 0.18
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772087806.h5",
+      "traj_key": "traj_0027",
+      "env_success_last": false,
+      "num_steps": 67,
+      "p_yes": 0.5621989369392395,
+      "reward": 0,
+      "num_frames_used": 16,
+      "inference_time_s": 0.17
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772087806.h5",
+      "traj_key": "traj_0028",
+      "env_success_last": false,
+      "num_steps": 67,
+      "p_yes": 0.11921653151512146,
+      "reward": 0,
+      "num_frames_used": 16,
+      "inference_time_s": 0.17
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772087806.h5",
+      "traj_key": "traj_0029",
+      "env_success_last": false,
+      "num_steps": 67,
+      "p_yes": 0.6513733267784119,
+      "reward": 0,
+      "num_frames_used": 16,
+      "inference_time_s": 0.17
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772087806.h5",
+      "traj_key": "traj_0030",
+      "env_success_last": false,
+      "num_steps": 67,
+      "p_yes": 0.11921270936727524,
+      "reward": 0,
+      "num_frames_used": 16,
+      "inference_time_s": 0.17
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772087806.h5",
+      "traj_key": "traj_0031",
+      "env_success_last": false,
+      "num_steps": 67,
+      "p_yes": 0.1824408620595932,
+      "reward": 0,
+      "num_frames_used": 16,
+      "inference_time_s": 0.17
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772087806.h5",
+      "traj_key": "traj_0032",
+      "env_success_last": false,
+      "num_steps": 67,
+      "p_yes": 0.24510939419269562,
+      "reward": 0,
+      "num_frames_used": 16,
+      "inference_time_s": 0.17
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772087806.h5",
+      "traj_key": "traj_0033",
+      "env_success_last": false,
+      "num_steps": 67,
+      "p_yes": 0.3208622634410858,
+      "reward": 0,
+      "num_frames_used": 16,
+      "inference_time_s": 0.18
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772087806.h5",
+      "traj_key": "traj_0034",
+      "env_success_last": true,
+      "num_steps": 22,
+      "p_yes": 0.7549224495887756,
+      "reward": 0,
+      "num_frames_used": 16,
+      "inference_time_s": 0.17
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772087806.h5",
+      "traj_key": "traj_0035",
+      "env_success_last": false,
+      "num_steps": 23,
+      "p_yes": 0.7981925010681152,
+      "reward": 0,
+      "num_frames_used": 16,
+      "inference_time_s": 0.17
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772087806.h5",
+      "traj_key": "traj_0036",
+      "env_success_last": false,
+      "num_steps": 23,
+      "p_yes": 0.7549248337745667,
+      "reward": 0,
+      "num_frames_used": 16,
+      "inference_time_s": 0.17
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772087806.h5",
+      "traj_key": "traj_0037",
+      "env_success_last": false,
+      "num_steps": 67,
+      "p_yes": 0.32084330916404724,
+      "reward": 0,
+      "num_frames_used": 16,
+      "inference_time_s": 0.18
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772087806.h5",
+      "traj_key": "traj_0038",
+      "env_success_last": false,
+      "num_steps": 66,
+      "p_yes": 0.24511049687862396,
+      "reward": 0,
+      "num_frames_used": 16,
+      "inference_time_s": 0.18
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772087806.h5",
+      "traj_key": "traj_0039",
+      "env_success_last": false,
+      "num_steps": 30,
+      "p_yes": 0.7310715913772583,
+      "reward": 0,
+      "num_frames_used": 16,
+      "inference_time_s": 0.18
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772087806.h5",
+      "traj_key": "traj_0040",
+      "env_success_last": false,
+      "num_steps": 67,
+      "p_yes": 0.5000274181365967,
+      "reward": 0,
+      "num_frames_used": 16,
+      "inference_time_s": 0.18
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772087806.h5",
+      "traj_key": "traj_0041",
+      "env_success_last": false,
+      "num_steps": 33,
+      "p_yes": 0.6791927814483643,
+      "reward": 0,
+      "num_frames_used": 16,
+      "inference_time_s": 0.18
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772087806.h5",
+      "traj_key": "traj_0042",
+      "env_success_last": false,
+      "num_steps": 66,
+      "p_yes": 0.10670320689678192,
+      "reward": 0,
+      "num_frames_used": 16,
+      "inference_time_s": 0.18
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772087806.h5",
+      "traj_key": "traj_0043",
+      "env_success_last": false,
+      "num_steps": 66,
+      "p_yes": 0.40736153721809387,
+      "reward": 0,
+      "num_frames_used": 16,
+      "inference_time_s": 0.18
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772087806.h5",
+      "traj_key": "traj_0044",
+      "env_success_last": false,
+      "num_steps": 67,
+      "p_yes": 0.2227245718240738,
+      "reward": 0,
+      "num_frames_used": 16,
+      "inference_time_s": 0.18
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772087806.h5",
+      "traj_key": "traj_0045",
+      "env_success_last": false,
+      "num_steps": 67,
+      "p_yes": 0.10670233517885208,
+      "reward": 0,
+      "num_frames_used": 16,
+      "inference_time_s": 0.17
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772087806.h5",
+      "traj_key": "traj_0046",
+      "env_success_last": false,
+      "num_steps": 67,
+      "p_yes": 0.5926876068115234,
+      "reward": 0,
+      "num_frames_used": 16,
+      "inference_time_s": 0.18
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772087806.h5",
+      "traj_key": "traj_0047",
+      "env_success_last": false,
+      "num_steps": 67,
+      "p_yes": 0.5312365293502808,
+      "reward": 0,
+      "num_frames_used": 16,
+      "inference_time_s": 0.17
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772087806.h5",
+      "traj_key": "traj_0048",
+      "env_success_last": false,
+      "num_steps": 67,
+      "p_yes": 0.37756916880607605,
+      "reward": 0,
+      "num_frames_used": 16,
+      "inference_time_s": 0.18
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772087806.h5",
+      "traj_key": "traj_0049",
+      "env_success_last": false,
+      "num_steps": 67,
+      "p_yes": 0.08510506898164749,
+      "reward": 0,
+      "num_frames_used": 16,
+      "inference_time_s": 0.18
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772098799.h5",
+      "traj_key": "traj_0000",
+      "env_success_last": false,
+      "num_steps": 3,
+      "p_yes": 0.7310691475868225,
+      "reward": 0,
+      "num_frames_used": 3,
+      "inference_time_s": 0.08
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772098799.h5",
+      "traj_key": "traj_0001",
+      "env_success_last": true,
+      "num_steps": 4,
+      "p_yes": 0.7549300193786621,
+      "reward": 0,
+      "num_frames_used": 4,
+      "inference_time_s": 0.11
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772098799.h5",
+      "traj_key": "traj_0002",
+      "env_success_last": true,
+      "num_steps": 4,
+      "p_yes": 0.7981948852539062,
+      "reward": 0,
+      "num_frames_used": 4,
+      "inference_time_s": 0.1
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772098799.h5",
+      "traj_key": "traj_0003",
+      "env_success_last": true,
+      "num_steps": 4,
+      "p_yes": 0.5312353372573853,
+      "reward": 0,
+      "num_frames_used": 4,
+      "inference_time_s": 0.11
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772098799.h5",
+      "traj_key": "traj_0004",
+      "env_success_last": true,
+      "num_steps": 4,
+      "p_yes": 0.7058013677597046,
+      "reward": 0,
+      "num_frames_used": 4,
+      "inference_time_s": 0.12
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772098799.h5",
+      "traj_key": "traj_0005",
+      "env_success_last": true,
+      "num_steps": 1,
+      "p_yes": 0.6513646841049194,
+      "reward": 0,
+      "num_frames_used": 1,
+      "inference_time_s": 0.11
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772098799.h5",
+      "traj_key": "traj_0006",
+      "env_success_last": false,
+      "num_steps": 4,
+      "p_yes": 0.7549257278442383,
+      "reward": 0,
+      "num_frames_used": 4,
+      "inference_time_s": 0.12
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772098799.h5",
+      "traj_key": "traj_0007",
+      "env_success_last": false,
+      "num_steps": 4,
+      "p_yes": 0.705798864364624,
+      "reward": 0,
+      "num_frames_used": 4,
+      "inference_time_s": 0.12
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772098799.h5",
+      "traj_key": "traj_0008",
+      "env_success_last": false,
+      "num_steps": 4,
+      "p_yes": 0.8354897499084473,
+      "reward": 1,
+      "num_frames_used": 4,
+      "inference_time_s": 0.12
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772098799.h5",
+      "traj_key": "traj_0009",
+      "env_success_last": false,
+      "num_steps": 4,
+      "p_yes": 0.7549264430999756,
+      "reward": 0,
+      "num_frames_used": 4,
+      "inference_time_s": 0.12
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772098799.h5",
+      "traj_key": "traj_0010",
+      "env_success_last": false,
+      "num_steps": 4,
+      "p_yes": 0.7981956601142883,
+      "reward": 0,
+      "num_frames_used": 4,
+      "inference_time_s": 0.12
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772098799.h5",
+      "traj_key": "traj_0011",
+      "env_success_last": false,
+      "num_steps": 4,
+      "p_yes": 0.7058008909225464,
+      "reward": 0,
+      "num_frames_used": 4,
+      "inference_time_s": 0.12
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772098799.h5",
+      "traj_key": "traj_0012",
+      "env_success_last": true,
+      "num_steps": 1,
+      "p_yes": 0.798193633556366,
+      "reward": 0,
+      "num_frames_used": 1,
+      "inference_time_s": 0.11
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772098799.h5",
+      "traj_key": "traj_0013",
+      "env_success_last": true,
+      "num_steps": 1,
+      "p_yes": 0.8519559502601624,
+      "reward": 1,
+      "num_frames_used": 1,
+      "inference_time_s": 0.11
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772098799.h5",
+      "traj_key": "traj_0014",
+      "env_success_last": true,
+      "num_steps": 1,
+      "p_yes": 0.592679500579834,
+      "reward": 0,
+      "num_frames_used": 1,
+      "inference_time_s": 0.11
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772098799.h5",
+      "traj_key": "traj_0015",
+      "env_success_last": true,
+      "num_steps": 5,
+      "p_yes": 0.754928469657898,
+      "reward": 0,
+      "num_frames_used": 5,
+      "inference_time_s": 0.13
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772098799.h5",
+      "traj_key": "traj_0016",
+      "env_success_last": true,
+      "num_steps": 1,
+      "p_yes": 0.6791872978210449,
+      "reward": 0,
+      "num_frames_used": 1,
+      "inference_time_s": 0.11
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772098799.h5",
+      "traj_key": "traj_0017",
+      "env_success_last": true,
+      "num_steps": 1,
+      "p_yes": 0.6791864037513733,
+      "reward": 0,
+      "num_frames_used": 1,
+      "inference_time_s": 0.11
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772098799.h5",
+      "traj_key": "traj_0018",
+      "env_success_last": true,
+      "num_steps": 1,
+      "p_yes": 0.651364803314209,
+      "reward": 0,
+      "num_frames_used": 1,
+      "inference_time_s": 0.11
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772098799.h5",
+      "traj_key": "traj_0019",
+      "env_success_last": true,
+      "num_steps": 1,
+      "p_yes": 0.7310670018196106,
+      "reward": 0,
+      "num_frames_used": 1,
+      "inference_time_s": 0.11
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772098799.h5",
+      "traj_key": "traj_0020",
+      "env_success_last": false,
+      "num_steps": 5,
+      "p_yes": 0.6791936159133911,
+      "reward": 0,
+      "num_frames_used": 5,
+      "inference_time_s": 0.12
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772098799.h5",
+      "traj_key": "traj_0021",
+      "env_success_last": true,
+      "num_steps": 1,
+      "p_yes": 0.8354869484901428,
+      "reward": 1,
+      "num_frames_used": 1,
+      "inference_time_s": 0.11
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772098799.h5",
+      "traj_key": "traj_0022",
+      "env_success_last": true,
+      "num_steps": 1,
+      "p_yes": 0.7549214363098145,
+      "reward": 0,
+      "num_frames_used": 1,
+      "inference_time_s": 0.11
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772098799.h5",
+      "traj_key": "traj_0023",
+      "env_success_last": true,
+      "num_steps": 1,
+      "p_yes": 0.7057937979698181,
+      "reward": 0,
+      "num_frames_used": 1,
+      "inference_time_s": 0.11
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772098799.h5",
+      "traj_key": "traj_0024",
+      "env_success_last": true,
+      "num_steps": 1,
+      "p_yes": 0.7057931423187256,
+      "reward": 0,
+      "num_frames_used": 1,
+      "inference_time_s": 0.11
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772098799.h5",
+      "traj_key": "traj_0025",
+      "env_success_last": true,
+      "num_steps": 1,
+      "p_yes": 0.7310665845870972,
+      "reward": 0,
+      "num_frames_used": 1,
+      "inference_time_s": 0.11
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772098799.h5",
+      "traj_key": "traj_0026",
+      "env_success_last": false,
+      "num_steps": 2,
+      "p_yes": 0.32084178924560547,
+      "reward": 0,
+      "num_frames_used": 2,
+      "inference_time_s": 0.11
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772098799.h5",
+      "traj_key": "traj_0027",
+      "env_success_last": false,
+      "num_steps": 6,
+      "p_yes": 0.62247633934021,
+      "reward": 0,
+      "num_frames_used": 6,
+      "inference_time_s": 0.13
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772098799.h5",
+      "traj_key": "traj_0028",
+      "env_success_last": false,
+      "num_steps": 2,
+      "p_yes": 0.705796480178833,
+      "reward": 0,
+      "num_frames_used": 2,
+      "inference_time_s": 0.12
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772098799.h5",
+      "traj_key": "traj_0029",
+      "env_success_last": true,
+      "num_steps": 1,
+      "p_yes": 0.5000147223472595,
+      "reward": 0,
+      "num_frames_used": 1,
+      "inference_time_s": 0.11
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772098799.h5",
+      "traj_key": "traj_0030",
+      "env_success_last": true,
+      "num_steps": 1,
+      "p_yes": 0.7057933807373047,
+      "reward": 0,
+      "num_frames_used": 1,
+      "inference_time_s": 0.11
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772098799.h5",
+      "traj_key": "traj_0031",
+      "env_success_last": true,
+      "num_steps": 2,
+      "p_yes": 0.5312305688858032,
+      "reward": 0,
+      "num_frames_used": 2,
+      "inference_time_s": 0.11
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772098799.h5",
+      "traj_key": "traj_0032",
+      "env_success_last": true,
+      "num_steps": 1,
+      "p_yes": 0.7773056626319885,
+      "reward": 0,
+      "num_frames_used": 1,
+      "inference_time_s": 0.11
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772098799.h5",
+      "traj_key": "traj_0033",
+      "env_success_last": true,
+      "num_steps": 1,
+      "p_yes": 0.7773065567016602,
+      "reward": 0,
+      "num_frames_used": 1,
+      "inference_time_s": 0.11
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772098799.h5",
+      "traj_key": "traj_0034",
+      "env_success_last": true,
+      "num_steps": 1,
+      "p_yes": 0.7057947516441345,
+      "reward": 0,
+      "num_frames_used": 1,
+      "inference_time_s": 0.11
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772098799.h5",
+      "traj_key": "traj_0035",
+      "env_success_last": true,
+      "num_steps": 1,
+      "p_yes": 0.622471809387207,
+      "reward": 0,
+      "num_frames_used": 1,
+      "inference_time_s": 0.11
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772098799.h5",
+      "traj_key": "traj_0036",
+      "env_success_last": true,
+      "num_steps": 1,
+      "p_yes": 0.6224689483642578,
+      "reward": 0,
+      "num_frames_used": 1,
+      "inference_time_s": 0.11
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772098799.h5",
+      "traj_key": "traj_0037",
+      "env_success_last": false,
+      "num_steps": 7,
+      "p_yes": 0.6513693332672119,
+      "reward": 0,
+      "num_frames_used": 7,
+      "inference_time_s": 0.13
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772098799.h5",
+      "traj_key": "traj_0038",
+      "env_success_last": false,
+      "num_steps": 3,
+      "p_yes": 0.3775651156902313,
+      "reward": 0,
+      "num_frames_used": 3,
+      "inference_time_s": 0.12
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772098799.h5",
+      "traj_key": "traj_0039",
+      "env_success_last": false,
+      "num_steps": 1,
+      "p_yes": 0.754921555519104,
+      "reward": 0,
+      "num_frames_used": 1,
+      "inference_time_s": 0.11
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772098799.h5",
+      "traj_key": "traj_0040",
+      "env_success_last": true,
+      "num_steps": 4,
+      "p_yes": 0.5621936321258545,
+      "reward": 0,
+      "num_frames_used": 4,
+      "inference_time_s": 0.12
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772098799.h5",
+      "traj_key": "traj_0041",
+      "env_success_last": true,
+      "num_steps": 1,
+      "p_yes": 0.5312272906303406,
+      "reward": 0,
+      "num_frames_used": 1,
+      "inference_time_s": 0.11
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772098799.h5",
+      "traj_key": "traj_0042",
+      "env_success_last": true,
+      "num_steps": 1,
+      "p_yes": 0.8670380711555481,
+      "reward": 1,
+      "num_frames_used": 1,
+      "inference_time_s": 0.11
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772098799.h5",
+      "traj_key": "traj_0043",
+      "env_success_last": true,
+      "num_steps": 1,
+      "p_yes": 0.7549218535423279,
+      "reward": 0,
+      "num_frames_used": 1,
+      "inference_time_s": 0.11
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772098799.h5",
+      "traj_key": "traj_0044",
+      "env_success_last": true,
+      "num_steps": 1,
+      "p_yes": 0.5621939897537231,
+      "reward": 0,
+      "num_frames_used": 1,
+      "inference_time_s": 0.11
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772098799.h5",
+      "traj_key": "traj_0045",
+      "env_success_last": true,
+      "num_steps": 1,
+      "p_yes": 0.7057939171791077,
+      "reward": 0,
+      "num_frames_used": 1,
+      "inference_time_s": 0.11
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772098799.h5",
+      "traj_key": "traj_0046",
+      "env_success_last": true,
+      "num_steps": 1,
+      "p_yes": 0.7549218535423279,
+      "reward": 0,
+      "num_frames_used": 1,
+      "inference_time_s": 0.11
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772098799.h5",
+      "traj_key": "traj_0047",
+      "env_success_last": true,
+      "num_steps": 1,
+      "p_yes": 0.6224699020385742,
+      "reward": 0,
+      "num_frames_used": 1,
+      "inference_time_s": 0.11
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772098799.h5",
+      "traj_key": "traj_0048",
+      "env_success_last": true,
+      "num_steps": 1,
+      "p_yes": 0.731066882610321,
+      "reward": 0,
+      "num_frames_used": 1,
+      "inference_time_s": 0.11
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772098799.h5",
+      "traj_key": "traj_0049",
+      "env_success_last": false,
+      "num_steps": 8,
+      "p_yes": 0.6791948676109314,
+      "reward": 0,
+      "num_frames_used": 8,
+      "inference_time_s": 0.14
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772108871.h5",
+      "traj_key": "traj_0000",
+      "env_success_last": false,
+      "num_steps": 3,
+      "p_yes": 0.7310691475868225,
+      "reward": 0,
+      "num_frames_used": 3,
+      "inference_time_s": 0.12
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772108871.h5",
+      "traj_key": "traj_0001",
+      "env_success_last": true,
+      "num_steps": 4,
+      "p_yes": 0.7549300193786621,
+      "reward": 0,
+      "num_frames_used": 4,
+      "inference_time_s": 0.12
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772108871.h5",
+      "traj_key": "traj_0002",
+      "env_success_last": true,
+      "num_steps": 4,
+      "p_yes": 0.7981948852539062,
+      "reward": 0,
+      "num_frames_used": 4,
+      "inference_time_s": 0.12
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772108871.h5",
+      "traj_key": "traj_0003",
+      "env_success_last": true,
+      "num_steps": 4,
+      "p_yes": 0.5312353372573853,
+      "reward": 0,
+      "num_frames_used": 4,
+      "inference_time_s": 0.12
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772108871.h5",
+      "traj_key": "traj_0004",
+      "env_success_last": true,
+      "num_steps": 4,
+      "p_yes": 0.7058013677597046,
+      "reward": 0,
+      "num_frames_used": 4,
+      "inference_time_s": 0.12
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772108871.h5",
+      "traj_key": "traj_0005",
+      "env_success_last": true,
+      "num_steps": 1,
+      "p_yes": 0.6513646841049194,
+      "reward": 0,
+      "num_frames_used": 1,
+      "inference_time_s": 0.11
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772108871.h5",
+      "traj_key": "traj_0006",
+      "env_success_last": false,
+      "num_steps": 4,
+      "p_yes": 0.7549257278442383,
+      "reward": 0,
+      "num_frames_used": 4,
+      "inference_time_s": 0.12
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772108871.h5",
+      "traj_key": "traj_0007",
+      "env_success_last": false,
+      "num_steps": 4,
+      "p_yes": 0.705798864364624,
+      "reward": 0,
+      "num_frames_used": 4,
+      "inference_time_s": 0.12
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772108871.h5",
+      "traj_key": "traj_0008",
+      "env_success_last": false,
+      "num_steps": 4,
+      "p_yes": 0.8354897499084473,
+      "reward": 1,
+      "num_frames_used": 4,
+      "inference_time_s": 0.12
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772108871.h5",
+      "traj_key": "traj_0009",
+      "env_success_last": false,
+      "num_steps": 4,
+      "p_yes": 0.7549264430999756,
+      "reward": 0,
+      "num_frames_used": 4,
+      "inference_time_s": 0.12
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772108871.h5",
+      "traj_key": "traj_0010",
+      "env_success_last": false,
+      "num_steps": 4,
+      "p_yes": 0.7981956601142883,
+      "reward": 0,
+      "num_frames_used": 4,
+      "inference_time_s": 0.12
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772108871.h5",
+      "traj_key": "traj_0011",
+      "env_success_last": false,
+      "num_steps": 4,
+      "p_yes": 0.7058008909225464,
+      "reward": 0,
+      "num_frames_used": 4,
+      "inference_time_s": 0.12
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772108871.h5",
+      "traj_key": "traj_0012",
+      "env_success_last": true,
+      "num_steps": 1,
+      "p_yes": 0.798193633556366,
+      "reward": 0,
+      "num_frames_used": 1,
+      "inference_time_s": 0.11
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772108871.h5",
+      "traj_key": "traj_0013",
+      "env_success_last": true,
+      "num_steps": 1,
+      "p_yes": 0.8519559502601624,
+      "reward": 1,
+      "num_frames_used": 1,
+      "inference_time_s": 0.11
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772108871.h5",
+      "traj_key": "traj_0014",
+      "env_success_last": true,
+      "num_steps": 1,
+      "p_yes": 0.592679500579834,
+      "reward": 0,
+      "num_frames_used": 1,
+      "inference_time_s": 0.11
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772108871.h5",
+      "traj_key": "traj_0015",
+      "env_success_last": true,
+      "num_steps": 5,
+      "p_yes": 0.754928469657898,
+      "reward": 0,
+      "num_frames_used": 5,
+      "inference_time_s": 0.12
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772108871.h5",
+      "traj_key": "traj_0016",
+      "env_success_last": true,
+      "num_steps": 1,
+      "p_yes": 0.6791872978210449,
+      "reward": 0,
+      "num_frames_used": 1,
+      "inference_time_s": 0.11
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772108871.h5",
+      "traj_key": "traj_0017",
+      "env_success_last": true,
+      "num_steps": 1,
+      "p_yes": 0.6791864037513733,
+      "reward": 0,
+      "num_frames_used": 1,
+      "inference_time_s": 0.11
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772108871.h5",
+      "traj_key": "traj_0018",
+      "env_success_last": true,
+      "num_steps": 1,
+      "p_yes": 0.651364803314209,
+      "reward": 0,
+      "num_frames_used": 1,
+      "inference_time_s": 0.08
+    },
+    {
+      "h5_file": "LiftPegUpright-v1_real_1772108871.h5",
+      "traj_key": "traj_0019",
+      "env_success_last": true,
+      "num_steps": 1,
+      "p_yes": 0.7310670018196106,
+      "reward": 0,
+      "num_frames_used": 1,
+      "inference_time_s": 0.07
+    }
+  ]
+}

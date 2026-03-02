@@ -197,7 +197,8 @@ class wm_args_maniskill(wm_args):
 
     # ---- 序列长度 ----
     num_frames: int = 5    # 预测帧数 (同 DROID)
-    num_history: int = 4   # 历史帧数 (DROID=6, 降至4节省显存)
+    # VLAW MODIFICATION: 对齐官方 DROID 配置 (history_idx=[0,0,-12,-9,-6,-3] 需要 6 帧)
+    num_history: int = 6   # 历史帧数 — 对齐官方 Ctrl-World / DROID
 
     # ---- 动作 ----
     # VLAW MODIFICATION: ManiSkill 使用 delta pose (增量), 7D

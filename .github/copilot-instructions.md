@@ -48,6 +48,7 @@ scripts/                 ← 辅助脚本
 
 ## 协作约定
 - 每个模块完成后，更新 `.github/vlaw-status.md` 中对应的状态
+- **每次 Coordinator 工作结束前**，派遣 Progress-Agent 同步进度到 `.github/` 下所有追踪文件
 - checkpoint 保存路径: `checkpoints/vlaw/{module_name}/`
 - 数据保存路径: `data/vlaw/{data_type}/`
 - 代码修改前先阅读已有模块的接口定义

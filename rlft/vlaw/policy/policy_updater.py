@@ -79,6 +79,26 @@ class PolicyUpdaterConfig:
     visual_feature_dim: int = 256
     """PlainConv 视觉编码器输出维度"""
 
+    state_dim: int = 25
+    """低维 state 维度（如 LiftPegUpright 为 25）"""
+
+    # 视觉观测
+    use_visual_obs: bool = True
+    """True=视觉模式（RGB+state），False=仅 state 模式"""
+
+    image_key: str = "rgb_base"
+    """HDF5 中的 RGB 数据 key"""
+
+    # UNet 架构超参（需与 checkpoint 一致）
+    unet_down_dims: tuple[int, ...] = (64, 128, 256)
+    """UNet 各层 channel 维度"""
+
+    unet_step_embed_dim: int = 64
+    """UNet timestep embedding 维度"""
+
+    unet_n_groups: int = 8
+    """UNet GroupNorm 分组数"""
+
     # 调试
     dry_run: bool = False
     """True: 用随机数据验证前向传播，不加载真实 checkpoint 和数据"""
@@ -122,6 +142,8 @@ class VLAWSuccessDataset(Dataset):
         source_tag: str = "real",
         weight: float = 1.0,
         filter_by_vlm: bool = True,
+        image_key: str = "rgb_base",
+        use_visual_obs: bool = True,
     ) -> None:
         self.hdf5_path = Path(hdf5_path)
         self.obs_horizon = obs_horizon
@@ -129,6 +151,8 @@ class VLAWSuccessDataset(Dataset):
         self.source_tag = source_tag
         self.weight = weight
         self.filter_by_vlm = filter_by_vlm
+        self.image_key = image_key
+        self.use_visual_obs = use_visual_obs
 
         # 预扫描 HDF5：收集所有成功轨迹的样本索引
         self._samples: list[tuple[str, int]] = []  # (traj_key, start_frame_idx)
@@ -167,6 +191,8 @@ class VLAWSuccessDataset(Dataset):
                     continue
                 if "state" not in grp or "actions" not in grp:
                     continue
+                if self.use_visual_obs and self.image_key not in grp:
+                    continue
 
                 T = grp["state"].shape[0]
                 if T < min_len:
@@ -201,6 +227,7 @@ class VLAWSuccessDataset(Dataset):
                 "actions": Tensor(action_horizon, action_dim) — 动作序列
                 "weight":  float — 样本权重
                 "source":  str   — "real" 或 "synthetic"
+                "rgb":     Tensor(obs_horizon, 3, 192, 192) — 视觉观测（仅 use_visual_obs=True）
         """
         traj_key, start = self._samples[idx]
 
@@ -212,15 +239,29 @@ class VLAWSuccessDataset(Dataset):
             state = np.asarray(grp["state"][start:obs_end], dtype=np.float32)
             actions = np.asarray(grp["actions"][obs_end:act_end], dtype=np.float32)
 
+            # 视觉观测：(obs_horizon, H, W, C) uint8 → (obs_horizon, C, H, W) float32
+            rgb_np: Optional[np.ndarray] = None
+            if self.use_visual_obs and self.image_key in grp:
+                rgb_np = np.asarray(
+                    grp[self.image_key][start:obs_end], dtype=np.float32
+                )  # (T, H, W, C)
+
         obs_tensor = torch.from_numpy(state)        # (obs_horizon, state_dim)
         act_tensor = torch.from_numpy(actions)      # (action_horizon, action_dim)
 
-        return {
+        result = {
             "obs": obs_tensor,
             "actions": act_tensor,
             "weight": float(self.weight),
             "source": self.source_tag,
         }
+
+        if rgb_np is not None:
+            # NHWC → NCHW, 归一化到 [0, 1]
+            rgb_tensor = torch.from_numpy(rgb_np).permute(0, 3, 1, 2) / 255.0
+            result["rgb"] = rgb_tensor  # (obs_horizon, C, H, W)
+
+        return result
 
     @property
     def state_dim(self) -> int:
@@ -237,12 +278,16 @@ class VLAWSuccessDataset(Dataset):
 
 
 def _collate_fn(batch: list[dict]) -> dict:
-    """自定义 collate，处理 source 字符串字段."""
+    """自定义 collate，处理 source 字符串字段和可选的 rgb."""
     obs = torch.stack([b["obs"] for b in batch])
     actions = torch.stack([b["actions"] for b in batch])
     weights = torch.tensor([b["weight"] for b in batch], dtype=torch.float32)
     sources = [b["source"] for b in batch]
-    return {"obs": obs, "actions": actions, "weights": weights, "sources": sources}
+    result = {"obs": obs, "actions": actions, "weights": weights, "sources": sources}
+    if "rgb" in batch[0]:
+        rgb = torch.stack([b["rgb"] for b in batch])
+        result["rgb"] = rgb  # (B, obs_horizon, C, H, W)
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -271,39 +316,70 @@ class VLAWPolicyUpdater:
     def load_policy(self) -> nn.Module:
         """加载 ShortCut Flow checkpoint.
 
+        在 use_visual_obs=True 时：
+          - 构建 PlainConv 并从 ckpt["visual_encoder"] 加载权重
+          - global_cond_dim = obs_horizon * (visual_feature_dim + state_dim)
+          - velocity_net 从 ckpt["agent"] strict=False 加载（global_cond_dim
+            变化导致的 size mismatch 会自动跳过）
+
         Returns:
             加载好的 ShortCutFlowAgent（位于 self.device）
         """
         from rlft.algorithms.il.shortcut_flow import ShortCutFlowAgent
-        from rlft.networks import ShortCutVelocityUNet1D
+        from rlft.networks import PlainConv, ShortCutVelocityUNet1D
 
-        ckpt_path = Path(self.config.checkpoint_path)
+        cfg = self.config
+        ckpt_path = Path(cfg.checkpoint_path)
         if not ckpt_path.exists():
             raise FileNotFoundError(f"Checkpoint 不存在: {ckpt_path}")
 
         print(f"[VLAW-P5.1] 加载 checkpoint: {ckpt_path}")
         ckpt = torch.load(str(ckpt_path), map_location=self.device)
 
-        # 支持常见 checkpoint 格式
-        if "model_state_dict" in ckpt:
-            state_dict = ckpt["model_state_dict"]
-            cfg_dict: dict = ckpt.get("config", {})
-        elif "state_dict" in ckpt:
-            state_dict = ckpt["state_dict"]
-            cfg_dict = ckpt.get("config", {})
-        else:
-            state_dict = ckpt
-            cfg_dict = {}
+        # 支持 canonical checkpoint 格式（build_checkpoint 产出）
+        agent_sd = ckpt.get("agent") or ckpt.get("model_state_dict") or ckpt.get("state_dict") or ckpt
+        cfg_dict: dict = ckpt.get("config", {})
 
-        # 从 checkpoint config 或默认值构建网络
+        # 从 checkpoint config 或默认值推断维度
         action_dim: int = cfg_dict.get("action_dim", 7)
-        obs_dim: int = cfg_dict.get("obs_dim", self.config.visual_feature_dim)
-        pred_horizon: int = cfg_dict.get("pred_horizon", self.config.action_horizon)
-        obs_horizon: int = cfg_dict.get("obs_horizon", self.config.obs_horizon)
+        pred_horizon: int = cfg_dict.get("pred_horizon", cfg.action_horizon)
+        obs_horizon: int = cfg_dict.get("obs_horizon", cfg.obs_horizon)
 
+        # ---------- 视觉编码器 ----------
+        if cfg.use_visual_obs:
+            global_cond_dim = obs_horizon * (cfg.visual_feature_dim + cfg.state_dim)
+
+            # 创建 PlainConv 并加载权重
+            visual_encoder = PlainConv(
+                in_channels=3,
+                out_dim=cfg.visual_feature_dim,
+                pool_feature_map=True,  # 与 train_maniskill 一致
+            ).to(self.device)
+
+            ve_sd = ckpt.get("visual_encoder")
+            if ve_sd is not None:
+                visual_encoder.load_state_dict(ve_sd, strict=True)
+                print(f"[VLAW-P5.1] visual_encoder 权重已从 checkpoint 加载")
+            else:
+                print("[VLAW-P5.1] 警告: checkpoint 无 visual_encoder, 使用随机初始化")
+
+            visual_encoder.eval()  # 冻结 BN/Dropout
+            for p in visual_encoder.parameters():
+                p.requires_grad = False
+            self.visual_encoder: Optional[nn.Module] = visual_encoder
+        else:
+            global_cond_dim = obs_horizon * cfg.state_dim
+            self.visual_encoder = None
+
+        print(f"[VLAW-P5.1] global_cond_dim={global_cond_dim}")
+
+        # ---------- velocity net（随机初始化新维度） ----------
         velocity_net = ShortCutVelocityUNet1D(
             input_dim=action_dim,
-            global_cond_dim=obs_horizon * obs_dim,
+            global_cond_dim=global_cond_dim,
+            diffusion_step_embed_dim=cfg.unet_step_embed_dim,
+            down_dims=tuple(cfg.unet_down_dims),
+            n_groups=cfg.unet_n_groups,
         )
         agent = ShortCutFlowAgent(
             velocity_net=velocity_net,
@@ -312,9 +388,20 @@ class VLAWPolicyUpdater:
             pred_horizon=pred_horizon,
             device=str(self.device),
         )
-        agent.load_state_dict(state_dict, strict=False)
+
+        # strict=False: global_cond_dim 变化导致的首层 Linear size mismatch 会被跳过
+        missing, unexpected = agent.load_state_dict(agent_sd, strict=False)
+        if missing:
+            print(f"[VLAW-P5.1] 加载 agent 时缺失 keys ({len(missing)}): {missing[:5]}...")
+        if unexpected:
+            print(f"[VLAW-P5.1] 加载 agent 时多余 keys ({len(unexpected)}): {unexpected[:5]}...")
+
         agent = agent.to(self.device)
-        print(f"[VLAW-P5.1] 模型加载完成 (action_dim={action_dim}, obs_dim={obs_dim})")
+        print(
+            f"[VLAW-P5.1] 模型加载完成 "
+            f"(action_dim={action_dim}, global_cond_dim={global_cond_dim}, "
+            f"visual={'ON' if cfg.use_visual_obs else 'OFF'})"
+        )
         return agent
 
     # ------------------------------------------------------------------
@@ -323,43 +410,59 @@ class VLAWPolicyUpdater:
 
     def create_mixed_dataloader(
         self,
-        real_success_dir: str,
-        syn_success_dir: str,
+        real_success_dirs: str | list[str],
+        syn_success_dirs: str | list[str] = "",
+        demo_dirs: str | list[str] | None = None,
     ) -> DataLoader:
-        """按 data_mix_ratio 混合真实与合成成功数据集.
+        """按 data_mix_ratio 混合真实、合成与演示成功数据集.
 
         Args:
-            real_success_dir: 包含 D_real+ HDF5 文件的目录
-            syn_success_dir:  包含 D_syn+ HDF5 文件的目录
+            real_success_dirs: D_real+ HDF5 目录（str 或 list[str]）
+            syn_success_dirs:  D_syn+ HDF5 目录（str 或 list[str]），可为空
+            demo_dirs: D_demo 目录（高质量，weight=1.0）；None 或空则跳过
 
         Returns:
             混合 DataLoader（无限循环，shuffle=True）
         """
         cfg = self.config
 
-        real_datasets = self._load_hdf5_dir(
-            real_success_dir,
-            source_tag="real",
-            weight=cfg.data_mix_ratio,
-        )
-        syn_datasets = self._load_hdf5_dir(
-            syn_success_dir,
-            source_tag="synthetic",
-            weight=1.0 - cfg.data_mix_ratio,
-        )
+        # 统一转 list
+        if isinstance(real_success_dirs, str):
+            real_success_dirs = [real_success_dirs] if real_success_dirs else []
+        if isinstance(syn_success_dirs, str):
+            syn_success_dirs = [syn_success_dirs] if syn_success_dirs else []
+        if demo_dirs is None:
+            demo_dirs = []
+        elif isinstance(demo_dirs, str):
+            demo_dirs = [demo_dirs] if demo_dirs else []
 
-        all_datasets = real_datasets + syn_datasets
+        real_datasets: list[VLAWSuccessDataset] = []
+        for d in real_success_dirs:
+            real_datasets.extend(self._load_hdf5_dir(d, source_tag="real", weight=1.0))
+
+        syn_datasets: list[VLAWSuccessDataset] = []
+        for d in syn_success_dirs:
+            syn_datasets.extend(self._load_hdf5_dir(d, source_tag="synthetic", weight=1.0))
+
+        demo_datasets: list[VLAWSuccessDataset] = []
+        for d in demo_dirs:
+            demo_datasets.extend(self._load_hdf5_dir(d, source_tag="demo", weight=1.0))
+
+        all_datasets = real_datasets + syn_datasets + demo_datasets
         if not all_datasets:
             raise RuntimeError(
-                f"未找到任何数据集！real_dir={real_success_dir}, syn_dir={syn_success_dir}"
+                f"未找到任何数据集！real_dirs={real_success_dirs}, "
+                f"syn_dirs={syn_success_dirs}, demo_dirs={demo_dirs}"
             )
 
         combined = ConcatDataset(all_datasets)
         n_samples = len(combined)
+        n_real = sum(len(d) for d in real_datasets)
+        n_syn = sum(len(d) for d in syn_datasets)
+        n_demo = sum(len(d) for d in demo_datasets)
         print(
             f"[VLAW-P5.1] 混合数据集: {n_samples} 样本 "
-            f"(real={sum(len(d) for d in real_datasets)}, "
-            f"syn={sum(len(d) for d in syn_datasets)})"
+            f"(real={n_real}, syn={n_syn}, demo={n_demo})"
         )
 
         # 当样本数不足 batch_size 时自动降级
@@ -404,6 +507,8 @@ class VLAWPolicyUpdater:
                 action_horizon=self.config.action_horizon,
                 source_tag=source_tag,
                 weight=weight,
+                image_key=self.config.image_key,
+                use_visual_obs=self.config.use_visual_obs,
             )
             if len(ds) > 0:
                 datasets.append(ds)
@@ -436,14 +541,16 @@ class VLAWPolicyUpdater:
 
     def update(
         self,
-        real_success_dir: str,
-        syn_success_dir: str,
+        real_success_dirs: str | list[str],
+        syn_success_dirs: str | list[str] = "",
+        demo_dirs: str | list[str] | None = None,
     ) -> dict:
         """执行策略更新（Weighted Filtered BC）.
 
         Args:
-            real_success_dir: D_real+ 数据目录
-            syn_success_dir:  D_syn+ 数据目录
+            real_success_dirs: D_real+ 数据目录（str 或 list[str]）
+            syn_success_dirs:  D_syn+ 数据目录（str 或 list[str]），可为空
+            demo_dirs: D_demo 目录（高质量演示数据）；None 或空则跳过
 
         Returns:
             dict: {
@@ -481,6 +588,7 @@ class VLAWPolicyUpdater:
         policy.train()
 
         # ---- 优化器 & schedule ----
+        # 只优化 velocity_net 参数；visual_encoder 已冻结
         optimizer = torch.optim.AdamW(
             policy.velocity_net.parameters(),
             lr=cfg.learning_rate,
@@ -492,7 +600,9 @@ class VLAWPolicyUpdater:
         if cfg.dry_run:
             dataloader = self._build_dry_run_dataloader()
         else:
-            dataloader = self.create_mixed_dataloader(real_success_dir, syn_success_dir)
+            dataloader = self.create_mixed_dataloader(
+                real_success_dirs, syn_success_dirs, demo_dirs
+            )
 
         data_iter = iter(dataloader)
 
@@ -508,12 +618,24 @@ class VLAWPolicyUpdater:
                 data_iter = iter(dataloader)
                 batch = next(data_iter)
 
-            obs = batch["obs"].to(self.device)          # (B, obs_horizon, state_dim)
-            actions = batch["actions"].to(self.device)  # (B, action_horizon, action_dim)
-            weights = batch["weights"].to(self.device)  # (B,)
+            state = batch["obs"].to(self.device)        # (B, obs_horizon, state_dim)
+            actions = batch["actions"].to(self.device)    # (B, action_horizon, action_dim)
+            weights = batch["weights"].to(self.device)    # (B,)
+
+            # ---------- 构建 obs_cond ----------
+            if cfg.use_visual_obs and "rgb" in batch:
+                rgb = batch["rgb"].to(self.device)       # (B, obs_horizon, C, H, W)
+                B, T = rgb.shape[:2]
+                rgb_flat = rgb.reshape(B * T, *rgb.shape[2:])  # (B*T, C, H, W)
+                with torch.no_grad():
+                    visual_feat = self.visual_encoder(rgb_flat)  # (B*T, visual_feature_dim)
+                visual_feat = visual_feat.view(B, T, -1)        # (B, T, visual_feature_dim)
+                obs_features = torch.cat([visual_feat, state], dim=-1)  # (B, T, V+S)
+            else:
+                obs_features = state  # (B, obs_horizon, state_dim)
 
             optimizer.zero_grad()
-            loss_dict = policy.compute_weighted_loss(obs, actions, weights)
+            loss_dict = policy.compute_weighted_loss(obs_features, actions, weights)
             loss = loss_dict["loss"]
             loss.backward()
 
@@ -577,31 +699,62 @@ class VLAWPolicyUpdater:
         step: int,
         path: str,
     ) -> None:
-        """保存 checkpoint."""
-        torch.save(
-            {
-                "model_state_dict": policy.state_dict(),
-                "optimizer_state_dict": optimizer.state_dict(),
-                "step": step,
-                "config": vars(self.config),
-            },
-            path,
-        )
+        """保存 checkpoint（canonical 格式，含 visual_encoder + ema_agent）."""
+        agent_sd = policy.state_dict()
+        ckpt: dict = {
+            "agent": agent_sd,
+            "optimizer": optimizer.state_dict(),
+            "step": step,
+            "config": vars(self.config),
+        }
+
+        # 提取 EMA 权重（与 base ckpt 格式一致）
+        # velocity_net_ema.* → velocity_net.* 以匹配 load_shortcut_flow_policy 期望
+        ema_agent = {
+            k.replace("velocity_net_ema.", "velocity_net."): v
+            for k, v in agent_sd.items()
+            if k.startswith("velocity_net_ema.")
+        }
+        if ema_agent:
+            ckpt["ema_agent"] = ema_agent
+            print(f"[VLAW-P5.1] EMA agent 已提取 ({len(ema_agent)} keys)")
+
+        if self.visual_encoder is not None:
+            ckpt["visual_encoder"] = self.visual_encoder.state_dict()
+        torch.save(ckpt, path)
         print(f"[VLAW-P5.1] Checkpoint 已保存: {path} (step={step})")
 
     def _build_dry_run_policy(self) -> nn.Module:
         """dry_run 模式：用随机初始化的策略（跳过 checkpoint 加载）."""
         from rlft.algorithms.il.shortcut_flow import ShortCutFlowAgent
-        from rlft.networks import ShortCutVelocityUNet1D
+        from rlft.networks import PlainConv, ShortCutVelocityUNet1D
 
+        cfg = self.config
         action_dim = 7
-        obs_dim = self.config.visual_feature_dim
-        obs_horizon = self.config.obs_horizon
-        pred_horizon = self.config.action_horizon
+        obs_horizon = cfg.obs_horizon
+        pred_horizon = cfg.action_horizon
+
+        if cfg.use_visual_obs:
+            global_cond_dim = obs_horizon * (cfg.visual_feature_dim + cfg.state_dim)
+            visual_encoder = PlainConv(
+                in_channels=3,
+                out_dim=cfg.visual_feature_dim,
+                pool_feature_map=True,
+            ).to(self.device)
+            visual_encoder.eval()
+            for p in visual_encoder.parameters():
+                p.requires_grad = False
+            self.visual_encoder = visual_encoder
+        else:
+            global_cond_dim = obs_horizon * cfg.state_dim
+            self.visual_encoder = None
 
         velocity_net = ShortCutVelocityUNet1D(
             input_dim=action_dim,
-            global_cond_dim=obs_horizon * obs_dim,
+            global_cond_dim=global_cond_dim,
+            diffusion_step_embed_dim=cfg.unet_step_embed_dim,
+            down_dims=tuple(cfg.unet_down_dims),
+            n_groups=cfg.unet_n_groups,
         )
         agent = ShortCutFlowAgent(
             velocity_net=velocity_net,
@@ -610,37 +763,48 @@ class VLAWPolicyUpdater:
             pred_horizon=pred_horizon,
             device=str(self.device),
         ).to(self.device)
-        print("[VLAW-P5.1] dry_run: 使用随机初始化策略")
+        print(
+            f"[VLAW-P5.1] dry_run: 随机初始化策略 "
+            f"(global_cond_dim={global_cond_dim}, visual={'ON' if cfg.use_visual_obs else 'OFF'})"
+        )
         return agent
 
     def _build_dry_run_dataloader(self) -> DataLoader:
         """dry_run 模式：用随机 Tensor 数据集."""
+        cfg = self.config
         action_dim = 7
-        obs_dim = self.config.visual_feature_dim
-        obs_horizon = self.config.obs_horizon
-        action_horizon = self.config.action_horizon
-        n_samples = self.config.batch_size * 20
+        state_dim = cfg.state_dim
+        obs_horizon = cfg.obs_horizon
+        action_horizon = cfg.action_horizon
+        use_visual = cfg.use_visual_obs
+        n_samples = cfg.batch_size * 20
 
         class _RandDataset(Dataset):
             def __len__(self_) -> int:
                 return n_samples
 
             def __getitem__(self_, idx: int) -> dict:
-                return {
-                    "obs": torch.randn(obs_horizon, obs_dim),
+                sample: dict = {
+                    "obs": torch.randn(obs_horizon, state_dim),
                     "actions": torch.randn(action_horizon, action_dim),
                     "weight": 1.0,
                     "source": "dry_run",
                 }
+                if use_visual:
+                    sample["rgb"] = torch.rand(obs_horizon, 3, 192, 192)
+                return sample
 
         loader = DataLoader(
             _RandDataset(),
-            batch_size=self.config.batch_size,
+            batch_size=cfg.batch_size,
             shuffle=True,
             drop_last=True,
             collate_fn=_collate_fn,
         )
-        print(f"[VLAW-P5.1] dry_run: 随机数据集，{n_samples} 样本")
+        print(
+            f"[VLAW-P5.1] dry_run: 随机数据集，{n_samples} 样本 "
+            f"(visual={'ON' if use_visual else 'OFF'})"
+        )
         return loader
 
 
@@ -654,10 +818,17 @@ if __name__ == "__main__":
     @dataclass
     class _CLI:
         config: PolicyUpdaterConfig = field(default_factory=PolicyUpdaterConfig)
-        real_success_dir: str = "data/vlaw/success/real"
-        syn_success_dir: str = "data/vlaw/success/synthetic"
+        real_success_dirs: list[str] = field(
+            default_factory=lambda: ["data/vlaw/success/real"]
+        )
+        syn_success_dirs: list[str] = field(
+            default_factory=lambda: []
+        )
+        demo_dirs: list[str] = field(
+            default_factory=lambda: []
+        )
 
     args = tyro.cli(_CLI)
     updater = VLAWPolicyUpdater(args.config)
-    result = updater.update(args.real_success_dir, args.syn_success_dir)
+    result = updater.update(args.real_success_dirs, args.syn_success_dirs, args.demo_dirs)
     print(f"[VLAW-P5.1] 完成: {result}")

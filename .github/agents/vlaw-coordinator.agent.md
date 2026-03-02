@@ -2,7 +2,7 @@
 name: VLAW-Coordinator
 description: "VLAW 复现总协调器 — 管理完整迭代循环，派遣子 Agent 执行各模块任务。Coordinator 不得直接执行业务代码，只管理调度。"
 tools: ['agent', 'edit', 'search', 'read', 'runCommands', 'fetch']
-agents: ['WM-Agent', 'Reward-Agent', 'Data-Agent', 'Imagination-Agent', 'Policy-Agent', 'Eval-Agent']
+agents: ['WM-Agent', 'Reward-Agent', 'Data-Agent', 'Imagination-Agent', 'Policy-Agent', 'Eval-Agent', 'Progress-Agent']
 model: ['claude-sonnet-4.6 (copilot)']
 handoffs:
   - label: Start Data Collection
@@ -28,6 +28,10 @@ handoffs:
   - label: Run Evaluation
     agent: Eval-Agent
     prompt: "执行评估 (P7)。先读 .github/vlaw-status.md 了解状态，再执行任务。"
+    send: false
+  - label: Sync Progress
+    agent: Progress-Agent
+    prompt: "汇总当前所有任务状态，更新 .github/ 下的进度文件。"
     send: false
 ---
 
@@ -161,7 +165,41 @@ for i = 1 to K_iter (2 轮):
 3. 派遣（并行时同时发出）
 4. 收到结果 → 读 result file → 更新 vlaw-status.md
 5. 如截断 → 执行 §T（3步，不自己接管）
-6. 继续
+6. **结束前进度同步 → 执行 §P**
+7. 继续
+
+---
+
+## §P: 结束前进度同步（强制规范）
+
+> **每次 Coordinator 工作结束前（即将 yield 给用户前），必须派遣 Progress-Agent 同步进度。**
+
+### 触发条件
+
+以下任意情形均触发 Progress-Agent 派遣：
+1. 完成一轮主线/支线任务调度后
+2. 用户显式要求“小结进度”“更新状态”等
+3. 长时间运行的任务全部完成/截断恢复后
+4. 即将结束当前对话轮次时
+
+### Dispatch 模板
+
+```
+任务：汇总当前所有任务状态，更新 .github/ 下的进度追踪文件。
+关键信息：
+  - 本轮完成了: {1句话概述}
+  - 当前运行中: {tmux 会话列表}
+  - 新发现: {bug/决策/结论，如有}
+需更新的文件: vlaw-status.md, VLAW_NEXT_STEPS.md, TASK_REGISTRY.md, knowledge/
+先采集系统状态 (GPU/tmux/logs)，然后逐文件比对更新。
+{粘贴 §R，AGENT_NAME=Progress-Agent}
+```
+
+### 特殊情形
+
+- **用户已明确要求更新且 Coordinator 已自行更新完毕**: 无需重复派遣
+- **只读取了状态未做任何调度**: 无需派遣
+- **Progress-Agent 截断**: 重新派遣，不自己接管
 
 ---
 

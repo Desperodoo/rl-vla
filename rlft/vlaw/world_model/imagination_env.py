@@ -41,6 +41,7 @@ Env 版 (P4.3, 本模块):
 
 from __future__ import annotations
 
+import gc
 import json
 import time
 import traceback
@@ -60,6 +61,41 @@ from rlft.vlaw.data.collector import extract_agent_state
 
 # 复用 imagination.py 中的数据容器和工具函数
 from rlft.vlaw.utils.imagination import SyntheticTrajectory, _load_initial_frames
+
+
+# ---------------------------------------------------------------------------
+# History 索引工具函数（对齐官方 Ctrl-World 稀疏采样方式）
+# ---------------------------------------------------------------------------
+
+
+def get_history_indices(total_len: int, history_idx: list[int] | None = None) -> list[int]:
+    """返回用于构建 WM 历史输入的稀疏采样帧索引 (绝对索引).
+
+    对齐官方 Ctrl-World 做法 (DROID 数据集):
+        history_idx = [0, 0, -12, -9, -6, -3]
+        含义: 前 2 个位置始终 = 初始帧 (锚定)，
+              后 4 个 = 相对于当前帧末尾的偏移，
+              负索引越界时 clamp 到 0（退化为初始帧）。
+
+    Args:
+        total_len:   latent_history 列表当前长度
+        history_idx: 稀疏采样索引模板 (默认官方 DROID 配置)
+
+    Returns:
+        长度 == len(history_idx) 的绝对索引列表，每个值 ∈ [0, total_len)
+    """
+    if history_idx is None:
+        history_idx = [0, 0, -12, -9, -6, -3]
+    indices: list[int] = []
+    for idx in history_idx:
+        if idx >= 0:
+            # 非负索引：直接使用 (通常为 0 = 初始帧锚定)
+            abs_idx = min(idx, total_len - 1)
+        else:
+            # 负索引：相对于末尾的偏移，clamp 到 0
+            abs_idx = max(0, total_len + idx)
+        indices.append(abs_idx)
+    return indices
 
 
 # ---------------------------------------------------------------------------
@@ -172,6 +208,8 @@ class ImaginationEnvEngine:
         self.device = torch.device(
             f"cuda:{config.gpu_id}" if torch.cuda.is_available() else "cpu"
         )
+        # 缓存 env 实例，避免 SAPIEN Vulkan 资源泄漏（反复创建/销毁会耗尽 GPU 渲染资源）
+        self._env_cache: dict[str, Any] = {}  # key: f"{task_id}_{num_envs}"
         print(
             f"[VLAW-P4.3] ImaginationEnvEngine 初始化完成, "
             f"device={self.device}, num_envs={config.num_envs}"
@@ -217,6 +255,30 @@ class ImaginationEnvEngine:
             )
 
         return env
+
+    def _get_or_create_env(self, task_id: str, num_envs: int = 1):
+        """获取缓存的 env 或创建新的（解决 SAPIEN Vulkan 资源泄漏问题）.
+
+        SAPIEN 的 RenderSystem 在反复创建/销毁后会耗尽 GPU 渲染资源，
+        导致 'Failed to find a supported physical device' 错误。
+        通过缓存并复用同一 env 实例来避免此问题。
+        """
+        cache_key = f"{task_id}_{num_envs}"
+        if cache_key not in self._env_cache:
+            env = self._make_env(task_id, num_envs=num_envs)
+            self._env_cache[cache_key] = env
+            print(f"[VLAW-P4.3] 创建并缓存 env: {cache_key}")
+        return self._env_cache[cache_key]
+
+    def close(self) -> None:
+        """关闭所有缓存的 env 实例."""
+        for key, env in self._env_cache.items():
+            try:
+                env.close()
+                print(f"[VLAW-P4.3] 关闭 env: {key}")
+            except Exception as e:
+                print(f"[VLAW-P4.3] ⚠️  关闭 env {key} 失败: {e}")
+        self._env_cache.clear()
 
     # ------------------------------------------------------------------
     # 单条轨迹生成（公开接口）
@@ -268,29 +330,26 @@ class ImaginationEnvEngine:
         task_id: str,
         initial_env_state: Optional[dict] = None,
     ) -> SyntheticTrajectory:
-        """单条轨迹生成核心实现（创建独立 env，用完即关）."""
+        """单条轨迹生成核心实现（复用缓存 env，仅 reset）."""
         cfg = self.config
         num_interact = cfg.num_interact
         act_steps = cfg.act_steps
         obs_horizon = cfg.obs_horizon
 
-        # ---- 创建单 env ----
-        env = self._make_env(task_id, num_envs=1)
-        try:
-            return self._run_rollout_in_env(
-                env=env,
-                env_idx=0,
-                initial_latent=initial_latent,
-                initial_state=initial_state,
-                instruction=instruction,
-                task_id=task_id,
-                initial_env_state=initial_env_state,
-                num_interact=num_interact,
-                act_steps=act_steps,
-                obs_horizon=obs_horizon,
-            )
-        finally:
-            env.close()
+        # ---- 复用缓存的 env（避免 SAPIEN Vulkan 资源泄漏）----
+        env = self._get_or_create_env(task_id, num_envs=1)
+        return self._run_rollout_in_env(
+            env=env,
+            env_idx=0,
+            initial_latent=initial_latent,
+            initial_state=initial_state,
+            instruction=instruction,
+            task_id=task_id,
+            initial_env_state=initial_env_state,
+            num_interact=num_interact,
+            act_steps=act_steps,
+            obs_horizon=obs_horizon,
+        )
 
     # ------------------------------------------------------------------
     # 核心 rollout 实现（给定已创建的 env）
@@ -350,11 +409,15 @@ class ImaginationEnvEngine:
         except Exception:
             state_t = initial_state.copy()
 
-        # ---- 初始化 latent buffer ----
+        # ---- 初始化 latent history (列表式, 对齐官方 Ctrl-World) ----
         initial_latent = initial_latent.to(self.device)
-        window_len = num_history + act_steps
-        lat_buf = initial_latent.unsqueeze(0).expand(window_len, -1, -1, -1).clone()
-        # (window_len, 4, 48, 24)
+        # 列表式 buffer: 所有生成帧按时序追加, idx=0 永远是真实初始帧
+        latent_history: list[torch.Tensor] = []
+        # 用真实首帧填充 num_history*4 个位置 (官方做法: his_cond 初始填充)
+        for _ in range(num_history * 4):
+            latent_history.append(initial_latent.clone())
+        # 同时维护 action_history 用于 WM 输入中的历史动作
+        action_history: list[np.ndarray] = []
 
         # ---- obs 历史 ----
         obs_feat_dim = lat_ch * lat_h * lat_w  # 4608
@@ -368,22 +431,28 @@ class ImaginationEnvEngine:
         all_states: list[np.ndarray] = []
         env_success = False
 
+        # Reset policy obs history for new trajectory
+        if hasattr(self.policy, 'reset_history'):
+            self.policy.reset_history()
+
         for k in range(num_interact):
             if env_success:
                 break
 
             # ---- Step 1-2: 构建策略输入 ----
+            # Always use latent features for obs_history (consistent shape).
+            # decoded_rgb is passed separately to policy via kwargs.
+            vis_feat = latent_history[-1].cpu().float().numpy().flatten()  # (4608,)
+
+            decoded_rgb = None
             if self.config.decode_for_policy:
                 try:
-                    cur_lat = lat_buf[-1].unsqueeze(0)  # (1, 4, 48, 24)
-                    rgb = self.wm_adapter.decode_latents(
+                    cur_lat = latent_history[-1].unsqueeze(0)  # (1, 4, 48, 24)
+                    decoded_rgb = self.wm_adapter.decode_latents(
                         cur_lat.float(), decode_chunk_size=1
                     )  # (1, H, W, 3) uint8
-                    vis_feat = rgb.flatten().astype(np.float32) / 255.0
                 except Exception:
-                    vis_feat = lat_buf[-1].cpu().float().numpy().flatten()
-            else:
-                vis_feat = lat_buf[-1].cpu().float().numpy().flatten()
+                    decoded_rgb = None
 
             obs_history.append(vis_feat)
             if len(obs_history) > obs_horizon:
@@ -396,16 +465,52 @@ class ImaginationEnvEngine:
 
             # ---- Step 3: 策略推理 → action_chunk ----
             try:
-                actions_np = self.policy.get_actions(obs_tensor)  # (1, action_dim)
+                raw_actions = self.policy.get_actions(
+                    obs_tensor, decoded_rgb=decoded_rgb, agent_state=state_t,
+                )
+            except TypeError:
+                # Policy doesn't support extra kwargs (e.g. old interface)
+                try:
+                    raw_actions = self.policy.get_actions(obs_tensor)
+                except Exception:
+                    raw_actions = np.zeros((1, 7), dtype=np.float32)
             except Exception:
-                actions_np = np.zeros((1, 7), dtype=np.float32)
+                raw_actions = np.zeros((1, 7), dtype=np.float32)
 
-            action_t = actions_np[0]  # (action_dim,)
-            action_chunk = np.tile(action_t[None, :], (act_steps, 1))  # (act_steps, 7)
+            # Build action_chunk: support both (act_steps, 7) and (1, 7) returns
+            if raw_actions.ndim == 2 and raw_actions.shape[0] >= act_steps:
+                action_chunk = raw_actions[:act_steps]  # (act_steps, 7)
+            elif raw_actions.ndim == 2 and raw_actions.shape[0] == 1:
+                action_chunk = np.tile(raw_actions, (act_steps, 1))
+            elif raw_actions.ndim == 1:
+                action_chunk = np.tile(raw_actions[None, :], (act_steps, 1))
+            else:
+                action_chunk = np.zeros((act_steps, 7), dtype=np.float32)
 
             # ---- Step 4: 世界模型 rollout ----
-            wm_input = lat_buf.clone()
-            hist_acts = np.zeros((num_history, action_t.shape[0]), dtype=np.float32)
+            # 稀疏采样历史帧 (对齐官方 history_idx = [0, 0, -12, -9, -6, -3])
+            total_len = len(latent_history)
+            sparse_offsets = [-12, -9, -6, -3]
+            hist_indices = [0, 0]  # 前2个: 第一帧锚定 (真实 VAE 编码)
+            for off in sparse_offsets:
+                idx = max(0, total_len + off)
+                hist_indices.append(idx)
+            his_latent = torch.stack(
+                [latent_history[i] for i in hist_indices], dim=0
+            )  # (num_history, 4, 48, 24)
+            # 拼接 history + 当前帧 padding 作为 WM 输入
+            cur_pad = latent_history[-1].unsqueeze(0).expand(act_steps, -1, -1, -1).clone()
+            wm_input = torch.cat([his_latent, cur_pad], dim=0)
+            # (num_history + act_steps, 4, 48, 24)
+            # 历史动作: 同样稀疏采样 + padding
+            act_dim = action_chunk.shape[1]
+            hist_acts_list = []
+            for i in hist_indices:
+                if i < len(action_history):
+                    hist_acts_list.append(action_history[i])
+                else:
+                    hist_acts_list.append(np.zeros(act_dim, dtype=np.float32))
+            hist_acts = np.stack(hist_acts_list, axis=0)  # (num_history, act_dim)
             full_acts = np.concatenate([hist_acts, action_chunk], axis=0)
 
             pred_latents = self.wm_adapter.rollout(
@@ -452,14 +557,11 @@ class ImaginationEnvEngine:
                     cur_state = state_t.copy()
                 state_seq.append(cur_state)
 
-            # ---- Step 6: 更新 history buffer ----
-            lat_buf = (
-                new_latents[-window_len:].clone()
-                if new_latents.shape[0] >= window_len
-                else torch.cat(
-                    [lat_buf[new_latents.shape[0] :], new_latents], dim=0
-                )
-            )
+            # ---- Step 6: 更新 history buffer (列表式追加) ----
+            # 将最后一帧预测追加到 latent_history (官方: his_cond.append(...))
+            latent_history.append(new_latents[-1].clone())
+            # 追加动作到 action_history (用最后一个动作代表本轮)
+            action_history.append(action_chunk[-1].copy())
 
             # ---- 收集 ----
             for step_i in range(act_steps):
@@ -527,9 +629,9 @@ class ImaginationEnvEngine:
                 f"n={len(indices)}, num_envs={batch_num_envs}"
             )
 
-            # 创建 num_envs 并行 env
+            # 复用缓存 env（关键修复：避免 SAPIEN Vulkan 资源泄漏）
             try:
-                env = self._make_env(tid, num_envs=batch_num_envs)
+                env = self._get_or_create_env(tid, num_envs=batch_num_envs)
             except Exception as e:
                 print(f"[VLAW-P4.3] ⚠️  创建 env 失败 ({tid}): {e}，退回单条模式")
                 env = None
@@ -552,10 +654,16 @@ class ImaginationEnvEngine:
                         f"[VLAW-P4.3] ⚠️  batch_rollout 失败 ({tid}): {e}，"
                         f"退回逐条单 env 模式"
                     )
-                    env.close()
+                    # 从缓存中移除故障 env 并关闭
+                    cache_key = f"{tid}_{batch_num_envs}"
+                    if cache_key in self._env_cache:
+                        try:
+                            self._env_cache[cache_key].close()
+                        except Exception:
+                            pass
+                        del self._env_cache[cache_key]
                     env = None
-                else:
-                    env.close()
+                # 注意：成功时不 close env，保留在缓存中供后续批次复用
 
             if env is None:
                 # 退回逐条 rollout_single
@@ -657,12 +765,13 @@ class ImaginationEnvEngine:
                     obs_history = per_env_obs_hist[ei]
 
                     # ---- Step 1-2: 视觉特征 ----
+                    decoded_rgb = None
                     if cfg.decode_for_policy:
                         try:
-                            rgb = self.wm_adapter.decode_latents(
+                            decoded_rgb = self.wm_adapter.decode_latents(
                                 lat_buf[-1].unsqueeze(0).float(), decode_chunk_size=1
                             )
-                            vis_feat = rgb.flatten().astype(np.float32) / 255.0
+                            vis_feat = decoded_rgb.flatten().astype(np.float32) / 255.0
                         except Exception:
                             vis_feat = lat_buf[-1].cpu().float().numpy().flatten()
                     else:
@@ -680,15 +789,31 @@ class ImaginationEnvEngine:
 
                     # ---- Step 3: 策略 ----
                     try:
-                        actions_np = self.policy.get_actions(obs_tensor)
+                        raw_actions = self.policy.get_actions(
+                            obs_tensor,
+                            decoded_rgb=decoded_rgb,
+                            agent_state=per_env_states[ei],
+                        )
+                    except TypeError:
+                        try:
+                            raw_actions = self.policy.get_actions(obs_tensor)
+                        except Exception:
+                            raw_actions = np.zeros((1, 7), dtype=np.float32)
                     except Exception:
-                        actions_np = np.zeros((1, 7), dtype=np.float32)
+                        raw_actions = np.zeros((1, 7), dtype=np.float32)
 
-                    action_t = actions_np[0]
-                    action_chunk = np.tile(action_t[None, :], (act_steps, 1))
+                    # Build action_chunk: support (act_steps, 7) and (1, 7)
+                    if raw_actions.ndim == 2 and raw_actions.shape[0] >= act_steps:
+                        action_chunk = raw_actions[:act_steps]
+                    elif raw_actions.ndim == 2 and raw_actions.shape[0] == 1:
+                        action_chunk = np.tile(raw_actions, (act_steps, 1))
+                    elif raw_actions.ndim == 1:
+                        action_chunk = np.tile(raw_actions[None, :], (act_steps, 1))
+                    else:
+                        action_chunk = np.zeros((act_steps, 7), dtype=np.float32)
 
                     # ---- Step 4: 世界模型 ----
-                    hist_acts = np.zeros((num_history, action_t.shape[0]), dtype=np.float32)
+                    hist_acts = np.zeros((num_history, action_chunk.shape[1]), dtype=np.float32)
                     full_acts = np.concatenate([hist_acts, action_chunk], axis=0)
                     pred_latents = self.wm_adapter.rollout(
                         obs_latents=lat_buf.clone(),
@@ -892,6 +1017,10 @@ class ImaginationEnvEngine:
                     f"[VLAW-P4.3]   batch {b+1}/{n_batches}: "
                     f"生成 {len(res)}/{e-s} 条"
                 )
+                # 定期清理 GPU 缓存（防止显存碑片化）
+                if (b + 1) % 5 == 0:
+                    gc.collect()
+                    torch.cuda.empty_cache()
 
             # ---- 保存 ----
             if task_trajs and not dry_run:
@@ -924,7 +1053,7 @@ class ImaginationEnvEngine:
 class _MockPolicy:
     """零动作 mock 策略."""
 
-    def get_actions(self, obs_features: torch.Tensor) -> np.ndarray:
+    def get_actions(self, obs_features: torch.Tensor, **kwargs) -> np.ndarray:
         B = obs_features.shape[0]
         return np.zeros((B, 7), dtype=np.float32)
 

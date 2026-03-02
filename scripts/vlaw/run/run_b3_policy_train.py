@@ -21,7 +21,7 @@ cfg = PolicyUpdaterConfig(
 )
 updater = VLAWPolicyUpdater(cfg)
 metrics = updater.update(
-    real_success_dir="data/vlaw/rollouts/iter1_highsuc/LiftPegUpright-v1",
-    syn_success_dir="",
+    real_success_dirs=["data/vlaw/rollouts/iter1_highsuc/LiftPegUpright-v1"],
+    syn_success_dirs=[],
 )
 print(f"\n[B3] DONE: {metrics}")

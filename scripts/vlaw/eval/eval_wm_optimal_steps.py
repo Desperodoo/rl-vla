@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""WM iter1 质量验证: 计算 PSNR/SSIM/LPIPS，对比 pretrained baseline.
+"""WM optimal-steps evaluation: PSNR/SSIM/LPIPS across 500/1000/1500/2000 checkpoints.
+
+Evaluates 4 checkpoints from ablation_optimal_steps/ to find the optimal training step.
 
 Usage:
-    CUDA_VISIBLE_DEVICES=0 conda run -n ctrl_world python scripts/eval_wm_iter1.py
+    CUDA_VISIBLE_DEVICES=0 conda run -n ctrl_world python scripts/vlaw/eval/eval_wm_optimal_steps.py
 """
 
 from __future__ import annotations
@@ -19,7 +21,6 @@ import numpy as np
 import torch
 
 # ---- Ctrl-World imports ----
-# VLAW MODIFICATION: fix path — script moved from scripts/ to scripts/vlaw/eval/
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "..", "ctrl_world"))
 from config import wm_args_maniskill
 from models.ctrl_world import CrtlWorld
@@ -47,29 +48,39 @@ class EvalConfig:
     rollout_h5: str = "data/vlaw/encoded/rollouts/iter1/LiftPegUpright-v1/LiftPegUpright-v1_real_1772017887.h5"
     stat_path: str = "data/vlaw/meta_info/maniskill/stat.json"
 
-    # ---- Checkpoints ----
-    pretrained_ckpt: str = "checkpoints/vlaw/world_model/pretrained/Ctrl-World/checkpoint-10000.pt"
-    iter1_ckpt: str = "checkpoints/vlaw/world_model/iter1/checkpoint-2000.pt"
+    # ---- Ablation checkpoints ----
+    ablation_dir: str = "checkpoints/vlaw/world_model/ablation_optimal_steps"
+    ablation_steps: list[int] = field(default_factory=lambda: [500, 1000, 1500, 2000])
 
     # ---- Model paths ----
     svd_model_path: str = "checkpoints/vlaw/world_model/pretrained/stable-video-diffusion-img2vid"
     clip_model_path: str = "checkpoints/vlaw/world_model/pretrained/clip-vit-base-patch32"
 
     # ---- Eval params ----
-    horizons: list[int] = field(default_factory=lambda: [5])
     num_frames_per_step: int = 5
     num_history: int = 4
     max_trajs: int = 20
-    vis_trajs: int = 3
     num_inference_steps: int = 50
     decode_chunk_size: int = 4
 
     # ---- Output ----
-    output_dir: str = "results/vlaw/wm_iter1_eval"
-    report_path: str = "results/vlaw/wm_iter1_eval_report.md"
+    output_dir: str = "results/vlaw/wm_optimal_steps_eval"
+    report_path: str = "results/vlaw/wm_optimal_steps_eval/report.md"
 
     # ---- Device ----
     device: str = "cuda:0"
+
+    # ---- Known baselines (from previous runs) ----
+    iter1_baseline_psnr: float = 23.40
+    iter1_baseline_ssim: float = 0.7913
+    iter1_baseline_lpips: float = 0.1200
+    pretrained_baseline_psnr: float = 23.39
+    pretrained_baseline_ssim: float = 0.8116
+    pretrained_baseline_lpips: float = 0.1148
+    # 4000-step ablation baselines (2000 step from that run)
+    ablation4k_2000_psnr: float = 24.11
+    ablation4k_2000_ssim: float = 0.8408
+    ablation4k_2000_lpips: float = 0.0977
 
 
 # =====================================================================
@@ -100,14 +111,13 @@ def load_trajectories(
     trajs = []
     with h5py.File(h5_path, "r") as f:
         traj_keys = sorted(k for k in f.keys() if k.startswith("traj_"))
-        
-        # Val split: use last 20% trajectories
+
         if use_val:
             n_total = len(traj_keys)
             val_start = int(n_total * (1 - val_split_ratio))
             traj_keys = traj_keys[val_start:]
             print(f"  Using val split: trajs [{val_start}:{n_total}] ({len(traj_keys)} trajs)")
-        
+
         for key in traj_keys:
             grp = f[key]
             if "latent_concat" not in grp:
@@ -223,7 +233,7 @@ def single_step_predict(
     act_tensor = torch.tensor(act_norm, dtype=torch.float32).unsqueeze(0).to(device)
 
     pred = predict_one_step(model, history, current, act_tensor, text, args, device)
-    
+
     # GT: frames num_h .. num_h+num_f-1
     end = min(num_h + num_f, T)
     gt = full_latent[num_h:end].cpu()
@@ -343,15 +353,16 @@ def evaluate_checkpoint(
         if "lpips" in fm:
             all_lpips.extend(fm["lpips"])
 
+        lp_str = f", LPIPS={np.mean(fm['lpips']):.4f}" if "lpips" in fm else ""
         per_traj_results.append({
             "key": traj["key"],
-            "psnr": avg_psnr,
-            "ssim": avg_ssim,
-            "lpips": np.mean(fm.get("lpips", [0])),
+            "psnr": float(avg_psnr),
+            "ssim": float(avg_ssim),
+            "lpips": float(np.mean(fm.get("lpips", [0]))),
             "n_frames": len(fm["psnr"]),
         })
 
-        print(f"{len(fm['psnr'])} frames, PSNR={avg_psnr:.2f}, SSIM={avg_ssim:.4f}, {elapsed:.1f}s")
+        print(f"{len(fm['psnr'])} frames, PSNR={avg_psnr:.2f}, SSIM={avg_ssim:.4f}{lp_str}, {elapsed:.1f}s")
 
     overall = {
         "ckpt_name": ckpt_name,
@@ -383,94 +394,171 @@ def evaluate_checkpoint(
 # =====================================================================
 # Report
 # =====================================================================
-def generate_report(pretrained_res: dict, iter1_res: dict, cfg: EvalConfig) -> str:
+def generate_report(results: dict[str, dict], cfg: EvalConfig) -> str:
     lines = [
-        "# WM iter1 评估报告",
+        "# WM 最优训练步数消融评估报告",
         "",
         f"> 生成时间: {time.strftime('%Y-%m-%d %H:%M:%S')}",
         f"> Task: LiftPegUpright-v1",
         f"> 验证数据: demo (val split) + rollout (val split)",
+        f"> Checkpoint 来源: `{cfg.ablation_dir}/`",
         "",
         "## 概述",
         "",
-        "| 指标 | pretrained (ckpt-10000) | iter1 (ckpt-2000) | Delta |",
-        "| ---- | ---------------------- | ----------------- | ----- |",
     ]
 
-    dp = iter1_res["psnr_mean"] - pretrained_res["psnr_mean"]
-    ds = iter1_res["ssim_mean"] - pretrained_res["ssim_mean"]
-    lines.append(
-        f"| PSNR | {pretrained_res['psnr_mean']:.2f} ± {pretrained_res['psnr_std']:.2f} "
-        f"| {iter1_res['psnr_mean']:.2f} ± {iter1_res['psnr_std']:.2f} "
-        f"| {dp:+.2f} |"
-    )
-    lines.append(
-        f"| SSIM | {pretrained_res['ssim_mean']:.4f} ± {pretrained_res['ssim_std']:.4f} "
-        f"| {iter1_res['ssim_mean']:.4f} ± {iter1_res['ssim_std']:.4f} "
-        f"| {ds:+.4f} |"
-    )
-    if "lpips_mean" in pretrained_res and "lpips_mean" in iter1_res:
-        dl = iter1_res["lpips_mean"] - pretrained_res["lpips_mean"]
-        lines.append(
-            f"| LPIPS ↓ | {pretrained_res['lpips_mean']:.4f} ± {pretrained_res['lpips_std']:.4f} "
-            f"| {iter1_res['lpips_mean']:.4f} ± {iter1_res['lpips_std']:.4f} "
-            f"| {dl:+.4f} |"
-        )
-    lines.append(
-        f"| #frames | {pretrained_res['n_frames']} | {iter1_res['n_frames']} | - |"
-    )
-    lines.append(
-        f"| #trajs | {pretrained_res['n_trajs']} | {iter1_res['n_trajs']} | - |"
-    )
+    # Build comparison table
+    header_cols = ["指标", "pretrained*", "iter1 (2000步)*"]
+    step_keys = sorted(results.keys(), key=lambda x: int(x.split("_")[0].replace("step", "")))
+    for name in step_keys:
+        header_cols.append(name)
+    lines.append("| " + " | ".join(header_cols) + " |")
+    lines.append("| " + " | ".join(["----"] * len(header_cols)) + " |")
+
+    # PSNR row
+    row = ["PSNR", f"{cfg.pretrained_baseline_psnr:.2f}", f"{cfg.iter1_baseline_psnr:.2f}"]
+    for name in step_keys:
+        res = results[name]
+        dp = res["psnr_mean"] - cfg.iter1_baseline_psnr
+        row.append(f"{res['psnr_mean']:.2f} ± {res['psnr_std']:.2f} ({dp:+.2f})")
+    lines.append("| " + " | ".join(row) + " |")
+
+    # SSIM row
+    row = ["SSIM", f"{cfg.pretrained_baseline_ssim:.4f}", f"{cfg.iter1_baseline_ssim:.4f}"]
+    for name in step_keys:
+        res = results[name]
+        ds = res["ssim_mean"] - cfg.iter1_baseline_ssim
+        row.append(f"{res['ssim_mean']:.4f} ± {res['ssim_std']:.4f} ({ds:+.4f})")
+    lines.append("| " + " | ".join(row) + " |")
+
+    # LPIPS row
+    has_lpips = any("lpips_mean" in r for r in results.values())
+    if has_lpips:
+        row = ["LPIPS ↓", f"{cfg.pretrained_baseline_lpips:.4f}", f"{cfg.iter1_baseline_lpips:.4f}"]
+        for name in step_keys:
+            res = results[name]
+            if "lpips_mean" in res:
+                dl = res["lpips_mean"] - cfg.iter1_baseline_lpips
+                row.append(f"{res['lpips_mean']:.4f} ± {res['lpips_std']:.4f} ({dl:+.4f})")
+            else:
+                row.append("N/A")
+        lines.append("| " + " | ".join(row) + " |")
+
+    # Frames & trajs
+    row = ["#frames", "-", "-"]
+    for name in step_keys:
+        row.append(str(results[name]["n_frames"]))
+    lines.append("| " + " | ".join(row) + " |")
+
+    row = ["#trajs", "-", "-"]
+    for name in step_keys:
+        row.append(str(results[name]["n_trajs"]))
+    lines.append("| " + " | ".join(row) + " |")
+
+    lines.append("")
+    lines.append("> *pretrained 和 iter1 数值来自之前的评估运行。")
     lines.append("")
 
     # Gate check
-    gate_pass = iter1_res["psnr_mean"] >= 18.0
     lines.extend([
-        "## 门控检查",
-        "",
-        f"- iter1 PSNR: **{iter1_res['psnr_mean']:.2f}**",
-        f"- 门控阈值: PSNR > 18.0",
-        f"- 结果: **{'✅ 通过' if gate_pass else '❌ 未通过'}**",
+        "## 门控检查 (PSNR > 18.0)",
         "",
     ])
+    for name in step_keys:
+        res = results[name]
+        gate_pass = res["psnr_mean"] >= 18.0
+        emoji = "✅" if gate_pass else "❌"
+        lines.append(f"- **{name}**: PSNR = {res['psnr_mean']:.2f} → {emoji} {'通过' if gate_pass else '未通过'}")
+    lines.append("")
+
+    # Step-metric curve (text-based)
+    lines.extend([
+        "## Step→Metric 曲线",
+        "",
+        "| Step | PSNR | SSIM | LPIPS ↓ | Δ PSNR (vs iter1) |",
+        "| ---- | ---- | ---- | ------- | ----------------- |",
+    ])
+    for name in step_keys:
+        res = results[name]
+        step = name.split("_")[0].replace("step", "")
+        dp = res["psnr_mean"] - cfg.iter1_baseline_psnr
+        lp = f"{res['lpips_mean']:.4f}" if "lpips_mean" in res else "N/A"
+        lines.append(f"| {step} | {res['psnr_mean']:.2f} | {res['ssim_mean']:.4f} | {lp} | {dp:+.2f} |")
+    lines.append("")
+
+    # Optimal step analysis
+    lines.extend([
+        "## 最优步数分析",
+        "",
+    ])
+
+    # Find best by each metric
+    best_psnr_name = max(step_keys, key=lambda k: results[k]["psnr_mean"])
+    best_ssim_name = max(step_keys, key=lambda k: results[k]["ssim_mean"])
+    best_lpips_name = min(step_keys, key=lambda k: results[k].get("lpips_mean", float("inf")))
+
+    lines.append(f"- **最佳 PSNR**: {best_psnr_name} = {results[best_psnr_name]['psnr_mean']:.2f} dB")
+    lines.append(f"- **最佳 SSIM**: {best_ssim_name} = {results[best_ssim_name]['ssim_mean']:.4f}")
+    if has_lpips:
+        lines.append(f"- **最佳 LPIPS**: {best_lpips_name} = {results[best_lpips_name]['lpips_mean']:.4f}")
+    lines.append("")
+
+    # Check if 500/1000 steps are sufficient
+    lines.extend([
+        "## 训练步数缩短可行性分析",
+        "",
+    ])
+    for name in step_keys:
+        res = results[name]
+        step = name.split("_")[0].replace("step", "")
+        dp = res["psnr_mean"] - cfg.iter1_baseline_psnr
+        gate = res["psnr_mean"] >= 18.0
+        ssim_ok = res["ssim_mean"] >= 0.75
+
+        if gate and ssim_ok:
+            lines.append(f"- **{step}步**: PSNR={res['psnr_mean']:.2f} (>18 ✅), SSIM={res['ssim_mean']:.4f} (>0.75 ✅) — 可用")
+        elif gate:
+            lines.append(f"- **{step}步**: PSNR={res['psnr_mean']:.2f} (>18 ✅), SSIM={res['ssim_mean']:.4f} (<0.75 ⚠️) — 勉强可用")
+        else:
+            lines.append(f"- **{step}步**: PSNR={res['psnr_mean']:.2f} (<18 ❌) — 不可用")
+    lines.append("")
+
+    # Recommendation
+    lines.extend([
+        "## 推荐",
+        "",
+    ])
+
+    # Find the sweet spot: earliest step where PSNR is within 0.5 dB of the best
+    best_psnr = max(results[k]["psnr_mean"] for k in step_keys)
+    recommended = None
+    for name in step_keys:
+        if results[name]["psnr_mean"] >= best_psnr - 0.5:
+            recommended = name
+            break
+
+    if recommended:
+        rec_step = recommended.split("_")[0].replace("step", "")
+        lines.append(f"**推荐训练步数: {rec_step} 步**")
+        lines.append(f"- 理由: 在最佳 PSNR ({best_psnr:.2f}) 的 0.5 dB 容差内的最早步数")
+        lines.append(f"- PSNR={results[recommended]['psnr_mean']:.2f}, SSIM={results[recommended]['ssim_mean']:.4f}")
+        if "lpips_mean" in results[recommended]:
+            lines.append(f"- LPIPS={results[recommended]['lpips_mean']:.4f}")
+    lines.append("")
 
     # Per-traj details
-    lines.extend([
-        "## 逐轨迹详情 (iter1)",
-        "",
-        "| Traj | PSNR | SSIM | #frames |",
-        "| ---- | ---- | ---- | ------- |",
-    ])
-    for tr in iter1_res["per_traj"]:
-        lines.append(f"| {tr['key']} | {tr['psnr']:.2f} | {tr['ssim']:.4f} | {tr['n_frames']} |")
-    lines.append("")
-
-    # Comparison analysis
-    lines.extend([
-        "## 分析",
-        "",
-        f"- pretrained 基线 PSNR: {pretrained_res['psnr_mean']:.2f} (论文值 22.35)",
-        f"- iter1 finetuned PSNR: {iter1_res['psnr_mean']:.2f}",
-        f"- Delta: {dp:+.2f} dB",
-        "",
-    ])
-    if dp < -2:
-        lines.append("⚠️ iter1 PSNR 比 pretrained 下降超过 2dB，可能存在过拟合或数据问题。")
-    elif dp > 0:
-        lines.append("✅ iter1 PSNR 相比 pretrained 有提升，微调有效。")
-    else:
-        lines.append("iter1 PSNR 与 pretrained 接近，微调对视频质量影响不大。")
-    lines.append("")
-
-    # Checkpoints
-    lines.extend([
-        "## Checkpoints",
-        "",
-        f"- pretrained: `{pretrained_res['ckpt_path']}`",
-        f"- iter1: `{iter1_res['ckpt_path']}`",
-        "",
-    ])
+    for name in step_keys:
+        res = results[name]
+        lines.extend([
+            f"## 逐轨迹详情: {name}",
+            "",
+            "| Traj | PSNR | SSIM | LPIPS | #frames |",
+            "| ---- | ---- | ---- | ----- | ------- |",
+        ])
+        for tr in res["per_traj"]:
+            lp = f"{tr['lpips']:.4f}" if tr.get("lpips", 0) > 0 else "N/A"
+            lines.append(f"| {tr['key']} | {tr['psnr']:.2f} | {tr['ssim']:.4f} | {lp} | {tr['n_frames']} |")
+        lines.append("")
 
     return "\n".join(lines)
 
@@ -483,7 +571,8 @@ def main() -> None:
     os.makedirs(cfg.output_dir, exist_ok=True)
 
     print("=" * 60)
-    print("WM iter1 Quality Evaluation")
+    print("WM Optimal Training Steps Evaluation")
+    print(f"Steps to evaluate: {cfg.ablation_steps}")
     print("=" * 60)
 
     # Load norm stats
@@ -500,12 +589,10 @@ def main() -> None:
             print(f"Failed to load LPIPS: {e}")
 
     # Load validation data
-    # Demo data: use val split (last 20%)
     print(f"\nLoading demo data (val split): {cfg.demo_h5}")
     demo_trajs = load_trajectories(cfg.demo_h5, min_length=9, max_trajs=10, use_val=True)
     print(f"  Loaded {len(demo_trajs)} demo val trajectories")
 
-    # Rollout data: use val split (last 20%)
     print(f"\nLoading rollout data (val split): {cfg.rollout_h5}")
     rollout_trajs = load_trajectories(cfg.rollout_h5, min_length=9, max_trajs=15, use_val=True)
     print(f"  Loaded {len(rollout_trajs)} rollout val trajectories")
@@ -517,35 +604,85 @@ def main() -> None:
         print("ERROR: No valid trajectories found!")
         return
 
-    # Evaluate pretrained
-    pretrained_res = evaluate_checkpoint(
-        cfg.pretrained_ckpt, "pretrained_ckpt10000", trajs, p01, p99, cfg, lpips_model,
-    )
+    # Evaluate each checkpoint
+    results: dict[str, dict] = {}
+    for step in cfg.ablation_steps:
+        ckpt_name = f"checkpoint-{step}.pt"
+        ckpt_path = os.path.join(cfg.ablation_dir, ckpt_name)
+        if not os.path.exists(ckpt_path):
+            print(f"WARNING: {ckpt_path} not found, skipping")
+            continue
+        label = f"step{step}_ckpt"
+        res = evaluate_checkpoint(
+            ckpt_path, label, trajs, p01, p99, cfg, lpips_model,
+        )
+        results[label] = res
 
-    # Evaluate iter1
-    iter1_res = evaluate_checkpoint(
-        cfg.iter1_ckpt, "iter1_ckpt2000", trajs, p01, p99, cfg, lpips_model,
-    )
+        # Save intermediate JSON after each checkpoint
+        json_path = os.path.join(cfg.output_dir, f"metrics_step{step}.json")
+        with open(json_path, "w") as f:
+            json.dump(res, f, indent=2)
+        print(f"  Intermediate results saved: {json_path}")
+
+    if not results:
+        print("ERROR: No checkpoints evaluated!")
+        return
 
     # Generate report
-    report = generate_report(pretrained_res, iter1_res, cfg)
-    os.makedirs(os.path.dirname(cfg.report_path), exist_ok=True)
+    report = generate_report(results, cfg)
     with open(cfg.report_path, "w") as f:
         f.write(report)
     print(f"\nReport saved to: {cfg.report_path}")
 
-    # Save raw JSON
-    json_path = os.path.join(cfg.output_dir, "iter1_metrics.json")
+    # Save combined JSON
+    json_path = os.path.join(cfg.output_dir, "all_metrics.json")
+    # Strip per_traj for the combined summary
+    summary = {}
+    for name, res in results.items():
+        summary[name] = {k: v for k, v in res.items() if k != "per_traj"}
     with open(json_path, "w") as f:
-        json.dump({"pretrained": pretrained_res, "iter1": iter1_res}, f, indent=2)
-    print(f"Raw metrics saved to: {json_path}")
+        json.dump(summary, f, indent=2)
+    print(f"Combined metrics saved to: {json_path}")
 
-    # Gate check
-    gate = iter1_res["psnr_mean"] >= 18.0
-    print(f"\n{'='*60}")
-    print(f"GATE CHECK: iter1 PSNR = {iter1_res['psnr_mean']:.2f} {'≥' if gate else '<'} 18.0")
-    print(f"Result: {'✅ PASS' if gate else '❌ FAIL'}")
-    print(f"{'='*60}")
+    # Summary table
+    print(f"\n{'='*80}")
+    print("SUMMARY — Step → Metric Comparison")
+    print(f"{'='*80}")
+    print(f"{'Step':<8} {'PSNR':>10} {'SSIM':>10} {'LPIPS':>10} {'ΔPSNR':>10} {'Gate':>6}")
+    print(f"{'-'*8} {'-'*10} {'-'*10} {'-'*10} {'-'*10} {'-'*6}")
+
+    # Print baselines
+    print(f"{'pretrained':<8} {cfg.pretrained_baseline_psnr:>10.2f} {cfg.pretrained_baseline_ssim:>10.4f} {cfg.pretrained_baseline_lpips:>10.4f} {'(ref)':>10} {'PASS':>6}")
+    print(f"{'iter1':<8} {cfg.iter1_baseline_psnr:>10.2f} {cfg.iter1_baseline_ssim:>10.4f} {cfg.iter1_baseline_lpips:>10.4f} {'(ref)':>10} {'PASS':>6}")
+
+    step_keys = sorted(results.keys(), key=lambda x: int(x.split("_")[0].replace("step", "")))
+    for name in step_keys:
+        res = results[name]
+        step = name.split("_")[0].replace("step", "")
+        dp = res["psnr_mean"] - cfg.iter1_baseline_psnr
+        gate = "PASS" if res["psnr_mean"] >= 18.0 else "FAIL"
+        lp = f"{res['lpips_mean']:.4f}" if "lpips_mean" in res else "N/A"
+        print(f"{step:<8} {res['psnr_mean']:>10.2f} {res['ssim_mean']:>10.4f} {lp:>10} {dp:>+10.2f} {gate:>6}")
+
+    print(f"{'='*80}")
+
+    # Final recommendation
+    best_psnr = max(results[k]["psnr_mean"] for k in step_keys)
+    best_name = max(step_keys, key=lambda k: results[k]["psnr_mean"])
+    rec = None
+    for name in step_keys:
+        if results[name]["psnr_mean"] >= best_psnr - 0.5:
+            rec = name
+            break
+
+    print(f"\nBest PSNR: {best_name} = {best_psnr:.2f}")
+    if rec:
+        rec_step = rec.split("_")[0].replace("step", "")
+        print(f"Recommended step (within 0.5dB of best): {rec_step}")
+
+    all_pass = all(r["psnr_mean"] >= 18.0 for r in results.values())
+    print(f"\nOverall gate: {'✅ ALL PASS' if all_pass else '❌ SOME FAIL'}")
+    print(f"{'='*80}")
 
 
 if __name__ == "__main__":

@@ -1,0 +1,18 @@
+{
+  "checkpoint": "checkpoints/il/best_eval_success_once.pt",
+  "env_id": "LiftPegUpright-v1",
+  "num_episodes": 50,
+  "metrics": {
+    "success_once": 0.7812,
+    "return": 170.2973,
+    "episode_len": 100.0,
+    "reward": 1.703,
+    "success_at_end": 0.0
+  },
+  "success_once_pct": 78.12,
+  "success_at_end_pct": 0.0,
+  "pred_horizon": 8,
+  "act_steps": 8,
+  "state_dim": 25,
+  "time_s": 19.8
+}

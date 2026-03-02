@@ -8,7 +8,7 @@
   4. LoRA + 全帧 (uniform)
 
 用法:
-    CUDA_VISIBLE_DEVICES=6 python scripts/eval_vlm_16frame.py
+    CUDA_VISIBLE_DEVICES=6 python scripts/vlaw/eval/eval_vlm_16frame.py
 """
 import json
 import os
@@ -21,7 +21,7 @@ from typing import Optional
 import h5py
 import numpy as np
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parent.parent.parent.parent
 sys.path.insert(0, str(ROOT))
 
 
@@ -203,7 +203,7 @@ def main():
     parser.add_argument("--task", default="LiftPegUpright-v1")
     parser.add_argument("--max_frames", type=int, default=16)
     parser.add_argument("--model_path", default=str(ROOT / "checkpoints/vlaw/reward_model/qwen_vl"))
-    parser.add_argument("--lora_path", default=str(ROOT / "checkpoints/vlaw/reward_model/lora_iter1/final"))
+    parser.add_argument("--lora_path", default=str(ROOT / "checkpoints/vlaw/reward_model/lora_iter1_16frame/final"))
     parser.add_argument("--threshold", type=float, default=0.8)
     parser.add_argument("--skip_zeroshot", action="store_true",
                         help="Skip zero-shot evaluation to save time")

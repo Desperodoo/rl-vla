@@ -203,3 +203,87 @@
       break
   ```
 - **预防**: 任何训练循环必须在 `global_step >= max_steps` 时有显式 break，不能只靠 tqdm 显示
+
+---
+
+## BUG-016: Pretrained Policy 评估中的零动作 padding
+
+- **发现**: 2026-03-01 Pretrained Policy 评估 success_once 仅 2%
+- **文件**: `scripts/vlaw/eval/eval_pretrained_policy.py`
+- **症状**: 基线策略 success_once 仅 ~2%，远低于预期 (ManiSkill demo replay ~85%)
+- **根因**: `pred_horizon=8 + obs_horizon=2` → ShortCutFlowWrapper 从 index 1 开始切片 → 仅产出 7 个有效 action。评估脚本强制 pad 第 8 个为零动作 `[0,0,0,0,0,0,0]`，导致每 8 步都有一步完全无操作，破坏轨迹连续性
+- **修复**: 移除零动作 padding，直接返回 7 个有效 action
+- **修复后**: success_once = 74-88% (avg ~80%)
+- **预防**: ShortCut Flow policy 的 `act_steps` 不等于 `pred_horizon`，代码中不应假设二者相等
+
+---
+
+## BUG-017: Imagination 引擎三合一 bug (PlainConv + API + obs 格式)
+
+- **发现**: 2026-03-01 real policy Imagination 测试全部生成零轨迹
+- **文件**: `scripts/vlaw/run/run_imagination_iter1.py`, `rlft/vlaw/world_model/imagination_env.py`
+- **症状**: real policy in-the-loop rollout 只产出零动作，合成轨迹全失败
+- **Bug 1 — load_policy 缺少 PlainConv 参数**: `load_policy()` 未传递 PlainConv 视觉编码器参数 → `visual_encoder=None` → 策略无法处理图像观测
+- **Bug 2 — get_actions API 不匹配**: PolicyAdapter 调用 `self.policy.get_actions()`（不存在），FlowWrapper 的实际方法是 `self.policy.flow_wrapper.get_action()` → 静默 fallback 到零动作
+- **Bug 3 — obs 格式不匹配**: obs_tensor 是 flat VAE latent (9216-dim)，但策略需要结构化 obs_cond (562-dim = 256-dim visual + 25-dim state × 2 + 6-dim extra)
+- **修复**: 
+  1. `load_policy()` 传入 `in_channels=3, out_dim=256, pool_feature_map=True`
+  2. PolicyAdapter 完全重写：维护 obs_history buffer，正确调用 `flow_wrapper.get_action()`
+  3. PolicyAdapter 接收 `decoded_rgb` + `agent_state` kwargs 构建 obs_cond
+- **验证**: mock 5/5 OK, real policy 5/5 OK (~178s/traj)
+- **预防**: Imagination 中 policy 接口必须与策略训练时的 obs 格式完全一致；接口对齐需通过端到端测试验证，不能只看 API 签名
+
+---
+
+## BUG-018: EMA Checkpoint 保存格式缺少 ema_agent 键
+
+- **发现**: 2026-03-01 T-EVAL-ITER1-001 评估时，iter-1 策略 success_once 仅 10.9%
+- **文件**: `rlft/vlaw/policy/policy_updater.py` (`_save_checkpoint()` 方法)
+- **症状**: 评估脚本加载 `policy_iter1.pt` 后回退到 online 权重，EMA 权重未被保存
+- **根因**: `_save_checkpoint()` 保存了完整的 `agent.state_dict()`（包含 `velocity_net_ema.*` 前缀的键），但未提取出独立的 `ema_agent` 顶级键。评估脚本 `load_pretrained_policy()` 优先查找 `ckpt["ema_agent"]`，找不到时回退到 `ckpt["agent"]` (online 权重)
+- **修复**:
+  ```python
+  # _save_checkpoint() 中新增：
+  ema_agent = {
+      k.replace("velocity_net_ema.", "velocity_net."): v
+      for k, v in agent_sd.items()
+      if k.startswith("velocity_net_ema.")
+  }
+  if ema_agent:
+      ckpt["ema_agent"] = ema_agent
+  ```
+- **修复效果**: 10.9% → 17.2% (+6.3%)，但核心退化问题仍存在
+- **已修复的 ckpt**: `checkpoints/vlaw/policy/iter1/policy_iter1.pt` (重新保存)
+- **预防**: 所有保存 checkpoint 的代码必须保证 EMA 权重以评估脚本期望的格式存储；新增 checkpoint 保存后应立即做 load-and-verify 测试
+
+---
+
+## BUG-019: Imagination 初始 latent 使用随机噪声而非真实帧 VAE 编码
+
+- **发现**: 2026-03-02 WM/VAE pipeline 深入调查
+- **文件**: `scripts/vlaw/run/run_imagination_iter1.py` (L242-345, `load_initial_frames()` 函数)
+- **症状**: 200 条合成轨迹视觉质量极差（VLM p_yes max=0.27），解码帧为纯噪声乱码，非 ManiSkill 场景
+- **根因**: `load_initial_frames()` 使用 `torch.randn(1, 4, 48, 24)` 作为初始 latent 输入给 WM，而非从真实帧的 VAE 编码结果加载。WM autoregressive rollout 从随机噪声起步，所有后续帧质量均无法恢复
+- **修复**:
+  ```python
+  # 修复前 (L280 附近):
+  initial_latent = torch.randn(1, 4, 48, 24)  # 随机噪声!
+  
+  # 修复后:
+  encoded_path = os.path.join(encoded_dir, task, file)
+  data = torch.load(encoded_path)
+  initial_latent = data["latent_concat"][0:1]  # 真实首帧 VAE 编码
+  ```
+- **影响范围**: 
+  - `data/vlaw/synthetic/iter1_wm_real/` 中全部 200 条旧合成轨迹 **无效，需重新生成**
+  - `data/vlaw/labeled/synthetic_iter1_wm_real/` VLM 标注结果 **无效，需重新标注**
+  - 之前"WM 合成质量极差"的诊断结论 (T-DIAG-SYN-001) 实际根因是此 bug，而非 WM 训练不足
+- **验证**: 
+  - 修复后 3/3 条轨迹成功生成 (`data/vlaw/synthetic/iter1_fixtest3/`)
+  - 解码帧清晰显示 ManiSkill 机械臂+peg 场景 (`results/vlaw/dsyn_diagnosis_frames/fixtest/`)
+  - 用户目视确认 strip 图片质量正常
+  - 图像随时间推移仍有模糊趋势 (WM autoregressive 误差累积，属预期行为)
+- **预防**: 
+  1. Imagination pipeline 必须有"初始帧来源"的显式配置和日志打印，禁止使用 `torch.randn` 生成初始 latent
+  2. 新增合成轨迹后，必须先解码若干帧做 sanity check，再大批量生成
+  3. 所有 pipeline 关键输入（初始帧、动作序列）应有 shape/range 断言和日志记录
