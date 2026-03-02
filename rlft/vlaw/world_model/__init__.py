@@ -21,10 +21,31 @@ def __getattr__(name: str):  # noqa: ANN001
         from .imagination_env import ImaginationEnvConfig, ImaginationEnvEngine  # noqa: PLC0415
         return {"ImaginationEnvConfig": ImaginationEnvConfig,
                 "ImaginationEnvEngine": ImaginationEnvEngine}[name]
+    if name in ("ImaginationRLEnvConfig", "ImaginationRLEnv", "VecImaginationRLEnv",
+                "make_imagination_rl_env", "make_vec_imagination_rl_env"):
+        from .imagination_rl_env import (  # noqa: PLC0415
+            ImaginationRLEnv,
+            ImaginationRLEnvConfig,
+            VecImaginationRLEnv,
+            make_imagination_rl_env,
+            make_vec_imagination_rl_env,
+        )
+        return {
+            "ImaginationRLEnvConfig": ImaginationRLEnvConfig,
+            "ImaginationRLEnv": ImaginationRLEnv,
+            "VecImaginationRLEnv": VecImaginationRLEnv,
+            "make_imagination_rl_env": make_imagination_rl_env,
+            "make_vec_imagination_rl_env": make_vec_imagination_rl_env,
+        }[name]
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 __all__ = [
     "CtrlWorldAdapter",
     "ImaginationEnvConfig",
     "ImaginationEnvEngine",
+    "ImaginationRLEnvConfig",
+    "ImaginationRLEnv",
+    "VecImaginationRLEnv",
+    "make_imagination_rl_env",
+    "make_vec_imagination_rl_env",
 ]

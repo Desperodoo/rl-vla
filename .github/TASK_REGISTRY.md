@@ -133,15 +133,17 @@
 |---------|-------|------|------|
 | **T-WM-ALIGN-HISTORY** | Imagination | ✅ | 3文件4处修改: 列表式+稀疏采样+第一帧锚定+num_history=6 |
 | **T-IMAGINATION-002b** | Imagination | ✅ | 200/200条 sliding window 对照组, 534.6min, data: `iter1_002b_sliding/` |
-| **T-IMAGINATION-002a** | Imagination | 🔄 ~20/200 | 稀疏采样实验组, GPU 5, tmux `imag_002a`, ETA ~8h, output: `iter1_002a_aligned/` |
-| **T-VLM-LABEL-002** | Reward | ⬜ | 重新 VLM 标注 T-IMAGINATION-002 产出的合成轨迹, 预期 D_syn+ > 0 |
+| **T-VLM-LABEL-002b** | Reward | ✅ | 200条 VLM 标注: p_yes max=0.531, mean=0.153, D_syn+(α=0.4)=7, D_syn+(α=0.8)=0, 首次 D_syn+>0! |
+| **T-IMAGINATION-002a** | Imagination | 🔄 152/200 | 稀疏采样实验组, GPU 5, tmux `imag_002a`, ETA ~2.2h, output: `iter1_002a_aligned/` |
+| **T-VLM-LABEL-002a** | Reward | ⬜ | 待标注 002a 轨迹 (依赖 T-IMAGINATION-002a 完成) |
+| **T-WM-ALIGN-ABLATION** | Eval | ⬜ | 消融对比 002a vs 002b (帧质量+VLM p_yes+D_syn+), 依赖两组标注完成 |
 
 ### 阶段 B1: 纯 BC 数据飞轮验证
 
 | task_id | owner | 状态 | 备注 |
 |---------|-------|------|------|
 | **T-BC-SCALING** | Policy | ✅ 完成 (6/6, 全≈0%) | 5K步不够 (基线用1M步). **ADR-020: 重做, 增至 20K 步从零训练** |
-| **T-BC-SCALING-V2** | Policy | ⬜ | 20K步从零训练, 6组 demo scaling (25/50/100/200/400/669), GPU 8-9 |
+| **T-BC-SCALING-V2** | Policy | 🔄 Round 1 | 20K步从零训练, 6组 demo scaling, GPU 0,9, tmux `bc_scaling_v2`, 当前 25demos ~75% + 50demos ~78% |
 | **T-BC-FLYWHEEL-A** | Policy | ⬜ | A 组: 50-100 条纯真实 demo 从头训练 → 评估 |
 | **T-BC-FLYWHEEL-B** | Policy | ⬜ | B 组: 50-100 条 demo + D_syn+ 从头训练 → 评估 (依赖 D_syn+ > 0) |
 | **T-BC-FLYWHEEL-EVAL** | Eval | ⬜ | A vs B 对比评估，Go/No-Go: B > A + 3% |
@@ -169,7 +171,7 @@
 | **T-EXP-WM-05** | WM | ✅ | 完成: 2000/2000步, loss=0.0268, ckpt@500/1000/1500/2000. ❗ ADR-018 降级 |
 | **T-EXP-WM-05-EVAL** | WM | ✅ | 完成: 4个 ckpt 评估, 1000步最优 PSNR=25.80. ❗ 配置混淆 (num_frames=15, reencode) 导致结论不可推广 |
 | **T-EXP-WM-05v2** | WM | 🔴 | GPU 1,2,7,8, tmux `wm_05v2`, num_frames=5, demos, 2000步/20ckpt |
-| **T-EXP-VLM-02** | Reward | 🔴 | r=8 训练中, GPU 3,4, tmux `vlm_ablation`, 串行 r=8→32→64 |
+| **T-EXP-VLM-02** | Reward | � | r=8 ✅ (acc=0.794, FP=0%), r=32 训练中, GPU 3,4, tmux `vlm_ablation`, 串行 r=8→32→64 |
 | T-EXP-WM-02~04 | WM | ⬜ | WM 扩展消融 |
 | T-EXP-VLM-03 | Reward | ⬜ | VLM 步数消融 |
 | ~~T-EXP-VLM-04~~ | Reward | ✅ | 已完成: video AUC=0.83 >> images 0.72, ADR-015 |

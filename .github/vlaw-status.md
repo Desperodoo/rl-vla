@@ -1,6 +1,6 @@
 # VLAW 复现项目 — 状态仪表盘
 
-> **最后更新**: 2026-03-02 15:05 (T+7) | 技术知识见 [`knowledge/`](knowledge/) | 任务追溯见 [`TASK_REGISTRY.md`](TASK_REGISTRY.md) | 历史日志见 `logs/vlaw/work-logs/`
+> **最后更新**: 2026-03-02 21:25 (T+7) | 技术知识见 [`knowledge/`](knowledge/) | 任务追溯见 [`TASK_REGISTRY.md`](TASK_REGISTRY.md) | 历史日志见 `logs/vlaw/work-logs/`
 
 > **当前执行策略（2026-02-26 起）**: 先做 **LiftPegUpright-only** 全链路验证（数据→标注→WM→评估），PickCube/StackCube 延后到最后集中验证。
 > **计划调整 (02-27 22:30)**:
@@ -41,9 +41,9 @@
 | **P7.1 Iter-1 策略评估** | ⚠️ | 2026-03-01 | **严重退化**: baseline 78.1% → iter-1 17.2% (-60.9%), EMA bug已修, 详见 `results/vlaw/iter1_eval_report.md` |
 | **P7.2 D_syn+ 诊断** | ✅ | 2026-03-02 | **阶段 A 完成 + BUG-019 根因定位**: 合成帧质量差的真正根因是初始 latent 使用随机噪声 (BUG-019)，非 WM 训练不足。修复后 3/3 验证通过，帧质量正常。 |
 | **P7.3 History 对齐** | ✅ | 2026-03-02 | **T-WM-ALIGN-HISTORY**: 列表式 latent/action history + 稀疏采样 `[0,0,-12,-9,-6,-3]` + num_history=6, 3文件4处修改 |
-| **P7.4 合成数据消融** | 🔄 | 2026-03-02 | **T-IMAGINATION-002b** ✅ 200/200 sliding window 对照组; **T-IMAGINATION-002a** 🔄 ~20/200 aligned 实验组, GPU 5, tmux `imag_002a`, ETA ~8h |
-| **P8.1 BC 数据飞轮验证** | ⚠️ | 2026-03-02 | 阶段 B1: **T-BC-SCALING 完成** — 6/6组, 全部 success≈0% (5000步不够, 基线用1M步). 需重新设计 |
-| **P8.2 Imagination RL** | ⬜ | — | 阶段 B2: WM+VLM 包装为 Gym env, RLPD/DSRL/PLD model-based RL |
+| **P7.4 合成数据消融** | 🔄 | 2026-03-02 | **T-IMAGINATION-002b** ✅ 200/200 sliding window + **T-VLM-LABEL-002b** ✅ 标注完成 (p_yes max=0.531, D_syn+(α=0.4)=7); **T-IMAGINATION-002a** 🔄 180/200 aligned, GPU 5, ETA ~1h |
+| **P8.1 BC 数据飞轮验证** | ✅ | 2026-03-02 | **T-BC-SCALING-V2 完成**: 6/6组全完成. 25d=0.02, 50d=0.04, 100d=0.10, 200d=0.16, 400d=0.32, 669d=0.40 (success_once, 20K步从零训练) |
+| **P8.2 Imagination RL** | 🔄 | 2026-03-02 | **T-MBRL-ENV ✅ 已完成**: ImaginationRLEnv 实现 + 40/40 pytest 通过 (`rlft/vlaw/world_model/imagination_rl_env.py`). 待 T-MBRL-BC-FINETUNE |
 | **P8.3 迭代共同改进** | ⬜ | — | 阶段 B3: 2-3 轮完整 Policy↔WM↔VLM 迭代循环 |
 
 **图例**: ⬜ 未开始 | 🔄 进行中 | ✅ 已完成 | ❌ 阻塞 | ⚠️ 需修复
@@ -64,6 +64,9 @@
 | Qwen3-VL-4B LoRA 16帧 | `checkpoints/vlaw/reward_model/lora_iter1_16frame/` | ✅ acc=0.824, FP=3.7%, 23MB |
 | Qwen3-VL-4B LoRA 4帧 | `checkpoints/vlaw/reward_model/ablation_4frame/` | ✅ acc=0.706, FP=11.1%, 23MB |
 | Qwen3-VL-4B LoRA 8帧 | `checkpoints/vlaw/reward_model/ablation_8frame/` | ✅ acc=0.735, FP=18.5%, ROC-AUC=0.8269, 23MB |
+| Qwen3-VL-4B LoRA r=8 | `checkpoints/vlaw/reward_model/ablation_lora_r8/` | ✅ acc=0.794, FP=0%, 15MB |
+| Qwen3-VL-4B LoRA r=32 | `checkpoints/vlaw/reward_model/ablation_lora_r32/` | 🔄 训练中, GPU 3,4 |
+| Qwen3-VL-4B LoRA 100步 | `checkpoints/vlaw/reward_model/ablation_100steps/` | 🔄 训练中 (T-EXP-VLM-03), GPU 6 |
 | State Predictor | `checkpoints/vlaw/state_predictor/` | ✅ LiftPeg/Pick/Stack |
 | Policy Iter 1 | `checkpoints/vlaw/policy/iter1/policy_iter1.pt` | ✅ 2000步, loss=0.279, EMA修复后含 `ema_agent` 键 |
 | Policy Iter 1 (中间ckpt) | `checkpoints/vlaw/policy/iter1/policy_iter1_step{500,1000,1500,2000}.pt` | ✅ 每500步保存 |
@@ -91,7 +94,8 @@
 | D_syn (VLM标注) | `data/vlaw/labeled/synthetic_iter1_wm_real/` | ⚠️ | 200条 **因 BUG-019 无效**, 需重新标注 |
 | D_syn fixtest (修复验证) | `data/vlaw/synthetic/iter1_fixtest3/` | ✅ | 3条, BUG-019 修复后验证通过 |
 | D_syn 002b (sliding window) | `data/vlaw/synthetic/iter1_002b_sliding/` | ✅ | 200/200条, 98MB H5, 534.6min, 对照组 |
-| D_syn 002a (aligned) | `data/vlaw/synthetic/iter1_002a_aligned/` | 🔄 | ~20/200条, 稀疏采样实验组, ETA ~8h |
+| D_syn 002b VLM 标注 | `data/vlaw/labeled/synthetic_iter1_002b_sliding/` | ✅ | 200条, p_yes max=0.531, D_syn+(α=0.4)=7, D_syn+(α=0.8)=0 |
+| D_syn 002a (aligned) | `data/vlaw/synthetic/iter1_002a_aligned/` | 🔄 | 180/200条 (batch100+batch150+batch200 H5), 稀疏采样实验组, ETA ~1h |
 | **评估集 (固定)** | `data/vlaw/encoded/eval_fixed/eval_set.h5` | ✅ | **15条** (5 demo + 10 rollout), 永不训练 |
 | 非活跃任务数据 | `data/vlaw/deferred/` | 💤 | PickCube+StackCube |
 
@@ -103,18 +107,18 @@
 
 | GPU | 分配 | VRAM Used | 状态 |
 |-----|------|-----------|------|
-| 0 | ollama | 23645 MiB / 24564 MiB | ⚠️ ollama 占用 |
-| 1 | WM 05v2 (T-EXP-WM-05v2) | 23208 MiB / 24564 MiB | 🔴 训练中 (tmux `wm_05v2`) |
-| 2 | WM 05v2 | 23132 MiB / 24564 MiB | 🔴 同上 |
-| 3 | VLM Rank消融 (T-EXP-VLM-02) | 23597 MiB / 24564 MiB | 🔴 r=8 训练中 (tmux `vlm_ablation`) |
-| 4 | VLM Rank消融 | 23377 MiB / 24564 MiB | 🔴 同上 |
-| 5 | Imagination (T-IMAGINATION-002a) | 23574 MiB / 24564 MiB | 🔴 运行中 (tmux `imag_002a`, ETA ~6h) |
-| 6 | ollama | 23092 MiB / 24564 MiB | ⚠️ ollama 占用 |
-| 7 | WM 05v2 | 23103 MiB / 24564 MiB | 🔴 同上 |
-| 8 | WM 05v2 | 22511 MiB / 24564 MiB | 🔴 同上 |
-| 9 | (residual) | 21236 MiB / 24564 MiB | ⚠️ 残留显存 |
+| 0 | **空闲** | 33 MiB / 24564 MiB | 🟢 **可用** (BC Scaling V2 已完成) |
+| 1 | WM 05v2 (T-EXP-WM-05v2) | 12882 MiB / 24564 MiB | 🔴 训练中 (tmux `wm_05v2`, ckpt-1100/2000) |
+| 2 | WM 05v2 | 12802 MiB / 24564 MiB | 🔴 同上 |
+| 3 | VLM Rank消融 (T-EXP-VLM-02) | 12090 MiB / 24564 MiB | 🔴 r=32 训练中 (tmux `vlm_ablation`) |
+| 4 | VLM Rank消融 | 11962 MiB / 24564 MiB | 🔴 同上 |
+| 5 | Imagination (T-IMAGINATION-002a) | 6051 MiB / 24564 MiB | 🔴 运行中 (tmux `imag_002a`, 180/200, ETA ~1h) |
+| 6 | VLM 步数消融 (T-EXP-VLM-03) | 11676 MiB / 24564 MiB | 🔴 100步训练中 (tmux `vlm_steps_ablation`) |
+| 7 | WM 05v2 | 12776 MiB / 24564 MiB | 🔴 同上 |
+| 8 | WM 05v2 | 12776 MiB / 24564 MiB | 🔴 同上 |
+| 9 | **空闲** | 16 MiB / 24564 MiB | 🟢 **可用** (BC Scaling V2 已完成) |
 
-> **10张GPU全部被占用**: WM-05v2 (1,2,7,8) + VLM-02 (3,4) + Imagination (5) + ollama (0,6) + 残留 (9). (截至 2026-03-02 15:10)
+> **8/10 GPU 被占用**: WM-05v2 (1,2,7,8) + VLM-02 (3,4) + Imagination (5) + VLM-03 (6). **GPU 0, 9 空闲**. (截至 2026-03-02 21:25)
 
 ---
 
@@ -158,14 +162,23 @@
   - `scripts/vlaw/run/run_imagination_iter1.py`: `num_history=4→6`
   - `rlft/vlaw/world_model/imagination_env.py`: 列表式 latent_history/action_history + `history_idx=[0,0,-12,-9,-6,-3]` + 列表式追加更新 + policy 引用更新
 - ✅ **T-IMAGINATION-002b 完成**: 200/200 条 sliding window 对照组, 534.6min, 98MB H5, data: `iter1_002b_sliding/`
-- 🔄 **T-IMAGINATION-002a 启动**: 稀疏采样实验组, GPU 5, tmux `imag_002a`, ~20/200条, ETA ~8h
+- 🔄 **T-IMAGINATION-002a 进行中**: 稀疏采样实验组, GPU 5, tmux `imag_002a`, 180/200条, ETA ~1h
+- ✅ **T-VLM-LABEL-002b 完成**: 200条 sliding window 合成轨迹 VLM 标注, p_yes max=0.531 (旧噪声=0.27), D_syn+(α=0.4)=7, D_syn+(α=0.8)=0
+  - **关键发现**: BUG-019 修复后 p_yes 从 0.27 → 0.531 (2倍提升), 首次在 α=0.4 下产出 D_syn+=7 条
+- ✅ **T-EXP-VLM-02 r=8 完成**: acc=0.794, FP=0%, ckpt: `ablation_lora_r8/`
+- 🔄 **T-EXP-VLM-02 r=32 训练中**: GPU 3,4, tmux `vlm_ablation`, 启动于 18:13
+- ✅ **T-BC-SCALING-V2 全部完成**: 6/6组 20K步从零训练: 25d=0.02, 50d=0.04, 100d=0.10, 200d=0.16, 400d=0.32, 669d=0.40 (success_once). 结果: `results/vlaw/bc_scaling_v2/scaling_results.jsonl`
+  - **669 demos 达到 40% success_once** → Go/No-Go 通过 (>30%)，scaling curve 有信息量
+  - **scaling 符合预期**: 数据量越多 success_once 越高，但与预训练 baseline 80% 仍有差距 (20K 步仅为基线 1M 步的 2%)
+- ✅ **T-MBRL-ENV 完成**: ImaginationRLEnv 实现 + 40/40 pytest 通过 (`rlft/vlaw/world_model/imagination_rl_env.py`, 37KB)
+- 🔄 **T-EXP-VLM-03 运行中**: VLM 步数消融 100步, GPU 6, tmux `vlm_steps_ablation`, ckpt: `ablation_100steps/`
 - ✅ **T-EXP-WM-05 完成**: WM 最优步数搜索, GPU 0-3, 2000/2000步, loss=0.0268, ckpt@500/1000/1500/2000
 - ⚠️ **T-EXP-WM-05-EVAL 完成但 ADR-018 降级**: 配置混淆 (num_frames=15, reencode 数据 vs iter1 的 num_frames=5, demos), 结论不可推广。v2 训练中
 - ✅ **T-BC-SCALING 完成**: 6/6组全部跑完, success_once≈0% (25d=1%, 其余=0%). 5000步从零训练完全不够 (基线用1M步). 需重新设计
 - ✅ **T-DATA-CLEANUP Phase 1**: eval_fixed (15条固定评估集) + reencode清理 + 标准评估脚本 eval_wm_standard.py
 - ✅ **数据审计报告**: docs/vlaw/data_audit_and_reorganization_proposal.md — 发现 reencode 110/160条无效, 3组WM实验不可比
-- 🔄 **T-EXP-WM-05v2 启动**: WM 最优步数修复版, GPU 1,2,7,8, tmux `wm_05v2`, num_frames=5, demos, 20个ckpt
-- 🔄 **T-EXP-VLM-02 启动**: LoRA rank 消融 r=8/32/64, GPU 3,4, tmux `vlm_ablation`
+- 🔄 **T-EXP-WM-05v2 训练中**: WM 最优步数修复版, GPU 1,2,7,8, tmux `wm_05v2`, ckpt-1100/2000, num_frames=5, demos, 20个ckpt
+- 🔄 **T-EXP-VLM-02 进行中**: LoRA rank 消融 r=8✅/r=32🔄/r=64⬜, GPU 3,4, tmux `vlm_ablation`
 - ✅ **T-RL-BASELINE-AWSC/PLD/DSRL**: 跳过，sweep 数据已有 (ADR-017)
 
 ### ⚠️ Iter-1 关键发现 (2026-03-01)
@@ -226,13 +239,15 @@
 | **T-EXP-VLM-04** | **VLM video vs images A/B 对比** | Reward | — | ✅ video AUC=0.83 >> 0.72 |
 | **T-WM-ALIGN-HISTORY** | **对齐官方 history buffer (列表式+稀疏采样+第一帧锚定+num_history=6)** | Imagination | 调研✅ | ✅ 3文件4处修改 |
 | **T-IMAGINATION-002b** | **sliding window 对照组 200 条** | Imagination | BUG-019 fix ✅ | ✅ 200/200, 534.6min |
-| **T-IMAGINATION-002a** | **对齐后稀疏采样 200 条** | Imagination | T-WM-ALIGN-HISTORY ✅ | 🔄 ~20/200, GPU 5, ETA ~8h |
-| **T-WM-ALIGN-ABLATION** | **消融对比: 对齐 vs 当前 (帧质量+VLM p_yes+D_syn+)** | Eval | 002a+002b ✅ | ⬜ |
-| **T-VLM-LABEL-002** | **重新 VLM 标注合成轨迹** | Reward | T-IMAGINATION-002 ✅ | ⬜ |
+| **T-IMAGINATION-002a** | **对齐后稀疏采样 200 条** | Imagination | T-WM-ALIGN-HISTORY ✅ | 🔄 180/200, GPU 5, ETA ~1h |
+| **T-VLM-LABEL-002b** | **VLM 标注 002b (sliding window)** | Reward | T-IMAGINATION-002b ✅ | ✅ p_yes max=0.531, D_syn+(α=0.4)=7 |
+| **T-WM-ALIGN-ABLATION** | **消融对比: 对齐 vs 当前 (帧质量+VLM p_yes+D_syn+)** | Eval | 002a+002b ✅ | ⬜ (等 002a 完成后标注) |
+| **T-VLM-LABEL-002a** | **VLM 标注 002a (aligned)** | Reward | T-IMAGINATION-002a 🔄 | ⬜ |
 | ~~T-RL-BASELINE-AWSC~~ | ~~AWSC baseline~~ | — | — | ✅ sweep 已有: aggressive=91% (ADR-017) |
 | ~~T-RL-BASELINE-PLD~~ | ~~PLD-SAC baseline~~ | — | — | ✅ sweep 已有: conservative=81% (ADR-017) |
 | ~~T-RL-BASELINE-DSRL~~ | ~~DSRL-SAC baseline~~ | — | — | ✅ sweep 已有 (ADR-017) |
 | T-AWSC-WM-AUGMENT | AWSC + D_syn demo buffer 增强 | Policy | D_syn+ > 0 | ⬜ |
+| T-MBRL-ENV | WM+VLM 包装为 RL 环境接口 | Imagination | — | ✅ ImaginationRLEnv 40/40 pytest |
 | T-WM-ITER2-001 | Iter-2 (AWSC + WM 迭代) | 全部 | D_syn+ > 0 | ⬜ |
 
 #### Iter-1 已完成 (存档)
@@ -257,8 +272,8 @@
 | T-EXP-WM-03 | WM num_history=4 vs 1 | WM | 0-3 | ⬜ |
 | T-EXP-WM-04 | WM 学习率消融 (5e-6/2e-5) | WM | 0-3 | ⬜ |
 | T-EXP-VLM-01 | VLM 帧数消融 (4/8/32帧) | Reward | 6-7 | ✅ 4帧/8帧/16帧全完成 |
-| T-EXP-VLM-02 | VLM LoRA rank (r=8/32/64) | Reward | 3,4 | 🔴 r=8 训练中 (tmux `vlm_ablation`, 串行 r=8→32→64) |
-| T-EXP-VLM-03 | VLM 步数消融 (100/400/800) | Reward | 6-7 | ⬜ |
+| T-EXP-VLM-02 | VLM LoRA rank (r=8/32/64) | Reward | 3,4 | � r=8 ✅ (acc=0.794, FP=0%), r=32 训练中 (tmux `vlm_ablation`) |
+| T-EXP-VLM-03 | VLM 步数消融 (100/400/800) | Reward | 6 | 🔄 100步训练中 (tmux `vlm_steps_ablation`), ckpt: `ablation_100steps/` |
 | T-EXP-VLM-04 | VLM video vs images 模式 | Reward | 6-7 | ✅ video AUC=0.83>>0.72, Youden α=0.40, 确认 WM 为瓶颈 |
 
 > **T-EXP-WM-05 说明 (ADR-013)**: 已知扩大步数无收益，但尚未探索减少步数是否能更早达到最优点。将 validation_steps 从 500 降至 100，绘制完整 step-PSNR 曲线。若 500-1000 步已足够，WM 训练时间从 ~2h 缩短至 ~0.5-1h。

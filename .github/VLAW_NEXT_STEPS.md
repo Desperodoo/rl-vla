@@ -1,6 +1,6 @@
 # VLAW 下一步推进计划
 
-> **最后更新**: 2026-03-02 15:10 (T+7) | **历史版本**: `docs/vlaw/archive/VLAW_NEXT_STEPS_*.md`
+> **最后更新**: 2026-03-02 21:25 (T+7) | **历史版本**: `docs/vlaw/archive/VLAW_NEXT_STEPS_*.md`
 > **状态面板**: [`vlaw-status.md`](vlaw-status.md) | **任务注册表**: [`TASK_REGISTRY.md`](TASK_REGISTRY.md) | **评测汇总**: [`docs/vlaw/baselines_and_evaluation.md`](../docs/vlaw/baselines_and_evaluation.md)
 
 ---
@@ -29,6 +29,11 @@
 - ✅ **WM 自回归 Rollout 模糊调研** — 详见 [`docs/vlaw/wm_autoregressive_blurring_research.md`](../docs/vlaw/wm_autoregressive_blurring_research.md)
 - ✅ **T-EXP-WM-05: WM 最优步数搜索** — 2000步, loss=0.0268, ckpt@500/1000/1500/2000, tmux `wm_optimal`
 - ✅ **T-EXP-WM-05-EVAL: WM 最优步数评估 (ADR-018)** — 4个 ckpt 评估: 1000步最优性价比 (PSNR=25.80, SSIM=0.891, LPIPS=0.056), 2000步 PSNR=25.87 仅微弱优势。后续 WM 训练可缩短至 1000 步 (节省 50% 时间)
+- ✅ **T-VLM-LABEL-002b: VLM 标注 002b sliding window 200条** — p_yes max=0.531 (旧噪声数据 0.27 →2倍提升), D_syn+(α=0.4)=7, D_syn+(α=0.8)=0。首次产出 D_syn+ > 0！
+- ✅ **T-EXP-VLM-02 r=8 完成** — acc=0.794, FP=0%, ROC-AUC 待确认, ckpt: `ablation_lora_r8/`
+- ✅ **T-BC-SCALING-V2 全部完成** — 6/6组 20K步从零训练: 25d=0.02, 50d=0.04, 100d=0.10, 200d=0.16, 400d=0.32, 669d=0.40 (success_once). Go/No-Go: 669d=40%>30% ✅. 结果: `results/vlaw/bc_scaling_v2/scaling_results.jsonl`
+- ✅ **T-MBRL-ENV 完成** — ImaginationRLEnv 实现 + 40/40 pytest 通过 (`rlft/vlaw/world_model/imagination_rl_env.py`, 37KB). WM+VLM 包装为 Gym 环境接口已就绪
+- 🔄 **T-EXP-VLM-03 运行中** — VLM 步数消融 100步, GPU 6, tmux `vlm_steps_ablation`, ckpt: `ablation_100steps/`
 
 ---
 
@@ -202,7 +207,7 @@ Iter-1 完成 (策略退化 78.1% → 17.2%)
 
 | task_id | 任务 | owner | GPU | 依赖 |
 |---------|------|-------|-----|------|
-| T-MBRL-ENV | 实现 WM+VLM 作为 Gym 环境接口 (ImaginationRLEnv): obs→action→WM(next_obs)→VLM(reward) | Imagination | — | 阶段 A ✅ |
+| T-MBRL-ENV | 实现 WM+VLM 作为 Gym 环境接口 (ImaginationRLEnv): obs→action→WM(next_obs)→VLM(reward) | Imagination | — | ✅ 40/40 pytest, `rlft/vlaw/world_model/imagination_rl_env.py` |
 | T-MBRL-BC-FINETUNE | 在 ImaginationRLEnv 中微调 BC 预训练策略 (RLPD/DSRL/PLD 管线) | Policy | 8-9 | T-MBRL-ENV ✅ + B1 go |
 | T-MBRL-EVAL | 在 ManiSkill 真实环境中评估 MBRL 微调后的策略 | Eval | 8-9 | T-MBRL-BC-FINETUNE ✅ |
 
@@ -231,14 +236,15 @@ Iter-1 完成 (策略退化 78.1% → 17.2%)
 | **P0** | ~~**T-DIAG-SYN-001~003**~~ | ~~**D_syn+ = 0 诊断三步**~~ | ~~Imagination+Data+Reward~~ | ✅ 完成，根因=WM质量 |
 | **P0** | ~~**T-DIAG-WM-PIPELINE**~~ | ~~**WM/VAE 合成 pipeline 深入调查**~~ | ~~Imagination+WM~~ | ✅ 已定位: BUG-019 (初始 latent=随机噪声), 已修复并验证 |
 | **P0** | ~~**T-WM-ALIGN-HISTORY**~~ | ~~**对齐官方 history buffer: list式+稀疏采样+第一帧锚定+num_history=6**~~ | ~~Imagination~~ | ✅ 3文件4处修改 |
-| **P0** | **T-IMAGINATION-002a** | **用对齐后脚本生成 200 条合成轨迹 (官方做法)** | Imagination | 🔄 ~20/200, GPU 5, ETA ~8h |
+| **P0** | **T-IMAGINATION-002a** | **用对齐后脚本生成 200 条合成轨迹 (官方做法)** | Imagination | 🔄 180/200, GPU 5, ETA ~1h |
 | **P0** | ~~**T-IMAGINATION-002b**~~ | ~~**用当前滑动窗口代码生成 200 条合成轨迹 (对照组)**~~ | ~~Imagination~~ | ✅ 200/200, 534.6min |
-| **P0** | **T-WM-ALIGN-ABLATION** | **消融对比: 对齐 vs 当前 (帧质量+VLM p_yes+D_syn+)** | Eval | ⬜ 依赖 002a+002b |
-| **P0** | **T-VLM-LABEL-002** | **对优胜组做正式 VLM 标注** | Reward | ⬜ 依赖 T-WM-ALIGN-ABLATION |
+| **P0** | ~~**T-VLM-LABEL-002b**~~ | ~~**VLM 标注 002b (sliding window)**~~ | ~~Reward~~ | ✅ p_yes max=0.531, D_syn+(α=0.4)=7, 首次 D_syn+>0 |
+| **P0** | **T-VLM-LABEL-002a** | **VLM 标注 002a (aligned)** | Reward | ⬜ 依赖 T-IMAGINATION-002a 完成 |
+| **P0** | **T-WM-ALIGN-ABLATION** | **消融对比: 对齐 vs 当前 (帧质量+VLM p_yes+D_syn+)** | Eval | ⬜ 依赖 002a 标注完成 |
 | P1 | T-BC-SCALING | Demo scaling curve (25~669 条) | Policy | ✅ v1 完成 (5K步, 全≈0%), ADR-020: 重做 20K步 |
-| P1 | **T-BC-SCALING-V2** | **Demo scaling curve 20K步版** | Policy | ⬜ 待执行 (GPU 8-9) |
+| P1 | **T-BC-SCALING-V2** | **Demo scaling curve 20K步版** | Policy | ✅ 6/6组全完成: 25d=0.02, 50d=0.04, 100d=0.10, 200d=0.16, 400d=0.32, 669d=0.40 |
 | P2 | T-BC-FLYWHEEL-A/B | 纯 BC 数据飞轮 A/B 对比实验 | Policy | ⬜ (等 D_syn+ > 0) |
-| P3 | T-MBRL-ENV | WM+VLM 包装为 RL 环境接口 | Imagination | ⬜ (等 B1 go) |
+| P3 | T-MBRL-ENV | WM+VLM 包装为 RL 环境接口 | Imagination | ✅ ImaginationRLEnv 40/40 pytest |
 | P3 | T-MBRL-BC-FINETUNE | Model-based RL 微调 BC 策略 | Policy | ⬜ (等 T-MBRL-ENV) |
 | P4 | T-ITER-LOOP-DESIGN | 迭代循环设计 | Coordinator | ⬜ (等 B2 go) |
 | P4 | T-ITER-ROUND-2/3 | 多轮迭代 | 全部 | ⬜ |
@@ -246,7 +252,7 @@ Iter-1 完成 (策略退化 78.1% → 17.2%)
 | 支线 | **T-DATA-CLEANUP** | **数据审计与规整** | Data | ✅ Phase 1 完成: eval_fixed (15条) + reencode 清理 + eval_wm_standard.py |
 | 支线 | **T-EXP-WM-05v2** | **WM 最优步数搜索 v2** (num_frames=5, demos, 20 ckpts) | WM | 🔄 GPU 1,2,7,8, tmux `wm_05v2` |
 | 支线 | T-EXP-WM-02~04 | WM 扩展消融 | WM | ⬜ |
-| 支线 | T-EXP-VLM-02~04 | VLM 扩展消融 | Reward | 🔴 T-EXP-VLM-02 r=8 训练中 (GPU 3,4, tmux `vlm_ablation`), 串行 r=8→32→64 |
+| 支线 | T-EXP-VLM-02~04 | VLM 扩展消融 | Reward | 🔄 T-EXP-VLM-02 r=8 ✅ (acc=0.794, FP=0%), r=32 训练中; T-EXP-VLM-03 100步训练中 (GPU 6) |
 
 > **策略微调方案 (ADR-014 修订)**: 底层验证优先路线 — 先诊断 D_syn+=0 → BC 验证数据飞轮 → Model-based RL → 迭代共同改进
 > 详见 [`docs/vlaw/policy_finetuning_strategy_report.md`](../docs/vlaw/policy_finetuning_strategy_report.md)
@@ -293,7 +299,7 @@ Iter-1 完成 (策略退化 78.1% → 17.2%)
 | task_id | 实验 | 变量 | 对照 (16帧 当前) | GPU | 预估时间 |
 |---------|------|------|-------------------|-----|---------|
 | T-EXP-VLM-01 | 帧数消融 | 4✅/8✅/32⬜ | 16 帧 | 6-7 | 4帧: acc=0.706,FP=11.1%; 8帧: acc=0.735,FP=18.5%,AUC=0.8269 |
-| T-EXP-VLM-02 | LoRA rank 消融 | r=8 / r=32 / r=64 | r=16 | 3,4 | 🔴 r=8 训练中 (tmux `vlm_ablation`, 串行 r=8→32→64) |
+| T-EXP-VLM-02 | LoRA rank 消融 | r=8 / r=32 / r=64 | r=16 | 3,4 | � r=8 ✅ (acc=0.794, FP=0%), r=32 训练中 (tmux `vlm_ablation`) |
 | T-EXP-VLM-03 | 训练步数消融 | 100 / 400 / 800 步 | 200 步 | 6-7 | ~0.5-4h |
 | ~~T-EXP-VLM-04~~ | ~~video 模式 vs images 模式~~ | ~~video input~~ | ~~images (当前)~~ | 6-7 | ✅ **video AUC=0.83 >> images 0.72**, Youden α=0.40, ADR-015 |
 

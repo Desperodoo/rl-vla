@@ -1,0 +1,45 @@
+{
+  "experiment": "T-BC-SCALING-V2",
+  "task": "LiftPegUpright-v1",
+  "total_iters": 20000,
+  "eval_episodes": 50,
+  "algorithm": "shortcut_flow",
+  "results": {
+    "25": {
+      "success_once": "0.02",
+      "success_at_end": "N/A",
+      "exit_code": 0,
+      "timestamp": "20260302_201246"
+    },
+    "50": {
+      "success_once": "0.04",
+      "success_at_end": "N/A",
+      "exit_code": 0,
+      "timestamp": "20260302_201119"
+    },
+    "100": {
+      "success_once": "0.1",
+      "success_at_end": "0.02",
+      "exit_code": 0,
+      "timestamp": "20260302_204201"
+    },
+    "200": {
+      "success_once": "0.16",
+      "success_at_end": "0.02",
+      "exit_code": 0,
+      "timestamp": "20260302_204115"
+    },
+    "400": {
+      "success_once": "0.32",
+      "success_at_end": "0.02",
+      "exit_code": 0,
+      "timestamp": "20260302_211253"
+    },
+    "669": {
+      "success_once": "0.4",
+      "success_at_end": "0.06",
+      "exit_code": 0,
+      "timestamp": "20260302_211306"
+    }
+  }
+}
