@@ -1,0 +1,2 @@
+{"n_demos": 669, "total_iters": 100000, "best_success_once": "0.54", "best_success_at_end": "0.12", "exit_code": 0, "gpu": 9, "timestamp": "20260302_235953"}
+{"n_demos": 100, "total_iters": 100000, "best_success_once": "0.1", "best_success_at_end": "0.02", "exit_code": 0, "gpu": 0, "timestamp": "20260303_000416"}

@@ -287,3 +287,29 @@
   1. Imagination pipeline 必须有"初始帧来源"的显式配置和日志打印，禁止使用 `torch.randn` 生成初始 latent
   2. 新增合成轨迹后，必须先解码若干帧做 sanity check，再大批量生成
   3. 所有 pipeline 关键输入（初始帧、动作序列）应有 shape/range 断言和日志记录
+
+---
+
+## BUG-020: demo_prep.py 将 rgb_base 复制为 rgb_render — 全数据链污染
+
+- **发现**: 2026-03-04 WM 可视化对比时发现 timing_test base/render 同一视角
+- **文件**: `rlft/vlaw/data/demo_prep.py` (L296, `replay_to_rgb()` 函数)
+- **症状**: 所有 demo 轨迹的 `rgb_base` 与 `rgb_render` 完全相同 (pixel diff = 0.00)，而 rollout 数据双相机差异正常 (diff = 56.68)
+- **根因**: ManiSkill 官方 demo replay 只产出 `base_camera` 一个相机视角（无法 `env.render()` 获取 render_camera）。`demo_prep.py` 第 296 行 `rgb_render = rgb_base.copy()` 直接复制，docstring L10 明确写着 "由于标准 replay 只有 single base_camera，复用 rgb_base 作为 rgb_render"
+- **影响范围（全链路污染）**:
+  1. `data/vlaw/demos/` — 所有 25 条 demo 的 rgb_render ≡ rgb_base
+  2. `data/vlaw/encoded/demos/` — VAE 编码后 latent_concat top-bot diff ≈ 0.057（正常应 ~0.85）
+  3. `data/vlaw/encoded/eval_fixed/` traj 0-4 — demo 来源，同样污染
+  4. **全部 WM 训练** (iter1, ablation_*, optimal_*) — 只用 demos 训练 → 学到的是 "两个视角相同" 的分布
+  5. **全部 Imagination 合成数据** — 基于污染 WM 生成
+  6. **全部 VLM 标注** — 基于污染 synthetic 标注
+  7. **全部策略训练** — 基于污染 labeled + combined 数据
+- **修复**: 彻底放弃官方 demo，用预训练策略直接收集新数据（双相机正确）
+  - 新数据收集后立即校验: `rgb_base` vs `rgb_render` pixel mean diff > 30
+  - `demo_prep.py` 标记为 DEPRECATED
+- **归档**: 全部旧数据移至 `data/vlaw/_archive/v1_contaminated/`，旧 ckpt 移至 `checkpoints/vlaw/_archive/v1/`
+- **预防**:
+  1. 任何两相机数据管线，收集完成后必须做 `assert (rgb_base - rgb_render).mean() > MIN_DIFF` 校验
+  2. 不信任 demo replay 输出的多相机数据，除非显式验证每个相机视角独立
+  3. 新建 `encoded/` 数据后，检查 latent_concat 的 top/bottom 半区 diff > 0.5
+- **详细计划**: [VLAW_FRESH_START_PLAN.md](../VLAW_FRESH_START_PLAN.md)

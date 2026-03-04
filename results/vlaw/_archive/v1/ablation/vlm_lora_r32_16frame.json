@@ -1,0 +1,42 @@
+{
+  "auc": 0.34525025536261494,
+  "youden_threshold": Infinity,
+  "youden_j": 0.0,
+  "acc_alpha": 0.89,
+  "acc_youden": 0.89,
+  "fp_rate_alpha": 0.0,
+  "fp_rate_youden": 0.0,
+  "cm_alpha": [
+    [
+      89,
+      0
+    ],
+    [
+      11,
+      0
+    ]
+  ],
+  "cm_youden": [
+    [
+      89,
+      0
+    ],
+    [
+      11,
+      0
+    ]
+  ],
+  "p_yes_mean_success": 0.001042762877080928,
+  "p_yes_mean_fail": 0.0014063303206466515,
+  "p_yes_std_success": 0.0005244136030814955,
+  "p_yes_std_fail": 0.000919138273205603,
+  "p_yes_max": 0.007577359676361084,
+  "p_yes_min": 0.00026119101676158607,
+  "youden_recall": 0.0,
+  "youden_fpr": 0.0,
+  "num_frames": 16,
+  "n_trajs": 100,
+  "n_success": 11,
+  "n_fail": 89,
+  "lora_path": "checkpoints/vlaw/reward_model/ablation_lora_r32/final"
+}

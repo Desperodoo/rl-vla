@@ -185,4 +185,107 @@
   - 若 20K 仍不够，考虑改为从预训练 ckpt 微调 (但与"数据飞轮验证"目标冲突)
 - **新任务**: T-BC-SCALING-V2, GPU 8-9, 6 组 (25/50/100/200/400/669 demos)
 - **Go/No-Go**: 若至少 669 demos 组能达到 >30% success, 则 scaling curve 有信息量
+- **结果**: ✅ Go — 669d=0.40 > 30%. 完整 scaling: 25d=0.02, 50d=0.04, 100d=0.10, 200d=0.16, 400d=0.32, 669d=0.40
 - **日期**: 2026-03-02
+
+### ADR-021: History Buffer 对齐消融 — 无显著差异，保留当前做法
+
+- **背景**: ADR-016 提出对齐官方 Ctrl-World 的列表式稀疏采样 history buffer (T-WM-ALIGN-HISTORY)，并设计了 T-IMAGINATION-002a (aligned) vs T-IMAGINATION-002b (sliding) 的消融实验
+- **实验设计**:
+  - **对齐组 (002a)**: 列表式 buffer + `[0,0,-12,-9,-6,-3]` + 第一帧锚定 + num_history=6, 200 条合成轨迹
+  - **对照组 (002b)**: 滑动窗口 `lat_buf[-window_len:]` + num_history=4, 200 条合成轨迹
+  - **其他条件一致**: 同 WM ckpt (iter1-2000), 同 policy (pretrained), 同初始 latent (BUG-019 修复后)
+- **结果**:
+
+  | 维度 | 对齐组 (002a) | 对照组 (002b) | 差异 |
+  |------|--------------|--------------|------|
+  | D_syn+ (α=0.4) | 6/200 | 7/200 | Δ=-1, 不显著 |
+  | p_yes max | 0.500 | 0.531 | sliding 略高 |
+  | p_yes mean | 0.179 | 0.153 | aligned 略高 (+17%) |
+  | D_syn+ (α=0.8) | 0 | 0 | 一致 |
+
+- **Go/No-Go 判定**: 未达到 "D_syn+ 多 ≥20% 或末帧 PSNR 高 ≥1dB" 的 go 标准。Δ=1 条差异在统计噪声范围内
+- **结论**: 两种 history buffer 策略对 VLM 评分无显著差异。**WM 合成质量仍是主要瓶颈** — 400 条中仅 13 条通过 α=0.4 过滤 (3.25%)。history 对齐无法解决根本问题
+- **决策**: 保留当前 sliding window 做法 (更简洁)，不强制切换到列表式。后续若 WM 质量提升使 D_syn+ 数量增大，可重新评估
+- **影响**: T-WM-ALIGN-HISTORY 的代码修改保留但不作为默认路径
+- **Task**: T-WM-ALIGN-ABLATION
+- **日期**: 2026-03-03
+
+### ADR-022: BC 飞轮实验设计 — 100K 步从头训练 + D_syn+ 混合
+
+- **背景**: T-BC-SCALING-V2 证明 20K 步从零训练有信息量 (669d=0.40, Go/No-Go ✅), 但与预训练 baseline ~80% 仍有差距
+- **方案**: 增至 100K 步 (10× SCALING-V2), 分 A/B 两组对比验证数据飞轮:
+  - **A 组 (纯 demo)**: 100 条 / 669 条真实 demo → 100K 步 ShortCut Flow 从头训练
+  - **B 组 (demo + D_syn+)**: A 组数据 + 13 条 VLM 筛选合成轨迹 (α=0.4) → 100K 步从头训练
+- **结果 (A 组)**: 100d=0.10, 669d=0.54 (success_once, 100K 步)
+- **Go/No-Go**: B 组 success_once 比 A 组提升 ≥ 3% → 证明数据飞轮有正面增益
+- **注意**: D_syn+ 仅 13 条 (3.25% 通过率), 增益可能有限。关键是验证方向正确性而非绝对增益
+- **新代码**: `scripts/vlaw/prepare_dsyn_plus_combined.py`, `scripts/vlaw/run_bc_flywheel_b_single.sh`
+- **日期**: 2026-03-03
+### ADR-023: 帧率与时间尺度不匹配 — Imagination 严重过长
+
+- **背景**: 调研 VLAW/Ctrl-World 的 imagination 时间设定后发现, 当前 ManiSkill 复现与 DROID 原版在帧率和 rollout 时长上存在系统性偏差
+- **发现 1 — WM 帧率不匹配 (6.67 Hz vs 5 Hz)**:
+  - DROID: 15 Hz 原始 → `down_sample=3` → **5 Hz** (WM 预训练帧率, 帧间隔 0.2s)
+  - ManiSkill: 20 Hz 原始 → `frame_skip=3` → **6.67 Hz** (帧间隔 0.15s)
+  - WM 预期每帧间有 0.2s 运动量, 实际只有 0.15s → 动作幅度被系统性低估 25%
+- **发现 2 — Imagination 时长远超任务时长 (最严重)**:
+  - LiftPegUpright 中位数完成时间: **2.4 秒** (~16 帧 @ 6.67Hz ≈ 3.2 个 interaction)
+  - 当前 Imagination: `12 interactions × 5帧 × 0.15s` = **9 秒** (60 帧)
+  - **~73% 的帧是无效外推**, 图像质量持续退化, 拖低 VLM p_yes
+  - 对比 DROID: imagination 12-20s ≈ 任务时长 12-20s → **1:1 匹配**
+- **发现 3 — D_syn+ 低通过率 (3.5%) 的新解释**:
+  - 不完全是 WM 本身质量不够, 而是让 WM 预测了远超必要的帧数, 后期退化帧拖垮整条轨迹的 VLM 评分
+- **推荐方案 (优先级排序)**:
+  1. **方案 A (最小改动)**: `num_interact` 从 12 缩短至 **4** (无需重新采集数据, 仅改 1 个参数)
+  2. **方案 B**: 同时改 `frame_skip=4` 对齐 5Hz (需重新采集数据)
+  3. **方案 C**: 全面重新设计 `num_frames/num_interact/num_history`
+- **验证方式**: 先用 `num_interact=4` 生成 50 条合成轨迹 → VLM 标注 → 对比 D_syn+ 通过率
+- **预期**: D_syn+ 从 3.5% 提升到 >10%, 生成速度提升 ~3×
+- **详细报告**: [`docs/vlaw/frame_rate_timing_analysis.md`](../../docs/vlaw/frame_rate_timing_analysis.md)
+- **日期**: 2026-03-03
+
+### ADR-024: WM 相关任务全部阻塞, 直到 TIMING 问题解决
+
+- **背景**: ADR-023 发现 Imagination 严重过长 (~73% 无效帧), 是 D_syn+ 低通过率 (3.5%) 的关键杠杆. 提升 D_syn+ 产出率优先于所有 WM 消融/评估/迭代
+- **决策**: **所有 WM 相关实验/评估/imagination 生成/迭代循环全部阻塞**, 直到 TIMING 方案验证完成
+- **阻塞任务列表**:
+  - T-EXP-WM-05v2-EVAL (20 ckpt 评估)
+  - T-EXP-WM-02~06 (WM 扩展消融)
+  - T-IMAGINATION-003 (新合成数据生成)
+  - T-MBRL-BC-FINETUNE (Imagination RL)
+  - T-WM-ITER2 (第 2 轮迭代)
+- **不受影响的任务**: VLM 消融 (T-EXP-VLM-02-EVAL, T-EXP-VLM-03-BUG), BC 飞轮分析 (T-BC-FLYWHEEL-EVAL)
+- **解除条件**: T-TIMING-QUICKTEST 完成 → 无论 Go/No-Go, 根据结果决定后续 WM 任务是否恢复
+- **WM finetuning 与 TIMING 关系分析**:
+  - **方案 A (num_interact=4)**: 仅影响推理, **不影响 WM 训练**, 现有 WM ckpt 全部可复用
+  - **方案 B (frame_skip=4)**: 改变数据帧率 6.67Hz→5Hz, **需要推倒重来**: 重新采集→重新 VAE 编码→重新训练 WM→重新计算 stat.json
+  - **方案 B 的好处**: frame_skip=4 对齐 DROID 5Hz, 与 pretrained 权重先验更匹配, 理论上 finetuning 收敛更快
+- **执行顺序**: 方案 A → 验证有效 → 方案 B → 数据+WM 推倒重来
+
+### ADR-025: TIMING 方案 A No-Go — 保持 num_interact=12
+
+- **背景**: ADR-023 提出 `num_interact` 从 12 缩短至 4 以减少无效帧（方案 A）
+- **实验**: T-TIMING-QUICKTEST — 50 条合成轨迹，`num_interact=4`（20帧/条），VLM 标注
+- **结果**: D_syn+(α=0.4) = **0/50** (更差！旧方案 7/200 = 3.5%)
+- **分析**: 20 帧太短，LiftPegUpright 完成动作需更多时间。缩短 rollout 导致 VLM 无法观察到成功迹象
+- **决策**: Plan A 失败，**保持 `num_interact=12`**。ADR-024 阻塞解除
+- **日期**: 2026-03-04
+
+### ADR-026: 数据全面重置（Fresh Start）
+
+- **背景**: BUG-020 发现 `demo_prep.py` `rgb_render = rgb_base.copy()` 导致全部 demo 数据双相机坍塌
+- **污染范围**: demos → encoded/demos → WM 全部训练 → imagination → synthetic → labeled → combined → policy → 所有评估结果
+- **唯一干净数据**: rollout 数据（`data_collector.py` 使用 `env.render()` 获取独立 render_camera）
+- **决策**: 
+  1. 彻底放弃官方 demo，用预训练策略收集新双相机数据
+  2. 全部旧数据/ckpt/results 归档到 `_archive/v1_contaminated/` 和 `_archive/v1/`
+  3. 重新执行全部实验（WM/VLM/Imagination/Policy）
+- **VLM 独立 bug**: gradient_accumulation=128 导致 VLM 消融结果异常，与 BUG-020 独立但同时修复
+- **预期收益**: 
+  - 数据量从 25 条 demo → ≥200 条 rollout（10×增长）
+  - 双相机正确 → WM 学到正确的多视角分布
+  - 两个 bug 同时修复 → 所有消融实验结论可信
+- **详细计划**: [VLAW_FRESH_START_PLAN.md](../VLAW_FRESH_START_PLAN.md)
+- **日期**: 2026-03-04
+- **日期**: 2026-03-03

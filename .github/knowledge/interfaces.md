@@ -39,10 +39,14 @@ def score_trajectory(frames: List[PIL.Image] | ndarray,  # 16帧
 
 | 类型 | 路径 |
 |------|------|
-| 演示 | `data/vlaw/demos/{task}/` → `encoded/demos/{task}/` |
-| Rollout | `data/vlaw/rollouts/iter{N}/` → `encoded/rollouts/iter{N}/` |
+| Rollout (高成功率) | `data/vlaw/rollouts/high_suc/{task}/` → `encoded/train/{task}/` |
+| Rollout (混合) | `data/vlaw/rollouts/mixed/{task}/` → `encoded/train/{task}/` |
+| Rollout (评估) | `data/vlaw/rollouts/eval/{task}/` → `encoded/eval/eval_set.h5` |
 | 合成 | `data/vlaw/synthetic/iter{N}/` |
+| 标注 | `data/vlaw/labeled/iter{N}/` |
 | 统计量 | `data/vlaw/meta_info/maniskill/stat.json` |
 | WM ckpt | `checkpoints/vlaw/world_model/{pretrained,iter1}/` |
 | VLM ckpt | `checkpoints/vlaw/reward_model/{qwen_vl,lora_iter1}/` |
 | Policy ckpt | `checkpoints/vlaw/policy/iter{N}/` |
+
+> ⚠️ 旧路径 `demos/`, `encoded/demos/` 已废弃 (BUG-020). 详见 [VLAW_FRESH_START_PLAN.md](../VLAW_FRESH_START_PLAN.md).

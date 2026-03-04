@@ -1,0 +1,42 @@
+{
+  "auc": 0.3667007150153218,
+  "youden_threshold": 0.0013250319752842188,
+  "youden_j": 0.06945863125638407,
+  "acc_alpha": 0.89,
+  "acc_youden": 0.8,
+  "fp_rate_alpha": 0.0,
+  "fp_rate_youden": 0.11235955056179775,
+  "cm_alpha": [
+    [
+      89,
+      0
+    ],
+    [
+      11,
+      0
+    ]
+  ],
+  "cm_youden": [
+    [
+      79,
+      10
+    ],
+    [
+      10,
+      1
+    ]
+  ],
+  "p_yes_mean_success": 0.0006576764003098519,
+  "p_yes_mean_fail": 0.0008226899087449975,
+  "p_yes_std_success": 0.0004471647662846105,
+  "p_yes_std_fail": 0.0004980108658877638,
+  "p_yes_max": 0.0035936322528868914,
+  "p_yes_min": 0.00013982220843899995,
+  "youden_recall": 0.18181818181818182,
+  "youden_fpr": 0.11235955056179775,
+  "num_frames": 16,
+  "n_trajs": 100,
+  "n_success": 11,
+  "n_fail": 89,
+  "lora_path": "checkpoints/vlaw/reward_model/ablation_lora_r64/final"
+}

@@ -1,0 +1,2 @@
+{"n_demos_base": "100demos", "n_total_traj": 113, "total_iters": 100000, "best_success_once": "0.34", "best_success_at_end": "0.1", "exit_code": 0, "gpu": 0, "timestamp": "20260303_025702"}
+{"n_demos_base": "669demos", "n_total_traj": 682, "total_iters": 100000, "best_success_once": "0.48", "best_success_at_end": "0.1", "exit_code": 0, "gpu": 9, "timestamp": "20260303_025920"}
