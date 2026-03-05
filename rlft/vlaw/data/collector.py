@@ -231,6 +231,9 @@ class CollectorConfig:
     frame_skip: int = 3
     """ManiSkill 控制频率 / 保存频率 = frame_skip (下采样到 ~5Hz)"""
 
+    min_traj_length: int = 10
+    """最小轨迹长度, 短于此的轨迹将被丢弃 (BUG-021 Fix 3)"""
+
     # GPU
     gpu_id: int = 4
     """使用的 GPU"""
@@ -522,15 +525,19 @@ class VLAWDataCollector:
             )
 
         # 检测 checkpoint 类型:
-        # - PLD-SAC: dict 含 "agent" + "config" 两个 key
+        # - PLD-SAC: dict 含 "agent" + "config" 两个 key，且 agent 子 key 无 velocity_net
+        # - AWSC:    dict 含 "agent" + "config" 两个 key，但 agent 子 key 有 velocity_net
         # - ShortCut Flow: dict 含 "agent" 但 agent 的子 key 以 velocity_net 开头
         _raw = torch.load(
             self.cfg.checkpoint_path, map_location="cpu", weights_only=False
         )
+        _agent_sd = _raw.get("agent", {})
+        _has_velocity_net = any(k.startswith("velocity_net.") for k in _agent_sd.keys())
         _is_pld = (
             isinstance(_raw, dict)
             and "agent" in _raw
             and "config" in _raw  # PLD-SAC checkpoint 包含 config 字典
+            and not _has_velocity_net  # AWSC 有 velocity_net，PLD-SAC 没有
         )
 
         from rlft.networks import PlainConv
@@ -540,12 +547,21 @@ class VLAWDataCollector:
             print(f"[VLAW-P1.1] 检测到 PLD-SAC checkpoint: {self.cfg.checkpoint_path}")
             return self._load_pld_policy(_raw)
 
-        print(f"[VLAW-P1.1] 加载 ShortCut Flow: {self.cfg.checkpoint_path}")
+        # 从 checkpoint config 中提取 pred_horizon（AWSC 用 8，纯 BC 用 16）
+        _ckpt_config = _raw.get("config", {})
+        _pred_horizon = int(_ckpt_config.get("pred_horizon", 16))
+        _has_ema = any(k.startswith("velocity_net_ema.") for k in _agent_sd.keys())
+        if _has_ema:
+            print(f"[VLAW-P1.1] 检测到 AWSC checkpoint (EMA+config), "
+                  f"pred_horizon={_pred_horizon}: {self.cfg.checkpoint_path}")
+        else:
+            print(f"[VLAW-P1.1] 加载 ShortCut Flow: {self.cfg.checkpoint_path}")
 
         wrapper, visual_encoder, _state_dim = load_shortcut_flow_policy(
             self.cfg.checkpoint_path,
             visual_encoder_class=PlainConv if self.cfg.include_rgb else None,
             obs_horizon=self.cfg.obs_horizon,
+            pred_horizon=_pred_horizon,
             visual_feature_dim=self.cfg.visual_feature_dim,
             include_rgb=self.cfg.include_rgb,
             device=str(self.device),
@@ -556,7 +572,8 @@ class VLAWDataCollector:
             device=self.device,
             include_rgb=self.cfg.include_rgb,
             obs_horizon=self.cfg.obs_horizon,
-            act_steps=self.cfg.act_steps,
+            action_pred_horizon=_pred_horizon,
+            act_steps=min(self.cfg.act_steps, _pred_horizon),
         )
         return policy, visual_encoder
 
@@ -687,13 +704,21 @@ class VLAWDataCollector:
         state_history: Optional[np.ndarray] = None   # (N, T, state_dim)
         rgb_history: Optional[np.ndarray] = None     # (N, T, H, W, 3)
 
+        # Per-episode step counters (BUG-021 Fix 2)
+        step_in_episode = np.zeros(N, dtype=int)
+
         # 重置
         obs, _ = env.reset(seed=42)
-        step = 0
+        global_step = 0
         episode_count = 0
+        discarded_short = 0
+        discarded_empty = 0
+        discarded_ghost = 0
+        min_traj_len = cfg.min_traj_length
         t_start = time.perf_counter()
 
-        print(f"[VLAW-P1.1] 开始收集: 目标 {target_episodes} 条轨迹")
+        print(f"[VLAW-P1.1] 开始收集: 目标 {target_episodes} 条轨迹, "
+              f"min_traj_length={min_traj_len}, frame_skip={cfg.frame_skip}")
 
         while episode_count < target_episodes:
             # ---- 提取当前 obs ----
@@ -752,6 +777,8 @@ class VLAWDataCollector:
 
             # ---- 执行 action chunk 中的每一步 ----
             chunk_len = action_chunk.shape[1]
+            # Track envs finished during this chunk (BUG-021 Fix 1)
+            done_in_chunk = np.zeros(N, dtype=bool)
             for t_chunk in range(chunk_len):
                 actions = action_chunk[:, t_chunk, :]  # (N, action_dim)
 
@@ -777,11 +804,16 @@ class VLAWDataCollector:
                 terminated_np = _np(terminated).astype(bool)
                 truncated_np = _np(truncated).astype(bool)
                 done = np.logical_or(terminated_np, truncated_np)
-                step += 1
+                global_step += 1
 
                 # ---- 提取 success ----
+                # BUG-021 Fix: 优先使用 step-level info["success"]
+                # final_info 仅在 done 时对 done env 有效，对非 done env 为 0
                 success_arr: np.ndarray
-                if (
+                if "success" in info:
+                    s = info["success"]
+                    success_arr = _np(s).astype(bool)
+                elif (
                     "final_info" in info
                     and isinstance(info["final_info"], dict)
                     and "episode" in info["final_info"]
@@ -789,18 +821,24 @@ class VLAWDataCollector:
                 ):
                     s = info["final_info"]["episode"]["success_once"]
                     success_arr = _np(s).astype(bool)
-                elif "success" in info:
-                    s = info["success"]
-                    success_arr = _np(s).astype(bool)
                 elif "episode" in info and "success" in info["episode"]:
                     s = info["episode"]["success"]
                     success_arr = _np(s).astype(bool)
                 else:
                     success_arr = np.zeros(N, dtype=bool)
 
-                # ---- 记录帧 (frame_skip 下采样) ----
-                if step % cfg.frame_skip == 0:
-                    for i in range(N):
+                # ---- 记录帧 (BUG-021 Fix 2+4: per-episode frame_skip) ----
+                for i in range(N):
+                    if done_in_chunk[i]:
+                        # BUG-022 Fix: still increment step count for ghost episodes
+                        step_in_episode[i] += 1
+                        continue  # Don't record frames for ghost episodes
+                    step_in_episode[i] += 1
+                    # Fix 4: 强制记录第一帧和最后帧
+                    is_first = (step_in_episode[i] == 1)
+                    is_regular = (step_in_episode[i] % cfg.frame_skip == 0)
+                    is_final = bool(done[i])
+                    if is_first or is_regular or is_final:
                         active_trajs[i].append(
                             rgb_base=rgb_base[i],
                             rgb_render=rgb_render[i],
@@ -810,56 +848,134 @@ class VLAWDataCollector:
                             success=bool(success_arr[i]),
                         )
 
-                # ---- 幕结束处理 ----
-                if np.any(done):
-                    done_indices = np.where(done)[0]
+                # ---- 幕结束处理 (BUG-021 Fix 1: NO global break) ----
+                # BUG-022 safety: detect ghost episodes (should be rare after
+                # partial-reset fix below, kept as safety net)
+                ghost_done = np.where(done & done_in_chunk)[0]
+                for i in ghost_done:
+                    discarded_ghost += 1
+                    if cfg.verbose and discarded_ghost <= 10:
+                        print(
+                            f"[VLAW-P1.1] 幽灵幕丢弃: env={i} "
+                            f"ghost_steps={step_in_episode[i]}"
+                        )
+                    active_trajs[i] = Trajectory(i)
+                    step_in_episode[i] = 0
 
-                    for i in done_indices:
-                        traj = active_trajs[i]
-                        if len(traj) > 0:
-                            traj_dict = traj.to_arrays()
-                            traj_dict["task_instruction"] = task_instruction
-                            traj_dict["source"] = cfg.source_tag
-                            completed_trajs.append(traj_dict)
-                            episode_count += 1
-                            if cfg.verbose:
-                                final_success = traj_dict["env_success"].any()
-                                print(
-                                    f"[VLAW-P1.1] 幕 {episode_count:4d}/{target_episodes} "
-                                    f"env={i:3d} T={len(traj):4d} "
-                                    f"success={'✅' if final_success else '❌'}"
-                                )
+                newly_done = np.where(done & ~done_in_chunk)[0]
+                for i in newly_done:
+                    traj = active_trajs[i]
+                    if len(traj) == 0:
+                        discarded_empty += 1
+                    elif len(traj) < min_traj_len:
+                        # Fix 3: 过滤短轨迹
+                        discarded_short += 1
+                        if cfg.verbose and discarded_short <= 20:
+                            print(
+                                f"[VLAW-P1.1] 丢弃短轨迹: env={i} T={len(traj)} "
+                                f"(< min_traj_length={min_traj_len})"
+                            )
+                    else:
+                        traj_dict = traj.to_arrays()
+                        traj_dict["task_instruction"] = task_instruction
+                        traj_dict["source"] = cfg.source_tag
+                        completed_trajs.append(traj_dict)
+                        episode_count += 1
+                        if cfg.verbose:
+                            # Fix 5: success_at_end
+                            final_success = bool(traj_dict["env_success"][-1])
+                            print(
+                                f"[VLAW-P1.1] 幕 {episode_count:4d}/{target_episodes} "
+                                f"env={i:3d} T={len(traj):4d} "
+                                f"success_at_end={'✅' if final_success else '❌'}"
+                            )
 
-                        # 重置该环境的历史缓冲
-                        # ManiSkill auto-reset 后 obs 已包含新幕的初始帧
-                        active_trajs[i] = Trajectory(i)
-                        # 用当前帧填充（模仿 FrameStack.reset 行为）
-                        if isinstance(obs, dict) and "state" in obs and "rgb" in obs:
-                            _st = _np(obs["state"]).astype(np.float32)
-                            _rgb = _np(obs["rgb"]).astype(np.uint8)
-                            for _th in range(cfg.obs_horizon):
-                                state_history[i, _th] = _st[i]
-                                rgb_history[i, _th] = _rgb[i]
-                        else:
-                            state_history[i] = 0
-                            rgb_history[i] = 0
-
-                        if episode_count >= target_episodes:
-                            break
+                    # 重置该环境的轨迹和计数器
+                    active_trajs[i] = Trajectory(i)
+                    done_in_chunk[i] = True
+                    step_in_episode[i] = 0
 
                     if episode_count >= target_episodes:
                         break
 
-                    # 对齐 evaluate()：在 episode 结束时打断当前 chunk
+                # ---- BUG-022 ROOT FIX: explicit partial reset ----
+                # ManiSkill3 GPU vec env has NO auto-reset.
+                # After done, truncated/terminated flags stay True permanently
+                # and elapsed_steps keeps incrementing. We must explicitly
+                # reset done sub-envs to clear their internal state.
+                all_reset_indices = list(ghost_done) + list(newly_done)
+                if all_reset_indices:
+                    _reset_idx = torch.tensor(
+                        all_reset_indices, dtype=torch.int64, device="cuda",
+                    )
+                    try:
+                        obs, _ = env.reset(options={"env_idx": _reset_idx})
+                    except Exception as _e:
+                        if cfg.verbose:
+                            print(f"[VLAW-P1.1] partial reset failed ({_e}), full reset")
+                        obs, _ = env.reset()
+                    # Re-sync obs history for reset envs from fresh obs
+                    if isinstance(obs, dict) and "state" in obs and "rgb" in obs:
+                        _st = _np(obs["state"]).astype(np.float32)
+                        _rgb = _np(obs["rgb"]).astype(np.uint8)
+                        for _ri in all_reset_indices:
+                            for _th in range(cfg.obs_horizon):
+                                state_history[_ri, _th] = _st[_ri]
+                                rgb_history[_ri, _th] = _rgb[_ri]
+                    else:
+                        for _ri in all_reset_indices:
+                            state_history[_ri] = 0
+                            rgb_history[_ri] = 0
+
+                if episode_count >= target_episodes:
                     break
+
+                # BUG-021 Fix 1: NO break — let chunk continue for non-done envs
+
+            # Post-chunk sync: reset step counters and trajectory buffers
+            # for envs that completed mid-chunk. The explicit partial reset
+            # above already cleared the env's internal state; here we just
+            # clean up the collector's per-env bookkeeping.
+            for i in range(N):
+                if done_in_chunk[i] and step_in_episode[i] > 0:
+                    step_in_episode[i] = 0
+                    active_trajs[i] = Trajectory(i)
+                    # Re-sync obs_history from current obs
+                    if isinstance(obs, dict) and "state" in obs and "rgb" in obs:
+                        _st = _np(obs["state"]).astype(np.float32)
+                        _rgb = _np(obs["rgb"]).astype(np.uint8)
+                        for _th in range(cfg.obs_horizon):
+                            state_history[i, _th] = _st[i]
+                            rgb_history[i, _th] = _rgb[i]
+                    else:
+                        state_history[i] = 0
+                        rgb_history[i] = 0
 
             if episode_count >= target_episodes:
                 break
 
         elapsed = time.perf_counter() - t_start
-        sr = sum(t["env_success"].any() for t in completed_trajs) / max(len(completed_trajs), 1)
-        print(f"[VLAW-P1.1] 收集完成: {len(completed_trajs)} 条轨迹, "
-              f"成功率={sr:.1%}, 耗时={elapsed:.1f}s")
+        sr = sum(bool(t["env_success"][-1]) for t in completed_trajs) / max(len(completed_trajs), 1)
+
+        # 详细统计 (BUG-021)
+        all_lengths = [t["actions"].shape[0] for t in completed_trajs]
+        print(f"\n[VLAW-P1.1] === 收集完成 ===")
+        print(f"  有效轨迹: {len(completed_trajs)} 条")
+        print(f"  丢弃(T<{min_traj_len}): {discarded_short} 条")
+        print(f"  丢弃(空): {discarded_empty} 条")
+        print(f"  丢弃(幽灵幕): {discarded_ghost} 条")
+        print(f"  成功率(at_end): {sr:.1%}")
+        if all_lengths:
+            print(f"  轨迹长度: min={min(all_lengths)} max={max(all_lengths)} "
+                  f"mean={np.mean(all_lengths):.1f} median={np.median(all_lengths):.1f}")
+            # T 分布直方图
+            bins = [10, 20, 30, 40, 50, 60, 70, 80]
+            hist, _ = np.histogram(all_lengths, bins=bins + [999])
+            print(f"  T 分布: " + " | ".join(
+                f"{bins[j]}-{bins[j+1] if j+1 < len(bins) else '+'}: {hist[j]}"
+                for j in range(len(hist))
+            ))
+        print(f"  总耗时: {elapsed:.1f}s")
 
         env.close()
         return completed_trajs
@@ -910,7 +1026,7 @@ class VLAWDataCollector:
         out_path = Path(output_path)
         out_path.parent.mkdir(parents=True, exist_ok=True)
 
-        success_count = sum(t["env_success"].any() for t in trajectories)
+        success_count = sum(bool(t["env_success"][-1]) for t in trajectories)
         sr = success_count / max(len(trajectories), 1)
 
         with h5py.File(str(out_path), "w") as f:
@@ -934,10 +1050,10 @@ class VLAWDataCollector:
                         )
                 grp.attrs["task_instruction"] = traj.get("task_instruction", "")
                 grp.attrs["source"] = traj.get("source", "real")
-                grp.attrs["success"] = bool(traj["env_success"].any())
+                grp.attrs["success"] = bool(traj["env_success"][-1])
 
         print(f"[VLAW-P1.1] HDF5 已保存: {out_path} "
-              f"({len(trajectories)} 条, 成功率={sr:.1%})")
+              f"({len(trajectories)} 条, 成功率(at_end)={sr:.1%})")
         return out_path
 
     # ------------------------------------------------------------------

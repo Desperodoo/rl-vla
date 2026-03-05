@@ -1,6 +1,0 @@
-{"n_demos": 50, "total_iters": 20000, "best_success_once": "0.04", "best_success_at_end": "N/A", "exit_code": 0, "gpu": 9, "timestamp": "20260302_201119"}
-{"n_demos": 25, "total_iters": 20000, "best_success_once": "0.02", "best_success_at_end": "N/A", "exit_code": 0, "gpu": 0, "timestamp": "20260302_201246"}
-{"n_demos": 200, "total_iters": 20000, "best_success_once": "0.16", "best_success_at_end": "0.02", "exit_code": 0, "gpu": 9, "timestamp": "20260302_204115"}
-{"n_demos": 100, "total_iters": 20000, "best_success_once": "0.1", "best_success_at_end": "0.02", "exit_code": 0, "gpu": 0, "timestamp": "20260302_204201"}
-{"n_demos": 400, "total_iters": 20000, "best_success_once": "0.32", "best_success_at_end": "0.02", "exit_code": 0, "gpu": 0, "timestamp": "20260302_211253"}
-{"n_demos": 669, "total_iters": 20000, "best_success_once": "0.4", "best_success_at_end": "0.06", "exit_code": 0, "gpu": 9, "timestamp": "20260302_211306"}

@@ -11,6 +11,12 @@
 | ADR-001 | VLM: Qwen3-VL-4B-Instruct (8.3GB)，替换 Qwen2.5-VL-7B | 02-25 |
 | ADR-002 | 2 相机**垂直拼接** → (384×192) → latent (4,48,24) | 02-24 |
 | ADR-003 | Phase-A 仅训练 AE + temporal attn（已废弃，Iter1 改全量微调） | 02-24 |
+| ADR-028 | VLM v3 消融: r=16, 300步最优, α=0.5(平衡)/0.8(保守), r=8不可用 | 03-05 |
+| ADR-029 | VLM eval 集必须正负平衡 (v2 仅10%正→recall=0 失败), v3 47%正 ✅ | 03-05 |
+| ADR-030 | D_syn+ 产出率 v1→v3: 3.5%→33.3% (9.5×), 归因: v3数据+BUG-019修复+ckpt-400 | 03-05 |
+| ADR-031 | Imagination viz 质量差=预期行为 (自回归误差累积, 非 bug) | 03-05 |
+| ADR-033 | Imagination 5维度评估: latent OK (Δ<0.02), action ry bias 显著 (Δ=-0.516) 需监控 | 03-05 |
+| ADR-034 | ⛔ Imagination 人工审核不可用, eval_WM PSNR 有误导性, WM 需继续训练, 阻塞所有下游 | 03-05 |
 
 ---
 
@@ -289,3 +295,159 @@
 - **详细计划**: [VLAW_FRESH_START_PLAN.md](../VLAW_FRESH_START_PLAN.md)
 - **日期**: 2026-03-04
 - **日期**: 2026-03-03
+
+### ADR-027: 数据采集方案 A — 大量采集消除 Selection Bias
+
+- **背景**: v3 pilot 50 条数据 success_at_end=100% (BUG-024)，根因是成功 episode 早终止 + 采集数量不够
+- **真实成功率**: AWSC checkpoint → success_once=80%, success_at_end(200步)=46% (eval 脚本独立验证)
+- **ManiSkill3 环境行为确认**:
+  - `BaseEnv.step()` L1054: `terminated = info["success"].clone()` — 成功即终止
+  - `@register_env("LiftPegUpright-v1", max_episode_steps=50)` — 官方默认仅 50 步
+  - collector 使用 `max_episode_steps=200` 覆盖默认值
+  - 成功轨迹 10-120 步完成，失败轨迹 200 步 truncated
+- **方案**: 大量采集 num_episodes=1200+
+  - 64 env 并行，每轮先完成 ~51 个成功 ep (快速) + ~13 个失败 ep (200步)
+  - 多轮后失败轨迹自然混入，最终比率趋近真实分布
+  - 预期: ~80% success, ~20% failure (适合 WM/VLM 训练)
+- **min_traj_length=5**: 放宽阈值 (frame_skip=4 下部分成功轨迹 T 较短)
+- **用户确认**: 视觉检验 pilot 数据 GIF/strip 全部正确 ✅
+- **日期**: 2026-03-05
+
+### ADR-028: VLM v3 消融结论 — r=16, 300步, α=0.5~0.8【已固化】
+
+- **背景**: v3 数据 (frame_skip=4, 1200条 mixed) 上完成 VLM 全面消融，包含 Steps 消融、Threshold 消融、LoRA Rank 消融
+- **实验**:
+  - **Steps 消融** (r=16, α=0.8): 50/100/150/200/300/400 steps
+  - **Threshold 消融** (r=16, 300 steps): α=0.3~0.9
+  - **LoRA Rank 消融**: r=8 (α_lora=16) vs r=16 (α_lora=32)
+- **结果摘要**:
+
+  | 维度 | 最佳配置 | 关键指标 |
+  |------|---------|---------|
+  | Steps | **300步** | acc=81.7%, prec=100%, recall=61.2%, FP=0% (α=0.8) |
+  | Threshold (保守) | **α=0.8** | prec=100%, recall=61.2%, FP=0% |
+  | Threshold (平衡) | **α=0.5** | acc=86.7%, prec=85.9%, recall=85.9%, FP=12.6% |
+  | LoRA Rank | **r=16 唯一可用** | r=8 recall=1.2% (容量不足) |
+
+- **关键发现**:
+  1. **200步是"突变点"**: 模型从不可用 (recall=0%) 跳到可用 (42.4%)
+  2. **300步是"甜蜜点"**: recall +18.8pp (42.4→61.2%), FP 仍为 0%
+  3. **400步开始过拟合**: recall 71.8% 但引入 2.1% FP
+  4. **r=8 完全不可用**: 仅 1.2% recall，容量瓶颈
+  5. **α=0.5 是最佳平衡点**: 在 300步模型上 acc=86.7%, 双向 recall/precision ≈86%
+- **决策**: 
+  - VLM 训练默认 **300步** (替代原 200步)，r=16 不变
+  - Imagination 标注推荐 α=0.5 (平衡) 或 α=0.8 (保守)，视 D_syn+ 数量需求而定
+  - r=8 排除，不再考虑
+- **消融报告**: `results/vlaw/vlm_ablation_v3_report.md`
+- **日期**: 2026-03-05
+
+### ADR-029: VLM 评估集正负平衡是训练成功的前提条件【已固化】
+
+- **背景**: VLM v2 (lora_v2) 在旧数据上训练，eval 集仅 12 正 / 108 负 (10% 正样本)。v3 用新 mixed 数据，eval 集 85 正 / 95 负 (47% 正样本)
+- **v2 失败模式详解**:
+  - 5 个 checkpoint (50/100/150/200/final) **全部** TP=0, FP=0, recall=0%
+  - mean_p_yes 最高仅 0.036 (远低于 α=0.8)，模型从未学会预测 "成功"
+  - accuracy=90% 是假象 — 全预测 "否" 在 90% 负样本集上就能 90%
+  - 根因: 训练集正样本过少 (frame_skip=3 数据 + 旧 eval 分布偏斜) → 模型收敛到 "永远说否" 的局部最优
+- **v3 vs v2 对比** (相同训练步数 200 步, r=16):
+  - v2: recall=0%, precision=0, mean_p_yes=0.036
+  - v3: recall=42.4%, precision=1.0, mean_p_yes=0.565
+  - **唯一变量**: 数据质量 (帧率修正 + 正负平衡)
+- **决策**: VLM 训练/eval 集正样本比例应在 **30%-60%** 范围内。低于 20% 时模型大概率坍塌到全预测负
+- **预防措施**: 数据收集后、VLM 训练前，必须检查 eval 集 success_at_end 比率，若 <20% 需补充正样本或调整 eval split
+- **日期**: 2026-03-05
+
+### ADR-030: D_syn+ 产出率 v1→v3 从 3.5% 提升至 33.3% (9.5×)【活跃】
+
+- **背景**: BDC-B (Imagination 预验证) 使用 ckpt-400 生成 15 条合成轨迹 + VLM LoRA 300步 标注
+- **v1 基线**: D_syn+ ≈ 1/28 (3.5%) — 使用 frame_skip=3 旧数据 + BUG-019 未修 + 旧 WM ckpt
+- **v3 结果**: D_syn+ = 5/15 (33.3%) — 使用 frame_skip=4 v3 数据 + BUG-019 已修 + ckpt-400 (PSNR=29.76)
+- **p_yes 分布**: mean=0.42, std=0.17, max=0.68, median=0.44
+- **α=0.5 通过的轨迹**: traj_0001(0.68), traj_0007(0.68), traj_0010(0.56), traj_0011(0.62), traj_0014(0.62)
+- **提升归因**:
+  1. **v3 数据帧率修正** (frame_skip=4 → 5Hz 精确匹配 WM) — 消除 timing mismatch
+  2. **BUG-019 修复** — 真实首帧 latent 替代随机 latent
+  3. **ckpt-400 质量提升** — PSNR=29.76 vs pretrained 22.33 (+7.43 dB)
+- **影响**: 33.3% 产出率意味着正式 Phase 3 生成 200 条可期望 ~66 条 D_syn+，对策略训练已有足够价值
+- **注意**: 此结果基于 ckpt-400 (20% 训练)，完整训练后 D_syn+ 产出率可能进一步提升
+- **决策**: v3 数据 + BUG-019 修复 + WM 微调的组合方向正确，继续推进 Phase 3-5
+- **输出**: `data/vlaw/labeled/precheck_ckpt400/`, `data/vlaw/synthetic/precheck_ckpt400/`
+- **日期**: 2026-03-05
+
+### ADR-031: Imagination Viz 质量差是预期行为 (自回归误差累积)【已固化】
+
+- **背景**: 用户质疑 Imagination 生成的视频帧质量差 (模糊、失真)，怀疑存在 bug
+- **分析方法**: 对比 eval_wm.py 单步预测 vs run_imagination.py 12 轮自回归生成
+- **根因**: 自回归误差累积 (主因) + float16 VAE decode (次因)
+  - eval_wm.py 单步: GT history 6 帧 → predict 5 帧 → PSNR=29.88 (高质量)
+  - imagination: 每轮 pred[-1] → 下轮 history，12 轮后 history 完全由预测帧构成
+  - 误差逐轮放大是 autoregressive video prediction 的固有特性
+- **Frame 0 均值膨胀**: Frame 0 (~40 dB) 是 conditioning 帧，非真正预测；排除 F0 后实际 F1-F4 ≈ 26.7 dB
+- **latent 稳定性**: F0 std=0.9187, F30 std=0.9211, F59 std=0.9265 — 未发散
+- **决策**: Imagination viz 质量差不影响管线 (VLM 在 latent 空间判定, 非 pixel)，继续用 ckpt-400 推进
+- **附属变更**: eval_wm_deep_viz.py 功能合并到 eval_wm.py (397→580 行)，deep viz 脚本已删除
+- **详细分析**: `knowledge/wm-eval-analysis.md`
+- **日期**: 2026-03-05
+
+### ADR-032: D_syn+ 正式产出率 61.0% — 远超预验证 (33.3%) 和门控 (>5%)【活跃】
+
+- **背景**: Iter-1 Step 5-6 正式运行 200 条 Imagination + VLM 标注
+- **结果**: D_syn+ = 122/200 (61.0%), p_yes mean=0.5596, max=0.9399
+- **对比 precheck**: 15 条样本时为 33.3% → 200 条时为 61.0% (样本量更大更稳定)
+- **门控阈值**: D_syn+ 产出率 > 5% ✅ (实际 61.0%, 12.2× 超越门控)
+- **对策略训练的意义**: D_real+(434) ∪ D_syn+(122) = 556 条正样本可用于 Weighted FM 训练
+- **主要改进来源**: 正式运行时生成质量整体更高 (4-GPU 并行无 GPU 争用, 批量更大)
+- **决策**: 数据充分，立即进入 Phase 4 策略更新
+- **输出**: `data/vlaw/labeled/iter1_syn/`, `data/vlaw/synthetic/iter1/`
+- **日期**: 2026-03-05
+
+### ADR-034: ⛔ Imagination 人工审核不可用 — eval_WM PSNR 有误导性, WM 需继续训练【活跃-阻塞】
+
+- **背景**: Iter-1 完成 Imagination 200 条生成 + 5 维度自动化评估后，用户进行了人工视觉审核
+- **核心结论**:
+  1. **Imagination 生成几乎完全不可用** — 人工审核的视频质量远低于可用标准，自动化指标 (latent Δ<0.02, L2 drift<1%) 与肉眼观感严重脱节
+  2. **eval_WM PSNR=29 具有误导性** — 单步预测在完美 GT history 条件下获得高分，但该指标不能反映 Imagination 自回归 rollout 的实际质量
+  3. **WM 需要继续训练** — 即使 eval_WM 指标无明显变化，Imagination 效果也可能因 WM 质量提升而改善，需人工判断
+- **决策**:
+  - ⛔ **阻塞所有下游环节**: Phase 4 策略更新、Phase 5 评估、Iter-2 全部暂停
+  - ✅ **启动 WM 继续训练** (Phase 1b): 从 pretrained 或 ckpt-400 resume, 训练更多步数 (4000+), 保存更多 checkpoint
+  - ✅ **WM 评估指标升级**: 不再以 eval_WM PSNR 为唯一门控，必须在每个关键 checkpoint 运行 Imagination + VAE decode 可视化 + 人工审核
+  - ✅ **解除条件**: 某个 WM checkpoint 的 Imagination 可视化结果经人工确认为"可用"后，方可恢复下游
+- **对 ADR-010 的影响**: "2000 步已是最佳" 基于 eval_WM PSNR，现已证明该指标不可靠。需要重新探索更长训练步数
+- **对 ADR-031/033 的影响**: 之前的 "Imagination viz 差是预期行为" 和 "latent 质量 OK" 结论需要修正 — 自动化指标不能替代人工审核
+- **WM 训练计划**:
+  - GPU 0-3, DeepSpeed ZeRO-2
+  - 从 pretrained 开始完整训练 4000 步以上
+  - 每 200 步保存 checkpoint (确保不再丢失中间 ckpt)
+  - 每 400-800 步在关键 checkpoint 上运行 Imagination 快速评估 (10-20 条) + 可视化
+- **Task**: T-WM-V3-EXTENDED
+- **日期**: 2026-03-05
+
+### ADR-033: Imagination 全面评估结论 — latent 质量 OK, action ry bias 需监控【活跃】
+
+- **背景**: Iter-1 200 条合成轨迹完成后，用 `eval_imagination.py` (1160 行) 进行 5 维度全面评估
+- **评估脚本**: `rlft/vlaw/scripts/eval_imagination.py`
+- **评估输出**: `results/vlaw/imagination_eval/` (report.md + full_results.json + 21 PNG/JSON)
+- **5 维度评估结果**:
+
+  | 维度 | 关键指标 | 结论 |
+  |------|---------|------|
+  | **Latent 统计** | Δmean<0.02, Δstd<0.01, L2 drift<1% | ✅ 分布匹配良好 |
+  | **VAE Decode 质量** | sharpness 衰减 27% (round 0→11) | ⚠️ 预期行为 (自回归累积) |
+  | **Action 分析** | **ry 维度偏移: syn=-0.76 vs real=-0.25 (Δ=-0.516)** | ⚠️ 显著, 需监控 |
+  | **State 轨迹** | z 坐标终端偏高 (0.102 vs 0.088) | ℹ️ 轻微 |
+  | **VLM 标注分解** | p_yes 集中在 0.5-0.7, 122/200 通过 α=0.5 | ✅ 产出率 61% |
+
+- **关键发现**:
+  1. **Latent 质量 OK**: 通道分布与真实数据匹配 (Δ<0.02), L2 drift 随 round 增长但未发散 (<1%)
+  2. **Action ry bias 显著**: 合成轨迹 ry 维度 (mean=-0.76) 相比真实 (mean=-0.25) 偏移 Δ=-0.516，可能因 WM 对旋转动作的预测偏差传播到 policy 输出
+  3. **11/200 条轨迹有 frozen dim4**: action dim4 方差≈0（固定值），疑似 policy 对特定初始状态的退化响应
+  4. **VLM p_yes 集中在 0.5-0.7**: 真正高信心 (>0.8) 的轨迹很少，α=0.5 是合理阈值
+  5. **History buffer 非"全为 pred"**: 2/7 条件帧始终保持真实帧锚定 (Pos[0,1]), 修正了此前"全部变为 predicted"的不准确描述
+- **决策**:
+  - action ry bias 暂不 block Iter-1 (数据充分, 策略训练后评估实际影响)
+  - 若策略评估发现旋转动作异常，优先排查 ry bias 来源 (WM vs policy)
+  - frozen dim4 比例 5.5% 可接受，后续可通过 action smoothness 过滤
+- **影响**: Imagination 数据质量满足 Phase 4 策略训练要求，不阻塞
+- **日期**: 2026-03-05

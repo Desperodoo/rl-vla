@@ -168,6 +168,21 @@ def load_shortcut_flow_policy(
     else:
         agent_state = checkpoint.get("agent", checkpoint)
 
+    # AWSC checkpoint: EMA stored as velocity_net_ema.* within agent state
+    # If use_ema and velocity_net_ema keys exist, remap them to velocity_net
+    if use_ema:
+        _ema_keys = [k for k in agent_state if k.startswith("velocity_net_ema.")]
+        if _ema_keys:
+            remapped = {}
+            for k, v in agent_state.items():
+                if k.startswith("velocity_net_ema."):
+                    remapped[k.replace("velocity_net_ema.", "velocity_net.", 1)] = v
+                elif not k.startswith("velocity_net."):
+                    remapped[k] = v
+                # skip online velocity_net.* — replaced by EMA
+            agent_state = remapped
+            print(f"Using velocity_net_ema weights ({len(_ema_keys)} tensors)")
+
     # ----- infer state_dim from cond_encoder -----
     if state_dim is None:
         for key, value in agent_state.items():

@@ -134,6 +134,32 @@ def load_vae(
     return vae
 
 
+def _resize_frames(
+    frames: np.ndarray,   # (T, H, W, 3) uint8
+    target_h: int,
+    target_w: int,
+) -> np.ndarray:
+    """Resize 帧序列到目标分辨率.
+
+    Args:
+        frames: (T, H, W, 3) uint8
+        target_h: 目标高度
+        target_w: 目标宽度
+
+    Returns:
+        (T, target_h, target_w, 3) uint8
+    """
+    T = frames.shape[0]
+    resized = np.zeros((T, target_h, target_w, 3), dtype=np.uint8)
+    for t in range(T):
+        resized[t] = np.asarray(
+            PILImage.fromarray(frames[t]).resize(
+                (target_w, target_h), PILImage.BILINEAR
+            )
+        )
+    return resized
+
+
 def concat_cameras(
     rgb_base: np.ndarray,   # (T, H, W, 3) uint8
     rgb_render: np.ndarray,  # (T, H, W, 3) uint8
@@ -338,6 +364,19 @@ class VLAWDataPipeline:
                     grp = f_src[tkey]
                     rgb_base = grp["rgb_base"][:]    # (T, H, W, 3) uint8
                     rgb_render = grp["rgb_render"][:]  # (T, H, W, 3) uint8
+
+                # 若输入分辨率与目标不一致，resize 到 camera_height×camera_width
+                src_h, src_w = rgb_base.shape[1], rgb_base.shape[2]
+                if src_h != cfg.camera_height or src_w != cfg.camera_width:
+                    if cfg.verbose and i == 0:
+                        print(f"[VLAW-P1.2] Resize {src_h}×{src_w} → "
+                              f"{cfg.camera_height}×{cfg.camera_width}")
+                    rgb_base = _resize_frames(
+                        rgb_base, cfg.camera_height, cfg.camera_width
+                    )
+                    rgb_render = _resize_frames(
+                        rgb_render, cfg.camera_height, cfg.camera_width
+                    )
 
                 # 拼接
                 concat_frames = concat_cameras(rgb_base, rgb_render, cfg.concat_mode)

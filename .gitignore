@@ -49,3 +49,14 @@ ctrl_world/synthetic_traj/
 ctrl_world/wandb/
 ctrl_world/swanlog/
 ctrl_world/__pycache__/
+ctrl_world/scripts/wandb/
+
+# scripts 下的意外 checkpoint
+scripts/checkpoints/
+
+# results 中的大型可视化产物 (PNG grids, per-traj frames)
+results/vlaw/wm_deep_viz/
+results/vlaw/wm_eval_ckpt400_viz/
+results/vlaw/_archive/
+results/vlaw/imagination_eval/*.png
+results/vlaw/imagination_eval/**/*.png

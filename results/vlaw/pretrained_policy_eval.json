@@ -1,0 +1,18 @@
+{
+  "checkpoint": "runs/fair_comparison/fair_comparison/awsc/best_s42__1772570560/checkpoints/final.pt",
+  "env_id": "LiftPegUpright-v1",
+  "num_episodes": 50,
+  "metrics": {
+    "success_once": 0.8,
+    "return": 472.3505,
+    "episode_len": 200.0,
+    "reward": 2.3618,
+    "success_at_end": 0.46
+  },
+  "success_once_pct": 80.0,
+  "success_at_end_pct": 46.0,
+  "pred_horizon": 8,
+  "act_steps": 8,
+  "state_dim": 25,
+  "time_s": 11.3
+}

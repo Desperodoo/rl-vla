@@ -156,6 +156,10 @@ class TrainConfig:
     wandb_project: str = "vlaw-reward"
     wandb_run_name: str = "lora_iter1"
 
+    # 视频模式: True = Qwen3-VL 原生 video 输入 (ADR-008/015: AUC +0.11)
+    use_video_format: bool = True
+    video_fps: float = 2.0
+
     def __post_init__(self) -> None:
         if self.learning_rate > 0:
             self.lr = self.learning_rate
@@ -381,7 +385,9 @@ def setup_lora(model, cfg: TrainConfig):
 # ────────────────────────────────────────────────────────────────────────────
 
 def _make_messages(frames: List[Image.Image], instruction: str,
-                   label: Optional[int] = None) -> list:
+                   label: Optional[int] = None,
+                   use_video_format: bool = True,
+                   video_fps: float = 2.0) -> list:
     n = len(frames)
     text = (
         f"These {n} frames show a robot manipulation trajectory. "
@@ -389,8 +395,16 @@ def _make_messages(frames: List[Image.Image], instruction: str,
         "Has the robot successfully completed the task? "
         "Answer only 'yes' or 'no'."
     )
-    user_content = [{"type": "image", "image": f} for f in frames]
-    user_content.append({"type": "text", "text": text})
+    if use_video_format and n > 1:
+        # Qwen3-VL 原生 video 输入 (带时序 PE, ADR-008/015: AUC +0.11)
+        user_content = [
+            {"type": "video", "video": frames, "fps": video_fps},
+            {"type": "text", "text": text},
+        ]
+    else:
+        # 多图模式 (向后兼容)
+        user_content = [{"type": "image", "image": f} for f in frames]
+        user_content.append({"type": "text", "text": text})
     msgs = [{"role": "user", "content": user_content}]
     if label is not None:
         msgs.append({"role": "assistant",
@@ -400,14 +414,36 @@ def _make_messages(frames: List[Image.Image], instruction: str,
 
 def compute_single_loss(model, processor, frames: List[Image.Image],
                         instruction: str, label: int,
-                        device: str) -> torch.Tensor:
-    """单样本 teacher-forcing LM loss。"""
-    msgs = _make_messages(frames, instruction, label)
+                        device: str,
+                        use_video_format: bool = True,
+                        video_fps: float = 2.0) -> torch.Tensor:
+    """单样本 teacher-forcing LM loss (支持 video/multi-image 模式)。"""
+    msgs = _make_messages(frames, instruction, label,
+                          use_video_format=use_video_format,
+                          video_fps=video_fps)
     try:
-        full_text = processor.apply_chat_template(
-            msgs, tokenize=False, add_generation_prompt=False)
-        inputs = processor(text=[full_text], images=frames,
-                           return_tensors="pt").to(device)
+        # Qwen3-VL 需要关闭 thinking 模式，否则模板会插入 <think> 标签
+        try:
+            full_text = processor.apply_chat_template(
+                msgs, tokenize=False, add_generation_prompt=False,
+                enable_thinking=False)
+        except TypeError:
+            full_text = processor.apply_chat_template(
+                msgs, tokenize=False, add_generation_prompt=False)
+        # 使用 process_vision_info 正确处理 video/image 内容
+        try:
+            from qwen_vl_utils import process_vision_info
+            image_inputs, video_inputs = process_vision_info(msgs)
+            inputs = processor(
+                text=[full_text],
+                images=image_inputs if image_inputs else None,
+                videos=video_inputs if video_inputs else None,
+                return_tensors="pt",
+            ).to(device)
+        except (ImportError, Exception):
+            # 降级: 直接传入 PIL frames
+            inputs = processor(text=[full_text], images=frames,
+                               return_tensors="pt").to(device)
         out = model(**inputs, labels=inputs["input_ids"])
         return out.loss
     except Exception as exc:
@@ -429,12 +465,30 @@ def evaluate(model, processor, eval_ds: RewardDataset,
 
     for i in range(len(eval_ds)):
         frames, instr, label = eval_ds[i]
-        msgs = _make_messages(frames, instr, label=None)
+        msgs = _make_messages(frames, instr, label=None,
+                              use_video_format=cfg.use_video_format,
+                              video_fps=cfg.video_fps)
         try:
-            prompt = processor.apply_chat_template(
-                msgs, tokenize=False, add_generation_prompt=True)
-            inp = processor(text=[prompt], images=frames,
-                            return_tensors="pt").to(device)
+            # Qwen3-VL 需要关闭 thinking 模式
+            try:
+                prompt = processor.apply_chat_template(
+                    msgs, tokenize=False, add_generation_prompt=True,
+                    enable_thinking=False)
+            except TypeError:
+                prompt = processor.apply_chat_template(
+                    msgs, tokenize=False, add_generation_prompt=True)
+            try:
+                from qwen_vl_utils import process_vision_info
+                image_inputs, video_inputs = process_vision_info(msgs)
+                inp = processor(
+                    text=[prompt],
+                    images=image_inputs if image_inputs else None,
+                    videos=video_inputs if video_inputs else None,
+                    return_tensors="pt",
+                ).to(device)
+            except (ImportError, Exception):
+                inp = processor(text=[prompt], images=frames,
+                                return_tensors="pt").to(device)
             out = model(**inp)
             logits = out.logits[0, -1, :]
             p_yes = float(torch.softmax(
@@ -603,7 +657,8 @@ def train(cfg: TrainConfig) -> None:
     _log(f"[VLAW] 训练: steps={cfg.train_steps}, "
          f"per_device={cfg.per_device_batch_size}, "
          f"grad_accum={cfg.gradient_accumulation_steps}, "
-         f"eff_batch={eff_batch}", accelerator)
+         f"eff_batch={eff_batch}, "
+         f"video_format={cfg.use_video_format}", accelerator)
 
     step = 0
     micro = 0
@@ -625,7 +680,9 @@ def train(cfg: TrainConfig) -> None:
             cnt = 0
             for frames, instr, lbl in zip(frames_b, instrs, labels):
                 loss = compute_single_loss(
-                    model, processor, frames, instr, int(lbl), device)
+                    model, processor, frames, instr, int(lbl), device,
+                    use_video_format=cfg.use_video_format,
+                    video_fps=cfg.video_fps)
                 if not (torch.isnan(loss) or torch.isinf(loss)):
                     batch_loss = batch_loss + loss
                     cnt += 1
@@ -772,6 +829,13 @@ def main() -> None:
     p.add_argument("--attn_implementation", default="auto",
                    choices=["auto", "flash_attention_2", "sdpa", "eager"],
                    help="Attention 实现方式")
+    p.add_argument("--use_video_format", action="store_true", default=True,
+                   help="使用 Qwen3-VL 原生 video 输入 (ADR-008: AUC +0.11)")
+    p.add_argument("--no_video_format", dest="use_video_format", action="store_false",
+                   help="使用多图模式")
+    p.add_argument("--video_fps", type=float, default=2.0)
+    p.add_argument("--eval_ratio", type=float, default=0.2,
+                   help="内部评估集比例")
     a = p.parse_args()
 
     cfg = TrainConfig(
@@ -785,6 +849,9 @@ def main() -> None:
         seed=a.seed, device=a.device, use_wandb=a.use_wandb,
         multi_gpu=a.multi_gpu,
         attn_implementation=a.attn_implementation,
+        use_video_format=a.use_video_format,
+        video_fps=a.video_fps,
+        eval_ratio=a.eval_ratio,
     )
     train(cfg)
 

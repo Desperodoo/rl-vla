@@ -1,0 +1,226 @@
+{
+  "mixed": {
+    "name": "mixed",
+    "h5_path": "/home/wjz/rl-vla/data/vlaw/rollouts/mixed/LiftPegUpright-v1/LiftPegUpright-v1_real_1772643507.h5",
+    "num_trajectories": 1200,
+    "meta": {
+      "camera_hw": "128,128",
+      "env_id": "LiftPegUpright-v1",
+      "frame_skip": "4",
+      "num_trajectories": "1200",
+      "source": "real",
+      "success_rate": "0.46"
+    },
+    "T_min": 5,
+    "T_max": 51,
+    "T_mean": 34.32833333333333,
+    "T_median": 50.0,
+    "T_std": 19.142026988337005,
+    "T_histogram": {
+      "0-5": 0,
+      "5-10": 240,
+      "10-15": 96,
+      "15-20": 59,
+      "20-25": 49,
+      "25-30": 42,
+      "30-35": 24,
+      "35-40": 15,
+      "40-45": 11,
+      "45-50": 16,
+      "50-55": 648
+    },
+    "success_at_end_count": 552,
+    "success_at_end_rate": 0.46,
+    "success_T_min": 5,
+    "success_T_max": 49,
+    "success_T_mean": 15.26086956521739,
+    "success_T_median": 11.0,
+    "fail_T_min": 50,
+    "fail_T_max": 51,
+    "fail_T_mean": 50.57098765432099,
+    "fail_T_median": 51.0,
+    "action_dim": 7,
+    "action_min": -1.0,
+    "action_max": 1.0,
+    "action_mean_per_dim": [
+      -0.025836311280727386,
+      0.012482390739023685,
+      -0.05044940114021301,
+      0.03501378372311592,
+      -0.2352309674024582,
+      -0.06275433301925659,
+      -0.34378042817115784
+    ],
+    "action_std_per_dim": [
+      0.2252722829580307,
+      0.24774321913719177,
+      0.38780662417411804,
+      0.33555832505226135,
+      0.4645131528377533,
+      0.3360147476196289,
+      0.49882999062538147
+    ],
+    "action_in_range": true,
+    "rgb_base_render_diff_mean": 56.53442626953126,
+    "rgb_base_render_diff_min": 55.522135416666664,
+    "rgb_base_render_diff_max": 57.796061197916664,
+    "action_dims": [
+      7
+    ],
+    "state_dims": [
+      25
+    ],
+    "rgb_shapes": [
+      "(128, 128, 3)"
+    ],
+    "file_size_mb": 702.1
+  },
+  "eval": {
+    "name": "eval",
+    "h5_path": "/home/wjz/rl-vla/data/vlaw/rollouts/eval/LiftPegUpright-v1/LiftPegUpright-v1_real_1772643569.h5",
+    "num_trajectories": 20,
+    "meta": {
+      "camera_hw": "128,128",
+      "env_id": "LiftPegUpright-v1",
+      "frame_skip": "4",
+      "num_trajectories": "20",
+      "source": "real",
+      "success_rate": "0.85"
+    },
+    "T_min": 5,
+    "T_max": 51,
+    "T_mean": 21.75,
+    "T_median": 15.5,
+    "T_std": 15.703104788544207,
+    "T_histogram": {
+      "0-5": 0,
+      "5-10": 4,
+      "10-15": 6,
+      "15-20": 3,
+      "20-25": 1,
+      "25-30": 0,
+      "30-35": 0,
+      "35-40": 2,
+      "40-45": 1,
+      "45-50": 0,
+      "50-55": 3
+    },
+    "success_at_end_count": 17,
+    "success_at_end_rate": 0.85,
+    "success_T_min": 5,
+    "success_T_max": 42,
+    "success_T_mean": 16.58823529411765,
+    "success_T_median": 13.0,
+    "fail_T_min": 51,
+    "fail_T_max": 51,
+    "fail_T_mean": 51.0,
+    "fail_T_median": 51.0,
+    "action_dim": 7,
+    "action_min": -1.0,
+    "action_max": 1.0,
+    "action_mean_per_dim": [
+      -0.06773799657821655,
+      -1.9375860574655235e-05,
+      -0.08631099760532379,
+      0.0586780421435833,
+      -0.3177887201309204,
+      -0.031870659440755844,
+      -0.4643305242061615
+    ],
+    "action_std_per_dim": [
+      0.2100900560617447,
+      0.2429717481136322,
+      0.41281288862228394,
+      0.3740086257457733,
+      0.48299869894981384,
+      0.3466648757457733,
+      0.5451261401176453
+    ],
+    "action_in_range": true,
+    "rgb_base_render_diff_mean": 56.5400634765625,
+    "rgb_base_render_diff_min": 55.922322591145836,
+    "rgb_base_render_diff_max": 57.2498779296875,
+    "action_dims": [
+      7
+    ],
+    "state_dims": [
+      25
+    ],
+    "rgb_shapes": [
+      "(128, 128, 3)"
+    ],
+    "file_size_mb": 9.0
+  },
+  "high_suc": {
+    "name": "high_suc",
+    "h5_path": "/home/wjz/rl-vla/data/vlaw/rollouts/high_suc/LiftPegUpright-v1/LiftPegUpright-v1_high_suc_real_1772643507.h5",
+    "num_trajectories": 552,
+    "meta": {
+      "camera_hw": "128,128",
+      "env_id": "LiftPegUpright-v1",
+      "frame_skip": "4",
+      "num_trajectories": "552",
+      "source": "high_suc_filtered",
+      "success_rate": "1.0"
+    },
+    "T_min": 5,
+    "T_max": 49,
+    "T_mean": 15.26086956521739,
+    "T_median": 11.0,
+    "T_std": 11.090408669713106,
+    "T_histogram": {
+      "0-5": 0,
+      "5-10": 240,
+      "10-15": 96,
+      "15-20": 59,
+      "20-25": 49,
+      "25-30": 42,
+      "30-35": 24,
+      "35-40": 15,
+      "40-45": 11,
+      "45-50": 16,
+      "50-55": 0
+    },
+    "success_at_end_count": 552,
+    "success_at_end_rate": 1.0,
+    "success_T_min": 5,
+    "success_T_max": 49,
+    "success_T_mean": 15.26086956521739,
+    "success_T_median": 11.0,
+    "action_dim": 7,
+    "action_min": -1.0,
+    "action_max": 1.0,
+    "action_mean_per_dim": [
+      -0.06099586561322212,
+      0.04097185656428337,
+      -0.11677383631467819,
+      0.00012595762382261455,
+      -0.2696756422519684,
+      0.022161098197102547,
+      -0.34252646565437317
+    ],
+    "action_std_per_dim": [
+      0.20432119071483612,
+      0.2580234408378601,
+      0.4615894556045532,
+      0.3853701949119568,
+      0.48008593916893005,
+      0.37262406945228577,
+      0.5740219354629517
+    ],
+    "action_in_range": true,
+    "rgb_base_render_diff_mean": 56.56500264485678,
+    "rgb_base_render_diff_min": 55.466166178385414,
+    "rgb_base_render_diff_max": 57.796061197916664,
+    "action_dims": [
+      7
+    ],
+    "state_dims": [
+      25
+    ],
+    "rgb_shapes": [
+      "(128, 128, 3)"
+    ],
+    "file_size_mb": 203.7
+  }
+}

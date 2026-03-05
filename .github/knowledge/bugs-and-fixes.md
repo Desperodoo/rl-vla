@@ -313,3 +313,30 @@
   2. 不信任 demo replay 输出的多相机数据，除非显式验证每个相机视角独立
   3. 新建 `encoded/` 数据后，检查 latent_concat 的 top/bottom 半区 diff > 0.5
 - **详细计划**: [VLAW_FRESH_START_PLAN.md](../VLAW_FRESH_START_PLAN.md)
+
+---
+
+## BUG-024: Collector success_at_end=100% — Selection Bias (非代码 bug)
+
+- **发现**: 2026-03-05 v3 pilot 50 条数据全部 success_at_end=True
+- **文件**: `rlft/vlaw/data/collector.py` (collect 逻辑)
+- **症状**: pilot 50 条轨迹 success_at_end=100%，预期 AWSC ~46% (eval 验证值)
+- **根因链**:
+  1. **ManiSkill3 success → terminated**: `BaseEnv.step()` L1054: `terminated = info["success"].clone()`，成功瞬间 episode 立即结束
+  2. **成功 episode 远快于失败 episode**: 成功轨迹 10-120 步完成 (T=5-35)，失败轨迹固定 200 步 (T=51)
+  3. **64 并行 env + 采 50 条就停**: ~51 个 env 会成功 (80% success_once) 并快速完成，先于 ~13 个失败 env。采 50 条时全是先完成的成功轨迹
+  4. **蒙特卡洛验证**: 1000 次模拟 P(100% success in first 50) = 71.7%
+- **独立评估验证 (eval 脚本, 无 early termination)**:
+  - success_once = 80.0%
+  - success_at_end (200步) = 46.0%
+  - episode_len = 200 (全部跑满)
+- **视觉验证**: 用户确认 GIF/strip 图中 peg 确实被竖直扶正，数据本身是真实成功
+- **影响**:
+  - pilot 数据全部是成功轨迹，0 条失败 → 不适合训练 (VLM/WM 需要正负样本)
+  - 非代码 bug，是采集策略问题 (selection bias)
+- **解决方案**: 方案 A — 大量采集 (num_episodes=1200+)，让失败轨迹也有时间跑完。64 env × 多轮后失败的 ~13 env/round 也会贡献失败数据
+- **预防**:
+  1. 大量采集时 selection bias 自然消失 (后续批次包含失败轨迹)
+  2. 采集后必须检查 success_at_end 比率，不应为 100% 或 0%
+  3. 注意 ManiSkill3 所有任务都有 success → terminated 行为，成功 episode 时长 << 失败 episode
+  4. 小批量 pilot 数据只能验证数据格式/质量，不能代表真实成功率分布
