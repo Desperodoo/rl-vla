@@ -1,0 +1,27 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "input=$(cat); fp=$(echo \"$input\" | python3 -c \"import sys,json; d=json.load(sys.stdin); print(d.get('tool_input',{}).get('file_path',''))\" 2>/dev/null); [ -f \"$fp\" ] && case \"$fp\" in *.py) conda run -n rlft_ms3 python -m black \"$fp\" --quiet 2>/dev/null ;; esac; exit 0",
+            "timeout": 20,
+            "statusMessage": "Formatting with black..."
+          }
+        ]
+      },
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "input=$(cat); fp=$(echo \"$input\" | python3 -c \"import sys,json; d=json.load(sys.stdin); print(d.get('tool_input',{}).get('file_path',''))\" 2>/dev/null); case \"$fp\" in */rlft/vlaw/*|*/ctrl_world/*) echo \"[VLAW] 已修改 $fp — 记得在任务结束前更新 .github/vlaw-status.md\" ;; esac; exit 0",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

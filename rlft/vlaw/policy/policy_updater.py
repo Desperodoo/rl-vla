@@ -99,6 +99,11 @@ class PolicyUpdaterConfig:
     unet_n_groups: int = 8
     """UNet GroupNorm 分组数"""
 
+    # ACP 稠密权重
+    use_acp_weights: bool = False
+    """True: 从 HDF5 读取 acp_weight 字段作为 per-sample 权重（由 ACP 推理写入）。
+    False: 所有成功轨迹样本使用 uniform weight=1.0"""
+
     # 调试
     dry_run: bool = False
     """True: 用随机数据验证前向传播，不加载真实 checkpoint 和数据"""
@@ -144,6 +149,7 @@ class VLAWSuccessDataset(Dataset):
         filter_by_vlm: bool = True,
         image_key: str = "rgb_base",
         use_visual_obs: bool = True,
+        use_acp_weights: bool = False,
     ) -> None:
         self.hdf5_path = Path(hdf5_path)
         self.obs_horizon = obs_horizon
@@ -153,6 +159,7 @@ class VLAWSuccessDataset(Dataset):
         self.filter_by_vlm = filter_by_vlm
         self.image_key = image_key
         self.use_visual_obs = use_visual_obs
+        self.use_acp_weights = use_acp_weights
 
         # 预扫描 HDF5：收集所有成功轨迹的样本索引
         self._samples: list[tuple[str, int]] = []  # (traj_key, start_frame_idx)
@@ -239,6 +246,14 @@ class VLAWSuccessDataset(Dataset):
             state = np.asarray(grp["state"][start:obs_end], dtype=np.float32)
             actions = np.asarray(grp["actions"][obs_end:act_end], dtype=np.float32)
 
+            # ACP per-frame weight: 取 action 窗口内 acp_weight 的均值
+            sample_weight = self.weight
+            if self.use_acp_weights and "acp_weight" in grp:
+                acp_w = np.asarray(
+                    grp["acp_weight"][obs_end:act_end], dtype=np.float32
+                )
+                sample_weight = float(np.mean(acp_w)) if len(acp_w) > 0 else self.weight
+
             # 视觉观测：(obs_horizon, H, W, C) uint8 → (obs_horizon, C, H, W) float32
             rgb_np: Optional[np.ndarray] = None
             if self.use_visual_obs and self.image_key in grp:
@@ -252,7 +267,7 @@ class VLAWSuccessDataset(Dataset):
         result = {
             "obs": obs_tensor,
             "actions": act_tensor,
-            "weight": float(self.weight),
+            "weight": sample_weight,
             "source": self.source_tag,
         }
 
@@ -509,6 +524,7 @@ class VLAWPolicyUpdater:
                 weight=weight,
                 image_key=self.config.image_key,
                 use_visual_obs=self.config.use_visual_obs,
+                use_acp_weights=self.config.use_acp_weights,
             )
             if len(ds) > 0:
                 datasets.append(ds)
@@ -606,7 +622,8 @@ class VLAWPolicyUpdater:
 
         data_iter = iter(dataloader)
 
-        print(f"[VLAW-P5.1] 开始策略更新，共 {cfg.num_steps} 步")
+        print(f"[VLAW-P5.1] 开始策略更新，共 {cfg.num_steps} 步"
+              f"{'（ACP 稠密权重模式）' if cfg.use_acp_weights else ''}")
         running_loss = 0.0
         final_loss = 0.0
 
@@ -627,9 +644,9 @@ class VLAWPolicyUpdater:
                 rgb = batch["rgb"].to(self.device)       # (B, obs_horizon, C, H, W)
                 B, T = rgb.shape[:2]
                 rgb_flat = rgb.reshape(B * T, *rgb.shape[2:])  # (B*T, C, H, W)
-                with torch.no_grad():
+                with torch.no_grad(), torch.cuda.amp.autocast(dtype=torch.bfloat16):
                     visual_feat = self.visual_encoder(rgb_flat)  # (B*T, visual_feature_dim)
-                visual_feat = visual_feat.view(B, T, -1)        # (B, T, visual_feature_dim)
+                visual_feat = visual_feat.float().view(B, T, -1)  # (B, T, visual_feature_dim)
                 obs_features = torch.cat([visual_feat, state], dim=-1)  # (B, T, V+S)
             else:
                 obs_features = state  # (B, obs_horizon, state_dim)

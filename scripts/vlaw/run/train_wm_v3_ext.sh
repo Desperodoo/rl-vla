@@ -19,6 +19,8 @@ set -e
 # ---- GPU ----
 export CUDA_VISIBLE_DEVICES=0,1,2,3
 NUM_GPUS=4
+# 加速提示: 可扩展至 8 GPU (如 0,1,2,3,8,9,...)，此时应将 GRAD_ACCUM 改为 4
+# 以保持 eff_batch=32 不变 (batch_size=1 × 8gpu × 4accum = 32)
 
 # ---- Paths (absolute) ----
 ROOT="/home/wjz/rl-vla"
@@ -104,7 +106,8 @@ accelerate launch \
         --task_type maniskill \
         --freeze_unet_spatial false \
         --log_every_n_steps ${LOG_EVERY} \
-        --video_num ${VIDEO_NUM}
+        --video_num ${VIDEO_NUM} \
+        --num_workers 8
 
 echo ""
 echo "✅ WM Extended Training Complete: ${OUTPUT_DIR}"

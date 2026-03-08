@@ -5,6 +5,9 @@ __pycache__/
 carm_ros_deploy/devel/
 carm_ros_deploy/build/
 carm_ros_deploy/install/
+
+# 外部参考代码库
+Evo-RL/
 runs/
 wandb/
 logs/

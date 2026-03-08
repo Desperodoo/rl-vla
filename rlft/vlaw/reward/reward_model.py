@@ -36,8 +36,8 @@ class VLAWRewardConfig:
     # 设备配置 ("cuda:6", "cuda:0", "auto")
     device: str = "cuda:0"
 
-    # Flash Attention: True 需要 flash-attn 包
-    use_flash_attention: bool = False
+    # Flash Attention: True 使用 flash-attn（需安装），fallback 到 sdpa 也更快
+    use_flash_attention: bool = True
 
     # 帧采样
     num_frames: int = 16       # 均匀采样帧数

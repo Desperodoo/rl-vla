@@ -45,7 +45,7 @@ import torch
 
 # ── 1. 加载 Ctrl-World WM ──────────────────────────────────────────────────
 
-def load_wm(ckpt_path: str, device: str = "cuda:0"):
+def load_wm(ckpt_path: str, device: str = "cuda:0", num_inference_steps: int = 25):
     """加载 CtrlWorldAdapter + finetuned weights."""
     from ctrl_world.config import wm_args_maniskill
     from rlft.vlaw.world_model.ctrl_world_adapter import CtrlWorldAdapter
@@ -54,7 +54,7 @@ def load_wm(ckpt_path: str, device: str = "cuda:0"):
     args.svd_model_path = str(WORKSPACE / "checkpoints/vlaw/world_model/pretrained/stable-video-diffusion-img2vid")
     args.clip_model_path = str(WORKSPACE / "checkpoints/vlaw/world_model/pretrained/clip-vit-base-patch32")
     args.data_stat_path = str(WORKSPACE / "data/vlaw/meta_info/maniskill/stat.json")
-    args.num_inference_steps = 25
+    args.num_inference_steps = num_inference_steps
     args.num_frames = 5
     args.num_history = 6  # 对齐官方 DROID 配置
 
@@ -221,7 +221,8 @@ def _save_trajectories(trajectories: list, output_dir: str, suffix: str = "final
 def generate(*, num_trajs: int, num_interact: int, act_steps: int, gpu_id: int,
              wm_ckpt: str, policy_ckpt: str, output_dir: str, task_id: str,
              use_real_policy: bool, encoded_dir: str | None = None,
-             save_every: int = 50, seed: int = 42) -> dict:
+             save_every: int = 50, seed: int = 42,
+             num_inference_steps: int = 25) -> dict:
     device = f"cuda:{gpu_id}"
     print(f"\n{'='*60}")
     print(f"[IMAGINATION] 生成 {num_trajs} 条 | task={task_id}")
@@ -230,7 +231,7 @@ def generate(*, num_trajs: int, num_interact: int, act_steps: int, gpu_id: int,
     print(f"{'='*60}\n")
 
     t0 = time.time()
-    wm_adapter = load_wm(wm_ckpt, device=device)
+    wm_adapter = load_wm(wm_ckpt, device=device, num_inference_steps=num_inference_steps)
     print(f"[IMAGINATION] ✅ WM 加载 ({time.time()-t0:.1f}s)")
 
     if use_real_policy:
@@ -337,6 +338,8 @@ def main() -> None:
                         help="VAE 解码关键帧 strip PNG")
     parser.add_argument("--vis_count", type=int, default=5,
                         help="可视化前 N 条合成轨迹")
+    parser.add_argument("--num_inference_steps", type=int, default=25,
+                        help="WM diffusion denoising steps (25=quality, 10-15=fast)")
     args = parser.parse_args()
 
     if args.dry_run:
@@ -353,6 +356,7 @@ def main() -> None:
         use_real_policy=args.use_real_policy and not args.mock_policy,
         encoded_dir=args.encoded_dir, save_every=args.save_every,
         seed=args.seed,
+        num_inference_steps=args.num_inference_steps,
     )
 
     if args.visualize and summary.get("final_file"):

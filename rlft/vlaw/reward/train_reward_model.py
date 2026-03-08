@@ -567,7 +567,8 @@ def train(cfg: TrainConfig) -> None:
     train_loader = DataLoader(
         train_ds, batch_size=cfg.per_device_batch_size,
         shuffle=shuffle, sampler=sampler,
-        collate_fn=RewardDataset.collate_fn, num_workers=0,
+        collate_fn=RewardDataset.collate_fn, num_workers=2,
+        persistent_workers=True,
     )
 
     # ── 模型 ──────────────────────────────────────────────────────────────

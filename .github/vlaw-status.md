@@ -1,6 +1,6 @@
 # VLAW 复现项目 — 状态仪表盘
 
-> **最后更新**: 2026-03-05 21:00 (Phase 0-2 ✅, BDC ✅, **⛔ Imagination 人工审核不可用 — WM 继续训练中, 所有下游阻塞** (ADR-034), eval_WM PSNR 不可靠, 需以 Imagination 肉眼效果为准)
+> **最后更新**: 2026-03-07 02:00 (Phase 0-2 ✅, BDC ✅, **⛔ Imagination 人工审核不可用 — WM 扩展训练已重启 (GPU 4-7), 所有下游阻塞** (ADR-034), eval_WM PSNR 不可靠, 需以 Imagination 肉眼效果为准)
 > **核心参考**: [`VLAW_REPRODUCTION_PLAN.md`](VLAW_REPRODUCTION_PLAN.md) | [`VLAW_NEXT_STEPS.md`](VLAW_NEXT_STEPS.md) | [`knowledge/`](knowledge/)
 > **归档计划**: `_archive/v2/` (Fresh Start Plan, Data Collection Plan V3, NEXT_STEPS 旧版)
 
@@ -164,9 +164,9 @@
 
 | GPU | 分配 | 状态 |
 |-----|------|------|
-| 0-3 | **WM 继续训练** | 🔴 **Phase 1b — WM 扩展训练 (T-WM-V3-EXTENDED)** |
-| 4-5 | 空闲 | 🟢 |
-| 6-7 | 空闲 | 🟢 |
+| 0-2 | ⚠️ linzy LM Studio 占用 | 🔴 **不可用** (PID 115900/79932, ~32GB) |
+| 3 | 空闲 | 🟢 |
+| 4-7 | **WM 扩展训练** | 🔴 **Phase 1b — iter1_v3_ext 4000步 (03-07 01:41 启动, ~90s/step)** |
 | 8-9 | 空闲 | 🟡 **阻塞** (等 WM Imagination 人工确认可用) |
 
 ---

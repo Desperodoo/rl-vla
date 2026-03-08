@@ -17,6 +17,7 @@
 | ADR-031 | Imagination viz 质量差=预期行为 (自回归误差累积, 非 bug) | 03-05 |
 | ADR-033 | Imagination 5维度评估: latent OK (Δ<0.02), action ry bias 显著 (Δ=-0.516) 需监控 | 03-05 |
 | ADR-034 | ⛔ Imagination 人工审核不可用, eval_WM PSNR 有误导性, WM 需继续训练, 阻塞所有下游 | 03-05 |
+| ADR-035 | ACP 集成: Pistar06 value model (SigLIP+Gemma, 0.2% trainable) 提供 per-frame 稠密 advantage 权重 | 03-07 |
 
 ---
 
@@ -451,3 +452,38 @@
   - frozen dim4 比例 5.5% 可接受，后续可通过 action smoothness 过滤
 - **影响**: Imagination 数据质量满足 Phase 4 策略训练要求，不阻塞
 - **日期**: 2026-03-05
+
+### ADR-035: ACP 集成 — Pistar06 Value Model 稠密 Advantage 权重【活跃】
+
+- **背景**: VLAW 原始方案使用 VLM 二值 filtering（成功/失败），粒度为轨迹级。ACP（Advantage-Conditioned Policy）引入 per-frame 稠密 advantage 权重，将 Pistar06 value model（源自 Evo-RL）移植到 ManiSkill3 环境
+- **架构**:
+  - **Vision encoder**: SigLIP-so400m-patch14-384（~428M params, 冻结）
+  - **Language model**: Gemma-3-270m（~268M params, 冻结）
+  - **可训练组件**: image projector + language projector + LayerNorm + distributional value head (201 bins) — 共 ~1.55M params (0.2%)
+  - **双相机处理**: rgb_base 和 rgb_render 分别输入 SigLIP（128x128 resize 到 384x384），mean-pool 合并，不做竖拼
+  - **Value target**: `target = clip((-remaining_steps - c_fail*(1-success)) / (max_len+c_fail), -1, 0)`
+  - **Advantage**: N-step (n=4) advantage + per-task quantile binarization (positive_ratio=0.3) + 归一化为 [0,1] 连续权重
+- **代码位置**: `rlft/vlaw/acp/`（7 个源文件）, CLI: `rlft/vlaw/scripts/run_acp_{train,infer}.py`
+- **HDF5 产出字段**: `acp_value_target`, `acp_value_pred`, `acp_advantage`, `acp_indicator`, `acp_weight` (per-frame) + 3 group attrs
+- **Policy 集成**: `PolicyUpdaterConfig.use_acp_weights=True` 时，`VLAWSuccessDataset` 从 HDF5 读取 `acp_weight` 字段，取 action 窗口内 per-frame 权重的均值作为样本权重，传入 `compute_weighted_loss()`
+- **Conda 环境**: 复用 `vlaw_reward`
+- **GPU 需求**: 单卡 ~3GB VRAM（4090 可用）
+- **验证状态**: 28/28 单元测试通过, GPU dry-run 20 步 MAE=0.271, positive_ratio=0.300
+- **success_key 配置**: 支持 `env_success`（仿真 GT, per-frame）和 `vlm_success`（VLM 标注, per-trajectory）两种模式
+- **质量门控**: 正式训练 8000 步后 value MAE < 0.05, advantage positive_ratio ~30%
+- **日期**: 2026-03-07
+
+### ADR-036: Pipeline 参数优化 — 全链路加速【活跃】
+
+- **背景**: 审计所有 pipeline 默认参数后发现多处低效设置：WM DataLoader worker 不足、ACP frozen backbone 运行在 float32、VLM DataLoader 单进程、Imagination 推理步数不可调节。系统优化以减少 wall-clock 时间且不影响模型质量
+- **变更清单**:
+  1. **WM 训练** (`scripts/vlaw/run/train_wm_v3_ext.sh`): `--num_workers 4→8` (CPU 余量充足); 添加 GPU 扩展文档 (4→8 GPU 时 `GRAD_ACCUM=4` 保持 eff_batch=32)
+  2. **Imagination** (`rlft/vlaw/scripts/run_imagination.py`): 新增 `--num_inference_steps` CLI 参数 (默认 25, 支持 10-15 快速评估); `load_wm()` 和 `generate()` 函数签名扩展
+  3. **ACP** (`rlft/vlaw/acp/config.py`, `train_value_model.py`, `value_model.py`): dtype 默认 `float32→bfloat16`; 训练/验证/推理循环添加 `torch.cuda.amp.autocast(dtype=torch.bfloat16)`; projector+value head 保持 float32 精度
+  4. **VLM 训练** (`rlft/vlaw/reward/train_reward_model.py`): DataLoader `num_workers=0→2, persistent_workers=True`
+  5. **VLM 推理** (`rlft/vlaw/reward/reward_model.py`): `use_flash_attention` 默认 `False→True`
+  6. **Policy 训练** (`rlft/vlaw/policy/policy_updater.py`): visual encoder forward 包装 `torch.cuda.amp.autocast(dtype=torch.bfloat16)`, 输出 `.float()` 回转
+- **预期加速**: ACP ~1.5-2x, VLM 训练 ~20-30% (IO-bound 改善), VLM 推理 ~15-25% (flash_attn), Imagination eval 可选 ~2x (步数减半)
+- **风险评估**: 全部为 frozen backbone 或 IO 层面优化, zero 精度风险。唯一需要人工确认的是 flash_attn 包在 vlaw_reward env 中是否已安装
+- **验证计划**: ACP bf16 dry-run 20步 对比 fp32 MAE; Imagination steps=15 vs 25 PSNR; Policy bf16 50步 loss 不发散
+- **日期**: 2026-03-08
