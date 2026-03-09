@@ -92,6 +92,48 @@ def _maybe_enable_gradient_checkpointing(module: nn.Module) -> None:
         )
 
 
+def _unfreeze_vision_top_layers(vision_encoder: nn.Module, top_n: int) -> None:
+    """解冻 SigLIP 视觉编码器顶部 N 层 transformer + attention pooler head。
+
+    SigLIP-so400m 有 27 层（index 0-26）。例如 top_n=4 解冻 layers 23-26 + head。
+
+    Args:
+        vision_encoder: 已冻结的 SigLIP 视觉编码器
+        top_n: 要解冻的顶部 transformer 层数
+    """
+    # 计算总层数
+    total_layers = 0
+    for name, _ in vision_encoder.named_parameters():
+        if "encoder.layers." in name:
+            idx = int(name.split("encoder.layers.")[1].split(".")[0])
+            total_layers = max(total_layers, idx + 1)
+
+    if total_layers == 0:
+        logger.warning("未检测到 encoder.layers，跳过部分解冻")
+        return
+
+    start_layer = total_layers - top_n
+    unfrozen_count = 0
+    for name, param in vision_encoder.named_parameters():
+        should_unfreeze = False
+        # 解冻 encoder.layers.{start_layer..total_layers-1}
+        if "encoder.layers." in name:
+            layer_idx = int(name.split("encoder.layers.")[1].split(".")[0])
+            if layer_idx >= start_layer:
+                should_unfreeze = True
+        # 解冻 attention pooler head
+        if "head." in name:
+            should_unfreeze = True
+        if should_unfreeze:
+            param.requires_grad = True
+            unfrozen_count += 1
+
+    logger.info(
+        f"部分解冻 SigLIP: top {top_n}/{total_layers} layers + head, "
+        f"解冻 {unfrozen_count} 个参数张量"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Pistar06 Model（核心 nn.Module）
 # ---------------------------------------------------------------------------
@@ -201,6 +243,11 @@ class Pistar06Model(nn.Module):
             _maybe_enable_gradient_checkpointing(self.vision_encoder)
         if cfg.freeze_vision_encoder:
             _freeze_module(self.vision_encoder)
+            # 部分解冻：顶部 N 层 + attention pooler head
+            if cfg.unfreeze_vision_top_n > 0:
+                _unfreeze_vision_top_layers(
+                    self.vision_encoder, cfg.unfreeze_vision_top_n,
+                )
         if cfg.freeze_language_model:
             _freeze_module(self.language_model)
 
@@ -422,17 +469,23 @@ class ManiSkillValueModel:
         """保存可训练参数（不含冻结 backbone）."""
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
-        state = {k: v for k, v in self.model.state_dict().items() if v.requires_grad or not self._is_frozen(k)}
+        # 按 requires_grad 判断（支持部分解冻场景）
+        trainable_keys = {
+            name for name, param in self.model.named_parameters()
+            if param.requires_grad
+        }
+        state = {k: v for k, v in self.model.state_dict().items() if k in trainable_keys}
         from safetensors.torch import save_file
         save_file(state, str(path))
         logger.info(f"Saved value model ({len(state)} tensors) to {path}")
 
     def _is_frozen(self, key: str) -> bool:
-        if self.cfg.freeze_vision_encoder and key.startswith("vision_encoder."):
-            return True
-        if self.cfg.freeze_language_model and key.startswith("language_model."):
-            return True
-        return False
+        """检查参数是否冻结（基于 requires_grad，支持部分解冻）。"""
+        for name, param in self.model.named_parameters():
+            if name == key:
+                return not param.requires_grad
+        # state_dict 可能包含 buffer（非 parameter），视为冻结
+        return True
 
     def load(self, path: str | Path) -> None:
         """加载 checkpoint（strict=False 以兼容 partial save）."""

@@ -41,6 +41,9 @@ if TYPE_CHECKING:
 
 from rlft.vlaw.policy.state_predictor import StatePredictor
 
+# EE pose 提取 (WM action conditioning 对齐 DROID)
+from ctrl_world.dataset.dataset_maniskill import state_to_ee_pose_7d
+
 
 # ---------------------------------------------------------------------------
 # 配置
@@ -333,13 +336,17 @@ class ImaginationEngine:
             # ---- Step 4: 世界模型 rollout ----
             # 构造 (window_len, 4, 48, 24) 的 latent 输入
             wm_input = lat_buf.clone()  # (window_len, 4, 48, 24)
-            # 构造 (window_len, action_dim) 的动作输入（历史部分用 0）
-            hist_acts = np.zeros((num_history, action_t.shape[0]), dtype=np.float32)
-            full_acts = np.concatenate([hist_acts, action_chunk], axis=0)  # (window_len, 7)
+            # 构造 (window_len, 7) 的 EE pose 输入 (对齐 DROID: 绝对位姿)
+            # 使用 state_predictor 预测的 state 提取 EE pose,
+            # 历史部分和未来部分都用当前 state_t 的 EE pose
+            current_ee = state_to_ee_pose_7d(state_t)  # (7,)
+            hist_ee = np.tile(current_ee[None, :], (num_history, 1))  # (num_history, 7)
+            future_ee = np.tile(current_ee[None, :], (act_steps, 1))  # (act_steps, 7)
+            full_ee_poses = np.concatenate([hist_ee, future_ee], axis=0)  # (window_len, 7)
 
             pred_latents = self.wm_adapter.rollout(
                 obs_latents=wm_input,
-                actions=full_acts,
+                actions=full_ee_poses,
                 instruction=instruction,
             )
             # pred_latents: (N_CAMS, act_steps, 4, 24, 24)

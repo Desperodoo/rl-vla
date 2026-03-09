@@ -72,6 +72,11 @@ class ValueModelConfig:
     freeze_language_model: bool = True
     """冻结 Gemma backbone"""
 
+    unfreeze_vision_top_n: int = 0
+    """解冻 SigLIP 顶部 N 层 transformer（0 = 全冻结）。
+    Evo-RL 默认全部可训练。部分解冻（如 4-8 层）是单卡训练的折中方案。
+    仅在 freeze_vision_encoder=True 时生效。"""
+
     use_gradient_checkpointing: bool = False
     """启用 gradient checkpointing 节省显存"""
 
@@ -175,6 +180,9 @@ class ACPTrainConfig:
 
     warmup_steps: int = 500
     """线性 warmup 步数"""
+
+    lr_min: float = 0.0
+    """最小学习率（cosine 衰减下限）。Evo-RL 使用 1e-6。"""
 
     eval_interval: int = 200
     """每 N 步做一次验证"""

@@ -6,15 +6,29 @@ P2.1 阶段: 为 Ctrl-World 提供 ManiSkill 环境的训练数据.
     HDF5 文件结构:
         traj_XXXX/
             latent_concat:  (T, 4, 48, 24) float16   ← VAE 编码后的 latent
-            actions:        (T, 7)         float32   ← delta pose
+            actions:        (T, 7)         float32   ← delta pose (不再用于 WM conditioning)
+            state:          (T, 25)        float32   ← 完整 agent state
             env_success:    (T,)           bool
         traj_XXXX.attrs["task_instruction"]: str
 
+    state 布局 (25-D, LiftPegUpright-v1):
+        [0:9]   = qpos   (7 arm joints + 2 gripper fingers)
+        [9:18]  = qvel   (velocities)
+        [18:25] = tcp_pose (x, y, z, qw, qx, qy, qz) — 绝对 EE 位姿
+
+WM Action Conditioning (对齐 DROID):
+    Ctrl-World 预训练使用 **绝对 EE 位姿** 做 action conditioning,
+    而非 delta pose. 因此 WM 训练/推理时 "action" 字段的语义为:
+        [tcp_x, tcp_y, tcp_z, euler_rx, euler_ry, euler_rz, gripper_norm]
+    - tcp_xyz 来自 state[18:21]
+    - euler_xyz 由 state[21:25] 的四元数转换得到
+    - gripper_norm = qpos[7] / 0.04 ∈ [0, 1]
+
 与 DROID dataset 的关键差异:
     - latent shape: (T, 4, 48, 24)  vs DROID (T, 4, 72, 40)
-    - action: delta pose (增量)      vs DROID 绝对位姿
-    - 归一化: 使用 ManiSkill stat.json
-    - 数据存储: HDF5                  vs DROID JSON + .pt
+    - 相机数: 2 vs 3
+    - 归一化: 使用 ManiSkill stat.json (EE 位姿百分位)
+    - 数据存储: HDF5 vs DROID JSON + .pt
 """
 
 from __future__ import annotations
@@ -28,11 +42,65 @@ from typing import Optional
 import h5py
 import numpy as np
 import torch
+from scipy.spatial.transform import Rotation as Rot
 from torch.utils.data import Dataset
+
+# Panda gripper max finger opening (one finger, in metres).
+PANDA_FINGER_MAX = 0.04
+
+
+# Panda gripper max finger opening (one finger, in metres).
+PANDA_FINGER_MAX = 0.04
+
+
+def state_to_ee_pose_7d(state: np.ndarray) -> np.ndarray:
+    """Convert ManiSkill 25-D state → 7-D EE conditioning vector.
+
+    This matches the DROID convention where Ctrl-World is conditioned on
+    per-frame absolute end-effector state, not delta actions.
+
+    Args:
+        state: (N, 25) or (25,) — raw state from HDF5.
+
+    Returns:
+        (N, 7) or (7,) float32 — [tcp_x, tcp_y, tcp_z,
+                                    euler_rx, euler_ry, euler_rz,
+                                    gripper_norm].
+    """
+    squeeze = state.ndim == 1
+    if squeeze:
+        state = state[None, :]
+
+    N, D = state.shape
+    # Need at least 25 dims; if shorter (e.g. test/mock), pad with zeros
+    if D < 25:
+        pad = np.zeros((N, 25 - D), dtype=state.dtype)
+        state = np.concatenate([state, pad], axis=1)
+
+    tcp_pos = state[:, 18:21].astype(np.float64)       # (N, 3) xyz
+    tcp_quat_wxyz = state[:, 21:25].astype(np.float64)  # (N, 4) qw,qx,qy,qz
+    # scipy expects xyzw ordering
+    tcp_quat_xyzw = tcp_quat_wxyz[:, [1, 2, 3, 0]]
+    # Handle zero-norm quaternions (e.g. from mock/test states):
+    # replace with identity quaternion [0, 0, 0, 1]
+    norms = np.linalg.norm(tcp_quat_xyzw, axis=1, keepdims=True)
+    zero_mask = norms.squeeze() < 1e-8
+    if np.any(zero_mask):
+        tcp_quat_xyzw[zero_mask] = [0.0, 0.0, 0.0, 1.0]
+    euler = Rot.from_quat(tcp_quat_xyzw).as_euler("xyz")  # (N, 3)
+    gripper_norm = (state[:, 7] / PANDA_FINGER_MAX).clip(0.0, 1.0)  # (N,)
+    result = np.column_stack([tcp_pos, euler, gripper_norm[:, None]]).astype(np.float32)
+
+    if squeeze:
+        return result[0]
+    return result
 
 
 class Dataset_ManiSkill(Dataset):
     """ManiSkill HDF5 轨迹数据集，兼容 Ctrl-World 训练接口.
+
+    WM action conditioning 使用 **绝对 EE 位姿** (对齐 DROID),
+    从 HDF5 的 ``state`` 字段在线计算 7-D EE pose.
 
     Args:
         args: wm_args_maniskill 实例 (或任何有相应属性的对象)
@@ -54,7 +122,7 @@ class Dataset_ManiSkill(Dataset):
         # ---- 找到所有 HDF5 文件 ----
         dataset_names = args.dataset_names.split("+")
         self.samples: list[dict] = []   # {'h5_path': str, 'traj_key': str, 'start_frame': int}
-        self.norm_stats: Optional[tuple] = None   # (p01, p99) shape (1, 7)
+        self.norm_stats: Optional[tuple] = None   # (p01, p99) shape (1, 7) — EE pose percentiles
 
         for ds_name in dataset_names:
             ds_dir = Path(args.dataset_root_path) / ds_name
@@ -66,7 +134,7 @@ class Dataset_ManiSkill(Dataset):
             for h5_path in h5_files:
                 self._index_hdf5(h5_path)
 
-        # ---- 归一化统计量 ----
+        # ---- 归一化统计量 (EE pose percentiles) ----
         stat_path = getattr(args, "data_stat_path", None)
         if stat_path and Path(stat_path).exists():
             with open(stat_path, "r") as f:
@@ -74,16 +142,14 @@ class Dataset_ManiSkill(Dataset):
             p01 = np.array(stat["state_01"], dtype=np.float32)[None, :]  # (1, 7)
             p99 = np.array(stat["state_99"], dtype=np.float32)[None, :]
             self.norm_stats = (p01, p99)
-            print(f"[WM-Dataset] 加载归一化统计量: {stat_path}")
+            print(f"[WM-Dataset] 加载 EE pose 归一化统计量: {stat_path}")
         else:
-            # VLAW MODIFICATION: train 模式下 stat.json 必须存在，否则直接报错；val 模式下允许跳过
             if mode == "train":
                 raise FileNotFoundError(
                     f"[WM-Dataset] stat.json 不存在: {stat_path}\n"
-                    f"请先运行: python ctrl_world/dataset/dataset_maniskill.py "
-                    f"或 scripts/create_maniskill_meta_info.py 生成归一化统计量"
+                    f"请先运行: python scripts/vlaw/generate_stat_json.py 生成 EE pose 归一化统计量"
                 )
-            print(f"[WM-Dataset] ⚠️  未找到 stat.json ({stat_path})，动作不归一化（仅 val 模式允许）")
+            print(f"[WM-Dataset] ⚠️  未找到 stat.json ({stat_path})，EE pose 不归一化（仅 val 模式允许）")
 
         # ---- 训练/验证集切分 ----
         n = len(self.samples)
@@ -145,21 +211,24 @@ class Dataset_ManiSkill(Dataset):
             latent_raw = grp["latent_concat"][frame_ids]   # (T, 4, 48, 24)
             latent = torch.from_numpy(latent_raw.astype(np.float32))
 
-            # ---- action (T, 7) delta pose ----
-            if "actions" in grp:
-                action_raw = grp["actions"][frame_ids].astype(np.float32)
+            # ---- EE pose from state: absolute TCP pose + gripper ----
+            state_key = "state" if "state" in grp else "obs_agent"
+            if state_key in grp:
+                state_raw = grp[state_key][frame_ids].astype(np.float32)  # (T, 25)
+                ee_pose_raw = state_to_ee_pose_7d(state_raw)  # (T, 7)
             else:
-                action_raw = np.zeros((window_len, self.args.action_dim), dtype=np.float32)
+                # Fallback: zeros (should not happen with properly collected data)
+                ee_pose_raw = np.zeros((window_len, 7), dtype=np.float32)
 
             # ---- instruction text ----
             text = grp.attrs.get("task_instruction", "")
 
-        # ---- 动作归一化 [-1, 1] ----
-        action = self._normalize_action(action_raw)
+        # ---- EE pose 归一化 [-1, 1] ----
+        ee_pose = self._normalize_action(ee_pose_raw)
 
         return {
-            "latent": latent,                           # (T, 4, 48, 24)
-            "action": torch.tensor(action, dtype=torch.float32),  # (T, 7)
+            "latent": latent,                                    # (T, 4, 48, 24)
+            "action": torch.tensor(ee_pose, dtype=torch.float32),  # (T, 7) normalized EE pose
             "text": text,
         }
 
@@ -167,24 +236,24 @@ class Dataset_ManiSkill(Dataset):
     # 归一化工具
     # ------------------------------------------------------------------
 
-    def _normalize_action(self, action: np.ndarray) -> np.ndarray:
-        """将动作归一化到 [-1, 1].
+    def _normalize_action(self, ee_pose: np.ndarray) -> np.ndarray:
+        """将 EE pose 归一化到 [-1, 1].
 
         若无统计量则原样返回 (训练阶段 stat.json 必须存在).
         """
         if self.norm_stats is None:
-            return action
+            return ee_pose
         p01, p99 = self.norm_stats
         eps = 1e-8
-        ndata = 2.0 * (action - p01) / (p99 - p01 + eps) - 1.0
+        ndata = 2.0 * (ee_pose - p01) / (p99 - p01 + eps) - 1.0
         return np.clip(ndata, -1.0, 1.0)
 
-    def denormalize_action(self, action: np.ndarray) -> np.ndarray:
-        """反归一化，用于推理时恢复真实动作值."""
+    def denormalize_action(self, ee_pose: np.ndarray) -> np.ndarray:
+        """反归一化，恢复真实 EE pose 值."""
         if self.norm_stats is None:
-            return action
+            return ee_pose
         p01, p99 = self.norm_stats
-        return (action + 1.0) / 2.0 * (p99 - p01) + p01
+        return (ee_pose + 1.0) / 2.0 * (p99 - p01) + p01
 
 
 # ---------------------------------------------------------------------------
@@ -196,17 +265,18 @@ def create_meta_info(
     output_dir: str,
     dataset_name: str = "maniskill",
 ) -> None:
-    """从 HDF5 数据目录计算并保存 stat.json.
+    """从 HDF5 数据目录计算并保存 stat.json (EE pose percentiles).
 
     stat.json 格式与 DROID 一致:
-        {"state_01": [...], "state_99": [...]}  (p1 / p99 分位数)
+        {"state_01": [...], "state_99": [...]}
+    但计算基底为绝对 EE 位姿 7D, 而非 delta action.
 
     Args:
         data_dir: 包含 HDF5 文件的目录
         output_dir: 保存 stat.json 的目录
         dataset_name: 子目录名
     """
-    all_actions: list[np.ndarray] = []
+    all_ee_poses: list[np.ndarray] = []
 
     h5_files = sorted(Path(data_dir).glob("**/*.h5")) + sorted(Path(data_dir).glob("**/*.hdf5"))
     print(f"[MetaInfo] 扫描 {len(h5_files)} 个 HDF5 文件...")
@@ -214,15 +284,20 @@ def create_meta_info(
     for h5_path in h5_files:
         with h5py.File(str(h5_path), "r") as f:
             for key in sorted(f.keys()):
-                if key.startswith("traj_") and "actions" in f[key]:
-                    all_actions.append(f[key]["actions"][:].astype(np.float32))
+                if not key.startswith("traj_"):
+                    continue
+                grp = f[key]
+                state_key = "state" if "state" in grp else "obs_agent"
+                if state_key in grp:
+                    st = grp[state_key][:].astype(np.float32)
+                    all_ee_poses.append(state_to_ee_pose_7d(st))
 
-    if not all_actions:
-        raise RuntimeError(f"[MetaInfo] 未在 {data_dir} 中找到 actions 数据")
+    if not all_ee_poses:
+        raise RuntimeError(f"[MetaInfo] 未在 {data_dir} 中找到 state 数据")
 
-    actions = np.concatenate(all_actions, axis=0)   # (N_total_frames, 7)
-    p01 = np.percentile(actions, 1, axis=0).tolist()
-    p99 = np.percentile(actions, 99, axis=0).tolist()
+    ee_poses = np.concatenate(all_ee_poses, axis=0)  # (N_total_frames, 7)
+    p01 = np.percentile(ee_poses, 1, axis=0).tolist()
+    p99 = np.percentile(ee_poses, 99, axis=0).tolist()
 
     out_dir = Path(output_dir) / dataset_name
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -231,8 +306,8 @@ def create_meta_info(
         json.dump({"state_01": p01, "state_99": p99}, f, indent=2)
 
     print(f"[MetaInfo] 保存 stat.json → {stat_path}")
-    print(f"[MetaInfo] p01: {[f'{x:.4f}' for x in p01]}")
-    print(f"[MetaInfo] p99: {[f'{x:.4f}' for x in p99]}")
+    print(f"[MetaInfo] p01 (EE pose): {[f'{x:.4f}' for x in p01]}")
+    print(f"[MetaInfo] p99 (EE pose): {[f'{x:.4f}' for x in p99]}")
     return str(stat_path)
 
 

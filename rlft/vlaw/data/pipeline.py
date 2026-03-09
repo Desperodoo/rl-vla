@@ -3,16 +3,16 @@
 P1.2 阶段: 将 data_collector 收集的 HDF5 轨迹经过 Ctrl-World VAE 批量编码，
 生成 latent_concat 张量写回 HDF5 供世界模型训练使用。
 
-数据流:
+数据流 (对齐 DROID/Ctrl-World 官方: 各相机独立 VAE 编码):
     HDF5[rgb_base (T,H,W,3) + rgb_render (T,H,W,3)]
-    → 垂直拼接 (T, 2H, W, 3)
-    → AutoencoderKL encode
-    → latent_concat (T, 4, 2H/8, W/8) float16
+    → 各相机独立 AutoencoderKL encode
+    → latent_base (T, 4, H/8, W/8) + latent_render (T, 4, H/8, W/8)
+    → latent 空间垂直拼接 → latent_concat (T, 4, 2*H/8, W/8) float16
     → 写回同一 HDF5 / 新 HDF5
 
 分辨率约定 (192×192 双相机):
-    concat_hw = (384, 192, 3)    [2H × W × 3]
-    latent_hw = (4, 48, 24)      [C × 2H/8 × W/8]
+    单相机 latent = (4, 24, 24)   [C × H/8 × W/8]
+    拼接后 latent = (4, 48, 24)   [C × 2*H/8 × W/8]
 
 所属阶段: P1.2 — VAE 编码管线
 """
@@ -316,22 +316,23 @@ class VLAWDataPipeline:
         """
         cfg = self.cfg
 
-        # 计算目标分辨率
-        if cfg.concat_mode == "vertical":
-            tgt_h = cfg.camera_height * 2
-            tgt_w = cfg.camera_width
-        else:
-            tgt_h = cfg.camera_height
-            tgt_w = cfg.camera_width * 2
-
-        # 确认可被 8 整除
-        if tgt_h % 8 != 0 or tgt_w % 8 != 0:
+        # 单相机分辨率必须是 8 的倍数 (VAE 下采样要求)
+        if cfg.camera_height % 8 != 0 or cfg.camera_width % 8 != 0:
             raise ValueError(
-                f"拼接后分辨率 ({tgt_h}, {tgt_w}) 不能被 8 整除，"
+                f"单相机分辨率 ({cfg.camera_height}, {cfg.camera_width}) 不能被 8 整除，"
                 "VAE 需要输入尺寸为 8 的倍数"
             )
 
-        lat_h, lat_w = tgt_h // 8, tgt_w // 8
+        # 独立编码后的单相机 latent 尺寸
+        single_lat_h, single_lat_w = cfg.camera_height // 8, cfg.camera_width // 8
+
+        # 拼接后的 latent 尺寸 (2 相机)
+        if cfg.concat_mode == "vertical":
+            lat_h = single_lat_h * 2
+            lat_w = single_lat_w
+        else:
+            lat_h = single_lat_h
+            lat_w = single_lat_w * 2
         lat_shape = (4, lat_h, lat_w)
 
         if dst_path is None:
@@ -378,14 +379,24 @@ class VLAWDataPipeline:
                         rgb_render, cfg.camera_height, cfg.camera_width
                     )
 
-                # 拼接
-                concat_frames = concat_cameras(rgb_base, rgb_render, cfg.concat_mode)
-                # (T, tgt_h, tgt_w, 3)
+                # VAE encode: 独立编码每个相机，然后在 latent 空间拼接
+                # (对齐 DROID/Ctrl-World 官方: 各相机独立 VAE 编码)
+                latent_base = encode_frames_batch(
+                    self.vae, rgb_base, cfg.batch_size, self.device
+                )  # (T, 4, cam_h/8, cam_w/8)
+                latent_render = encode_frames_batch(
+                    self.vae, rgb_render, cfg.batch_size, self.device
+                )  # (T, 4, cam_h/8, cam_w/8)
 
-                # VAE encode
-                latent = encode_frames_batch(
-                    self.vae, concat_frames, cfg.batch_size, self.device
-                )
+                # latent 空间拼接 (对齐 DROID 的 multi-view latent 拼接)
+                if cfg.concat_mode == "vertical":
+                    latent = np.concatenate(
+                        [latent_base, latent_render], axis=2
+                    )  # (T, 4, 2*cam_h/8, cam_w/8)
+                else:
+                    latent = np.concatenate(
+                        [latent_base, latent_render], axis=3
+                    )  # (T, 4, cam_h/8, 2*cam_w/8)
                 # latent: (T, 4, lat_h, lat_w) float16
 
                 if latent.shape[1:] != lat_shape:

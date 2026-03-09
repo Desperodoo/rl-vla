@@ -231,6 +231,9 @@ class wm_args_maniskill(wm_args):
     log_every_n_steps: int = 1   # mini-test 用 1, 正式训练用 10
     video_num: int = 2           # 验证视频数 (DROID=10, ManiSkill 数据少用 2)
 
+    # ---- ADR-036: Data loading 加速 ----
+    num_workers: int = 8  # DROID 默认 4, ManiSkill 磁盘读取压力小, 可用 8
+
     # ---- Phase 控制 ----
     # VLAW MODIFICATION: Phase A 仅训练 action_encoder + temporal attention
     freeze_unet_spatial: bool = True   # True=Phase-A; False=Phase-B (全量)

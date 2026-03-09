@@ -357,6 +357,8 @@ if __name__ == "__main__":
                         help='Log train_loss every N optimizer steps (default: 100 DROID / 1 maniskill)')
     parser.add_argument('--video_num', type=int, default=None,
                         help='Number of validation videos to generate')
+    parser.add_argument('--num_workers', type=int, default=None,
+                        help='DataLoader num_workers (default: 4 DROID / 8 maniskill)')
     args_new = parser.parse_args()
 
     # VLAW MODIFICATION: 根据 task_type 选择默认配置

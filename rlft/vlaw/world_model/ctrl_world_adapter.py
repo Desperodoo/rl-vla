@@ -6,16 +6,20 @@
     adapter = CtrlWorldAdapter(args, ckpt_path="checkpoints/vlaw/world_model/...")
     pred_latents = adapter.rollout(
         obs_latents,   # (T_hist, 4, 48, 24) — 历史帧 latent
-        actions,       # (T_pred, 7) — delta pose 动作块 (未归一化)
+        actions,       # (T_hist + T_pred, 7) — 绝对 EE pose (未归一化)
         instruction,   # str — 任务描述
-    )  # → (T_pred, 4, 48, 24) float32 tensor
+    )  # → (N_CAMS, T_pred, 4, lat_h_single, lat_w) float32 tensor
+
+WM Action Conditioning — 对齐 DROID:
+    Ctrl-World 预训练使用 **绝对 EE 位姿** 做 action conditioning.
+    "action" 字段语义: [tcp_x, tcp_y, tcp_z, euler_rx, euler_ry, euler_rz, gripper_norm]
+    归一化统计量 state_01/state_99 来自 EE pose 的 p1/p99 分位数.
 
 DROID vs ManiSkill 关键差异:
     - latent shape:  (T, 4, 72, 40)  →  (T, 4, 48, 24)  (3-cam → 2-cam)
     - rearrange:     m=3,n=1         →  m=2,n=1
     - height:        int(192*3)=576  →  int(192*2)=384
     - width:         320             →  192
-    - action:        DROID 绝对位姿   →  delta pose (7D)
 """
 
 from __future__ import annotations
@@ -68,7 +72,7 @@ class CtrlWorldAdapter:
         self.device = torch.device(device)
         self.dtype = dtype
 
-        # ---- 加载归一化统计量 ----
+        # ---- 加载归一化统计量 (EE pose percentiles) ----
         stat_path = getattr(args, "data_stat_path", None)
         if stat_path and Path(stat_path).exists():
             with open(stat_path, "r") as f:
@@ -76,7 +80,7 @@ class CtrlWorldAdapter:
             self.state_p01 = np.array(stat["state_01"], dtype=np.float32)[None, :]  # (1, 7)
             self.state_p99 = np.array(stat["state_99"], dtype=np.float32)[None, :]
         else:
-            print(f"[CtrlWorldAdapter] ⚠️  未找到 stat.json ({stat_path}), 动作不归一化")
+            print(f"[CtrlWorldAdapter] ⚠️  未找到 stat.json ({stat_path}), EE pose 不归一化")
             self.state_p01 = np.zeros((1, args.action_dim), dtype=np.float32)
             self.state_p99 = np.ones((1, args.action_dim), dtype=np.float32)
 
@@ -101,7 +105,8 @@ class CtrlWorldAdapter:
             obs_latents: (T_hist + T_pred, 4, 48, 24) 历史+当前帧 latent (float16/32)
                          前 num_history 帧作为历史条件, 当前帧(索引 num_history)作为条件帧.
                          T_hist = args.num_history, T_pred = args.num_frames
-            actions:     (T_hist + T_pred, 7) 未归一化的 delta pose 动作
+            actions:     (T_hist + T_pred, 7) **绝对 EE pose** (未归一化)
+                         [tcp_x, tcp_y, tcp_z, euler_rx, euler_ry, euler_rz, gripper_norm]
             instruction: 任务文本描述
 
         Returns:
@@ -246,13 +251,13 @@ class CtrlWorldAdapter:
         self.model.eval()
 
     def _normalize_action(self, action: np.ndarray) -> np.ndarray:
-        """将 ManiSkill delta pose 动作归一化到 [-1, 1]."""
+        """将绝对 EE pose 归一化到 [-1, 1] (对齐 DROID percentile 归一化)."""
         eps = 1e-8
         ndata = 2.0 * (action - self.state_p01) / (self.state_p99 - self.state_p01 + eps) - 1.0
         return np.clip(ndata, -1.0, 1.0).astype(np.float32)
 
     def denormalize_action(self, action: np.ndarray) -> np.ndarray:
-        """反归一化动作 (推理后恢复真实动作值)."""
+        """反归一化 EE pose (推理后恢复真实值)."""
         return (action + 1.0) / 2.0 * (self.state_p99 - self.state_p01) + self.state_p01
 
 

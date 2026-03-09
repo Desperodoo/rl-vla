@@ -59,6 +59,9 @@ if TYPE_CHECKING:
 # 复用 data_collector 中的状态提取工具
 from rlft.vlaw.data.collector import extract_agent_state
 
+# EE pose 提取 (WM action conditioning 对齐 DROID)
+from ctrl_world.dataset.dataset_maniskill import state_to_ee_pose_7d
+
 # 复用 imagination.py 中的数据容器和工具函数
 from rlft.vlaw.utils.imagination import SyntheticTrajectory, _load_initial_frames
 
@@ -416,8 +419,12 @@ class ImaginationEnvEngine:
         # 用真实首帧填充 num_history*4 个位置 (官方做法: his_cond 初始填充)
         for _ in range(num_history * 4):
             latent_history.append(initial_latent.clone())
-        # 同时维护 action_history 用于 WM 输入中的历史动作
-        action_history: list[np.ndarray] = []
+        # 同时维护 ee_pose_history 用于 WM 输入中的历史 EE 位姿
+        # (对齐 DROID: WM conditioning 使用绝对 EE 位姿而非 delta action)
+        ee_pose_history: list[np.ndarray] = []
+        # 用初始状态的 EE pose 填充首帧
+        initial_ee_pose = state_to_ee_pose_7d(state_t)  # (7,)
+        ee_pose_history.append(initial_ee_pose)
 
         # ---- obs 历史 ----
         obs_feat_dim = lat_ch * lat_h * lat_w  # 4608
@@ -502,20 +509,28 @@ class ImaginationEnvEngine:
             cur_pad = latent_history[-1].unsqueeze(0).expand(act_steps, -1, -1, -1).clone()
             wm_input = torch.cat([his_latent, cur_pad], dim=0)
             # (num_history + act_steps, 4, 48, 24)
-            # 历史动作: 同样稀疏采样 + padding
-            act_dim = action_chunk.shape[1]
-            hist_acts_list = []
+
+            # 历史 EE 位姿: 稀疏采样 + 当前帧 EE pose (对齐 DROID)
+            # history 部分用 ee_pose_history 中对应索引的 EE pose
+            ee_pose_dim = 7
+            hist_ee_list = []
             for i in hist_indices:
-                if i < len(action_history):
-                    hist_acts_list.append(action_history[i])
+                if i < len(ee_pose_history):
+                    hist_ee_list.append(ee_pose_history[i])
                 else:
-                    hist_acts_list.append(np.zeros(act_dim, dtype=np.float32))
-            hist_acts = np.stack(hist_acts_list, axis=0)  # (num_history, act_dim)
-            full_acts = np.concatenate([hist_acts, action_chunk], axis=0)
+                    hist_ee_list.append(initial_ee_pose.copy())
+            hist_ee = np.stack(hist_ee_list, axis=0)  # (num_history, 7)
+
+            # 未来帧: 使用当前 state_t 的 EE pose 填充
+            # (WM 推理时未来帧的 action conditioning 用当前 EE 位姿,
+            #  因为真实 env.step() 尚未执行, 最佳近似是最新已知位姿)
+            current_ee_pose = state_to_ee_pose_7d(state_t)  # (7,)
+            future_ee = np.tile(current_ee_pose[None, :], (act_steps, 1))  # (act_steps, 7)
+            full_ee_poses = np.concatenate([hist_ee, future_ee], axis=0)
 
             pred_latents = self.wm_adapter.rollout(
                 obs_latents=wm_input,
-                actions=full_acts,
+                actions=full_ee_poses,
                 instruction=instruction,
             )
             # pred_latents: (N_CAMS, act_steps, 4, lat_h_single, lat_w)
@@ -560,8 +575,8 @@ class ImaginationEnvEngine:
             # ---- Step 6: 更新 history buffer (列表式追加) ----
             # 将最后一帧预测追加到 latent_history (官方: his_cond.append(...))
             latent_history.append(new_latents[-1].clone())
-            # 追加动作到 action_history (用最后一个动作代表本轮)
-            action_history.append(action_chunk[-1].copy())
+            # 追加当前 EE pose 到 ee_pose_history (用 env.step() 后的最新状态)
+            ee_pose_history.append(state_to_ee_pose_7d(state_t))
 
             # ---- 收集 ----
             for step_i in range(act_steps):
@@ -813,11 +828,14 @@ class ImaginationEnvEngine:
                         action_chunk = np.zeros((act_steps, 7), dtype=np.float32)
 
                     # ---- Step 4: 世界模型 ----
-                    hist_acts = np.zeros((num_history, action_chunk.shape[1]), dtype=np.float32)
-                    full_acts = np.concatenate([hist_acts, action_chunk], axis=0)
+                    # EE pose conditioning: 历史帧用初始 EE pose, 未来帧用当前 EE pose
+                    current_ee = state_to_ee_pose_7d(per_env_states[ei])  # (7,)
+                    hist_ee = np.tile(current_ee[None, :], (num_history, 1))  # (num_history, 7)
+                    future_ee = np.tile(current_ee[None, :], (act_steps, 1))  # (act_steps, 7)
+                    full_ee_poses = np.concatenate([hist_ee, future_ee], axis=0)
                     pred_latents = self.wm_adapter.rollout(
                         obs_latents=lat_buf.clone(),
-                        actions=full_acts,
+                        actions=full_ee_poses,
                         instruction=instructions[batch_idx[ei]],
                     )
                     cam0 = pred_latents[0]

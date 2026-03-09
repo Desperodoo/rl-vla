@@ -113,7 +113,7 @@ class ACPValueTrainer:
             lr=cfg.learning_rate,
             weight_decay=cfg.weight_decay,
         )
-        scheduler = self._build_lr_schedule(optimizer, cfg.warmup_steps, cfg.num_steps)
+        scheduler = self._build_lr_schedule(optimizer, cfg.warmup_steps, cfg.num_steps, cfg.learning_rate, cfg.lr_min)
 
         # ---- 训练循环 ----
         best_mae = float("inf")
@@ -238,14 +238,17 @@ class ACPValueTrainer:
         optimizer: torch.optim.Optimizer,
         warmup_steps: int,
         total_steps: int,
+        peak_lr: float = 5e-5,
+        lr_min: float = 0.0,
     ) -> torch.optim.lr_scheduler.LambdaLR:
-        """Cosine decay with linear warmup."""
+        """Cosine decay with linear warmup and optional LR floor."""
+        alpha = lr_min / peak_lr if peak_lr > 0 else 0.0
 
         def lr_lambda(step: int) -> float:
             if step < warmup_steps:
-                return float(step) / max(warmup_steps, 1)
+                return max(alpha, float(step) / max(warmup_steps, 1))
             progress = float(step - warmup_steps) / max(total_steps - warmup_steps, 1)
-            return max(0.0, 0.5 * (1.0 + math.cos(math.pi * progress)))
+            return max(alpha, 0.5 * (1.0 + math.cos(math.pi * progress)))
 
         return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 

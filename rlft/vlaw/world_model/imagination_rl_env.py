@@ -37,6 +37,7 @@ if TYPE_CHECKING:
 
 try:
     from rlft.vlaw.world_model.imagination_env import get_history_indices
+    from ctrl_world.dataset.dataset_maniskill import state_to_ee_pose_7d
 except ImportError:
     # 作为脚本直接运行时的 fallback
     import sys as _sys
@@ -47,6 +48,7 @@ except ImportError:
     if _script_root not in _sys.path:
         _sys.path.insert(0, _script_root)
     from rlft.vlaw.world_model.imagination_env import get_history_indices
+    from ctrl_world.dataset.dataset_maniskill import state_to_ee_pose_7d
 
 
 # ---------------------------------------------------------------------------
@@ -283,6 +285,8 @@ class ImaginationRLEnv(gym.Env):
         self._latent_history: list[torch.Tensor] = []
         # action history (用于 WM 历史动作输入)
         self._action_history: list[np.ndarray] = []
+        # EE pose history (用于 WM 历史 EE 位姿输入, 对齐 DROID)
+        self._ee_pose_history: list[np.ndarray] = []
         # 用于 WM rollout 预测缓冲 (action chunk 内部消费)
         self._pending_latents: list[torch.Tensor] = []
         self._pending_idx: int = 0
@@ -367,6 +371,7 @@ class ImaginationRLEnv(gym.Env):
             self._current_latent.clone() for _ in range(init_fill)
         ]
         self._action_history = []
+        self._ee_pose_history = [state_to_ee_pose_7d(self._current_state)]
 
         # 清空 pending latent 缓冲
         self._pending_latents = []
@@ -430,6 +435,7 @@ class ImaginationRLEnv(gym.Env):
         self._current_latent = next_latent
         self._latent_history.append(next_latent.clone())
         self._action_history.append(action.copy())
+        self._ee_pose_history.append(state_to_ee_pose_7d(self._current_state))
         self._collected_latents.append(next_latent.clone())
 
         # ---- Step 3: VLM Reward ----
@@ -504,6 +510,7 @@ class ImaginationRLEnv(gym.Env):
         """清理资源."""
         self._latent_history.clear()
         self._action_history.clear()
+        self._ee_pose_history.clear()
         self._collected_latents.clear()
         self._pending_latents.clear()
         if torch.cuda.is_available():
@@ -618,21 +625,25 @@ class ImaginationRLEnv(gym.Env):
         wm_input = torch.cat([his_latent, cur_pad], dim=0)
         # (num_history + wm_act_steps, 4, 48, 24)
 
-        # ---- 历史动作: 稀疏采样 + action chunk ----
-        hist_acts_list = []
+        # ---- 历史 EE 位姿: 稀疏采样 + 当前 EE pose (对齐 DROID) ----
+        hist_ee_list = []
         for i in hist_indices:
-            if i < len(self._action_history):
-                hist_acts_list.append(self._action_history[i])
+            if i < len(self._ee_pose_history):
+                hist_ee_list.append(self._ee_pose_history[i])
             else:
-                hist_acts_list.append(np.zeros(cfg.action_dim, dtype=np.float32))
-        hist_acts = np.stack(hist_acts_list, axis=0)  # (num_history, 7)
-        full_acts = np.concatenate([hist_acts, action_chunk], axis=0)
+                initial_ee = self._ee_pose_history[0] if self._ee_pose_history else np.zeros(cfg.action_dim, dtype=np.float32)
+                hist_ee_list.append(initial_ee)
+        hist_ee = np.stack(hist_ee_list, axis=0)  # (num_history, 7)
+        # 未来帧 EE pose: 用当前 state 的 EE pose 填充
+        current_ee = state_to_ee_pose_7d(self._current_state)  # (7,)
+        future_ee = np.tile(current_ee[None, :], (cfg.wm_act_steps, 1))  # (wm_act_steps, 7)
+        full_ee_poses = np.concatenate([hist_ee, future_ee], axis=0)
 
         # ---- WM 推理 ----
         try:
             pred_latents = self.wm_adapter.rollout(
                 obs_latents=wm_input,
-                actions=full_acts,
+                actions=full_ee_poses,
                 instruction=cfg.task_instruction,
             )
             # pred_latents: (N_CAMS, wm_act_steps, 4, lat_h_single, lat_w)

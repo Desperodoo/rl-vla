@@ -45,7 +45,8 @@ import torch
 
 # ── 1. 加载 Ctrl-World WM ──────────────────────────────────────────────────
 
-def load_wm(ckpt_path: str, device: str = "cuda:0", num_inference_steps: int = 25):
+def load_wm(ckpt_path: str, device: str = "cuda:0", num_inference_steps: int = 25,
+            guidance_scale: float | None = None, motion_bucket_id: int | None = None):
     """加载 CtrlWorldAdapter + finetuned weights."""
     from ctrl_world.config import wm_args_maniskill
     from rlft.vlaw.world_model.ctrl_world_adapter import CtrlWorldAdapter
@@ -57,6 +58,10 @@ def load_wm(ckpt_path: str, device: str = "cuda:0", num_inference_steps: int = 2
     args.num_inference_steps = num_inference_steps
     args.num_frames = 5
     args.num_history = 6  # 对齐官方 DROID 配置
+    if guidance_scale is not None:
+        args.guidance_scale = guidance_scale
+    if motion_bucket_id is not None:
+        args.motion_bucket_id = motion_bucket_id
 
     adapter = CtrlWorldAdapter(
         args, ckpt_path=ckpt_path, device=device, dtype=torch.float16,
@@ -222,16 +227,20 @@ def generate(*, num_trajs: int, num_interact: int, act_steps: int, gpu_id: int,
              wm_ckpt: str, policy_ckpt: str, output_dir: str, task_id: str,
              use_real_policy: bool, encoded_dir: str | None = None,
              save_every: int = 50, seed: int = 42,
-             num_inference_steps: int = 25) -> dict:
+             num_inference_steps: int = 25,
+             guidance_scale: float | None = None,
+             motion_bucket_id: int | None = None) -> dict:
     device = f"cuda:{gpu_id}"
     print(f"\n{'='*60}")
     print(f"[IMAGINATION] 生成 {num_trajs} 条 | task={task_id}")
     print(f"  WM={wm_ckpt}  Policy={policy_ckpt}")
     print(f"  num_interact={num_interact}, act_steps={act_steps}")
+    print(f"  num_inference_steps={num_inference_steps}, guidance_scale={guidance_scale}, motion_bucket_id={motion_bucket_id}")
     print(f"{'='*60}\n")
 
     t0 = time.time()
-    wm_adapter = load_wm(wm_ckpt, device=device, num_inference_steps=num_inference_steps)
+    wm_adapter = load_wm(wm_ckpt, device=device, num_inference_steps=num_inference_steps,
+                         guidance_scale=guidance_scale, motion_bucket_id=motion_bucket_id)
     print(f"[IMAGINATION] ✅ WM 加载 ({time.time()-t0:.1f}s)")
 
     if use_real_policy:
@@ -340,6 +349,10 @@ def main() -> None:
                         help="可视化前 N 条合成轨迹")
     parser.add_argument("--num_inference_steps", type=int, default=25,
                         help="WM diffusion denoising steps (25=quality, 10-15=fast)")
+    parser.add_argument("--guidance_scale", type=float, default=None,
+                        help="CFG max guidance scale (default: 2.0 from config)")
+    parser.add_argument("--motion_bucket_id", type=int, default=None,
+                        help="SVD motion conditioning (default: 127)")
     args = parser.parse_args()
 
     if args.dry_run:
@@ -357,6 +370,8 @@ def main() -> None:
         encoded_dir=args.encoded_dir, save_every=args.save_every,
         seed=args.seed,
         num_inference_steps=args.num_inference_steps,
+        guidance_scale=args.guidance_scale,
+        motion_bucket_id=args.motion_bucket_id,
     )
 
     if args.visualize and summary.get("final_file"):
