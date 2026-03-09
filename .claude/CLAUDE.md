@@ -9,21 +9,25 @@
 
 ## 当前项目状态（手动更新）
 
-**阶段**：Phase 1b — WM Extended Training（进行中, step 1381/4000 = 34%）+ Phase P6 — ACP（训练 8000 步完成, MAE=0.1675）+ ADR-036 Pipeline 参数优化（已实施）
-**阻塞**：ADR-034 — WM Imagination 视觉质量人工审查未通过。当前等待 iter1_v3_ext 训练继续推进，需密集 checkpoint imagination 评估（pretrained/400/600/800/1000/1200 等）。
-**下游阻塞**：Phase 4（策略更新）、Phase 5（评估）、Iter-2 全部暂停。
-**待执行**：WM imagination 密集评估（上次 session 的 4 个后台任务因 session 重置丢失，需重新启动）
+**阶段**：Phase 2 — WM v4 重训练（BUG-A/BUG-B 修复后从零开始）+ ADR-036/037 Pipeline 优化
+**已修复 (2026-03-08)**：
+- **BUG-A (ADR-037)**：WM action conditioning 语义错配 — 从 delta pose 改为**绝对 EE 位姿** (对齐 DROID)。影响 8 个文件。stat.json 已重新生成。
+- **BUG-B (ADR-037)**：Camera VAE 编码差异 — 从像素空间拼接改为**独立 per-camera VAE 编码后 latent 空间拼接** (对齐 DROID)。影响 pipeline.py。
+- iter1_v3_ext 训练已停止（使用了错误 stat.json + 错误 latent 编码），需从零重训练。
+**当前阻塞**：WM v4 训练中 (step 0/4000, ~52s/step with 8 GPU, 预计 ~58h)
+**下游阻塞**：Imagination、策略更新、评估、Iter-2 全部暂停。
 
-**ACP 状态**：代码实现 ✅ → GPU smoke test ✅ → Training 8000步 ✅ (best val MAE=0.1675 @ step 7200, val loss=4.0780) → Inference dry-run(41K帧) ✅ → 训练报告 ✅ (`logs/vlaw/acp_report/`) → Phase D(Policy集成代码) ✅ → 待 WM imagination 通过后正式运行
+**ACP 状态**：
+- Baseline: 代码实现 ✅ → Training 8000步 ✅ (best val MAE=0.1675 @ step 7200) → Inference dry-run ✅ → 训练报告 ✅ (`logs/vlaw/acp_report/`)
+- Evo-RL 对齐改进：训练已结束（GPU 2 已释放用于 WM 训练）
+- 改进计划详见：`.claude/plans/modular-finding-llama.md`
 
 **GPU 分配（当前）**：
 
 | GPU | 任务 | 状态 |
 |-----|------|------|
 | 0-1 | LMStudio | 占用 |
-| 2-3 | 空闲 | 可用于 imagination 评估 |
-| 4-7 | WM extended training iter1_v3_ext (step ~1381/4000) | 运行中 |
-| 8-9 | 空闲 | 可用于 imagination 评估 |
+| 2-9 | WM v4 训练 iter1_v4 (8 GPU, DeepSpeed ZeRO-2) | 运行中 (~14GB/GPU) |
 
 ---
 
@@ -73,6 +77,11 @@ CUDA_VISIBLE_DEVICES=6 conda run -n vlaw_reward python rlft/vlaw/scripts/run_acp
 # 评估（rlft_ms3，GPU 9）
 CUDA_VISIBLE_DEVICES=9 conda run -n rlft_ms3 python rlft/envs/evaluate.py
 
+# RLPD + ACP reward（rlft_ms3，GPU 0+1，0=RL训练，1=ACP模型）
+CUDA_VISIBLE_DEVICES=0,1 conda run -n rlft_ms3 python -m rlft.online.train_rlpd \
+  --reward_mode acp --acp_checkpoint checkpoints/vlaw/acp/iter1/best.safetensors \
+  --acp_device cuda:1 --total_timesteps 500000
+
 # 测试（无 GPU OK）
 conda run -n rlft_ms3 python -m pytest rlft/tests/vlaw/ -v --tb=short -q
 ```
@@ -89,7 +98,7 @@ rlft/
   algorithms/online_rl/  ← 在线 RL（PLD-SAC, DSRL-SAC）
   buffers/               ← 数据缓冲区
   datasets/              ← 数据集加载（OfflineRLDataset 必须）
-  envs/                  ← ManiSkill 封装、evaluate.py
+  envs/                  ← ManiSkill 封装、evaluate.py、acp_reward_wrapper.py (ACP online reward)
   networks/              ← PlainConv encoder（global_cond_dim=626）
   vlaw/                  ← VLAW 核心模块（见 rlft/vlaw/CLAUDE.md）
     data_collector.py    ← P1.1
@@ -132,7 +141,8 @@ logs/vlaw/               ← 子 Agent RESULT_FILE 输出
 | AWSC fine-tuned policy | `runs/fair_comparison/.../awsc/best_s42__1772570560/checkpoints/final.pt` |
 | WM pretrained | `checkpoints/vlaw/world_model/pretrained/Ctrl-World/checkpoint-10000.pt` (8.7GB) |
 | WM iter1_v3（ckpt-400） | `checkpoints/vlaw/world_model/iter1_v3/` |
-| WM iter1_v3_ext（当前目标） | `checkpoints/vlaw/world_model/iter1_v3_ext/` |
+| WM iter1_v3_ext（已废弃，BUG-A/B） | `checkpoints/vlaw/world_model/iter1_v3_ext/` |
+| WM iter1_v4（当前训练中） | `checkpoints/vlaw/world_model/iter1_v4/` |
 | SVD pretrained | `checkpoints/vlaw/world_model/pretrained/svd/` |
 | CLIP pretrained | `checkpoints/vlaw/world_model/pretrained/clip/` |
 | VLM base（Qwen3-VL-4B） | `checkpoints/vlaw/reward_model/qwen_vl/` (8.3GB) |
@@ -142,9 +152,12 @@ logs/vlaw/               ← 子 Agent RESULT_FILE 输出
 | State predictor | `checkpoints/vlaw/state_predictor/` |
 | ACP pretrained SigLIP | `checkpoints/vlaw/acp/pretrained/siglip/` (~3.3GB, 428M params) |
 | ACP pretrained Gemma | `checkpoints/vlaw/acp/pretrained/gemma/` (~549MB, 268M params) |
-| ACP value model iter1 | `checkpoints/vlaw/acp/iter1/` |
+| ACP value model iter1 | `checkpoints/vlaw/acp/iter1/` (baseline, 8000步, MAE=0.1675) |
+| ACP exp_aligned | `checkpoints/vlaw/acp/exp_aligned/` (Evo-RL 对齐实验, 训练中) |
 | ACP dryrun checkpoint | `checkpoints/vlaw/acp/dryrun/` (20步 dry-run, MAE=0.271) |
 | ACP 训练报告 | `logs/vlaw/acp_report/ACP_Training_Report.md` (8000步, best MAE=0.1675) |
+| ACP 对齐实验 log | `logs/vlaw/acp_exp_aligned.log` |
+| ACP 改进计划 | `.claude/plans/modular-finding-llama.md` |
 
 ---
 
@@ -159,7 +172,7 @@ logs/vlaw/               ← 子 Agent RESULT_FILE 输出
 | Policy success_rate 提升 | > 10% abs | > 20% abs | 39.2% abs |
 | Policy Iter-2 基线 | success_once ≥ 78% | — | — |
 | BC flywheel Go/No-Go | B > A + 3% | — | — |
-| ACP value MAE | < 0.1 | < 0.05 | 当前 0.1675 (未达标，需更多训练或调参) |
+| ACP value MAE | < 0.1 | < 0.05 | baseline 0.1675, exp_aligned 训练中 (当前 best 0.1957 @ step 1200) |
 | ACP advantage positive_ratio | ~30% | — | 已达标 (dry-run 0.300) |
 
 ---
@@ -175,10 +188,12 @@ logs/vlaw/               ← 子 Agent RESULT_FILE 输出
 | ADR-019 | VLM 必须用 **`video` 模式**（`use_video_format=True`）；否则 D_syn+=0 | 关键 |
 | ADR-026 | **所有 v1/v2 数据因 BUG-020（双相机坍塌）已存档**，当前用 v3 数据 | 历史 |
 | ADR-034 | **eval_WM PSNR ≠ Imagination 质量**；人工审查 viz 是强制门控 | 当前阻塞 |
-| ADR-035 | **ACP 集成**：Pistar06 value model（SigLIP vision-only 428M + Gemma 268M + projector+value head 1.55M）提供 per-frame 稠密 advantage weights，替换 VLM 的稀疏 binary filtering。双相机分别输入 SigLIP（128x128 → resize 384x384），冻结 backbone 只训练 projector+value head（0.2%）。连续 advantage 权重直接供 `compute_weighted_loss`。支持 `success_key` 配置切换 env_success（仿真 GT）和 vlm_success（VLM 标注）。Conda env 复用 `vlaw_reward`。源代码来自 `Evo-RL/src/lerobot/values/pistar06/` + `lerobot_value_infer.py`。 | ✅ 代码+验证完成 |
+| ADR-035 | **ACP 集成**：Pistar06 value model（SigLIP 428M + Gemma 268M + projector+value head）。双相机分别输入 SigLIP（128x128 → resize 384x384）。支持 `unfreeze_vision_top_n` 部分解冻 SigLIP 顶层（Evo-RL 对齐）。LR scheduler 支持 `lr_min` floor。连续 advantage 权重供 `compute_weighted_loss`。支持 `success_key` 配置切换 env_success/vlm_success。Conda env 复用 `vlaw_reward`。 | ✅ 代码+Evo-RL对齐完成 |
 | ADR-036 | **Pipeline 参数优化**：WM num_workers 4→8 + GPU 扩展文档; Imagination 新增 `--num_inference_steps` CLI; ACP dtype float32→bfloat16 + autocast; VLM DataLoader num_workers 0→2; VLM use_flash_attention 默认 True; Policy visual encoder bfloat16 autocast | ✅ 已实施 |
+| ADR-037 | **WM action conditioning + VAE 编码对齐 DROID**：(A) Action conditioning 从 delta pose 改为绝对 EE 位姿 [tcp_xyz+euler_xyz+gripper_norm]；stat.json 从 joint angle percentiles 改为 EE pose percentiles。(B) VAE 编码从像素空间拼接改为独立 per-camera 编码+latent 空间拼接。影响：generate_stat_json, dataset_maniskill, ctrl_world_adapter, imagination_env, imagination_rl_env, imagination.py, pipeline.py。iter1_v3/v3_ext 训练数据全部作废，需重新编码+重训练。 | ✅ 代码修复完成 |
+| ADR-038 | **ACP Online Reward for RLPD**：用 ACP value model TD-shaped reward `r(s,s')=(V(s')-V(s))*scale` 替换 ManiSkill sim dense reward 进行 SAC/AWSC 在线训练。`DualCameraRewardWrapper` 在 `FlattenRGBDObservationWrapper` 前拦截 sensor_data + env.render() 获取双相机图像。支持三种模式：`sim`（默认不变）、`acp`（纯 ACP reward）、`acp_blend`（加权混合）。ACP model 默认部署到 cuda:1 与 RL 训练分 GPU。新增文件：`rlft/envs/acp_reward_wrapper.py`，修改 `train_rlpd.py` Args。 | ✅ 代码+测试完成 |
 
-完整决策记录：`.github/knowledge/decisions.md`（36 条 ADR）
+完整决策记录：`.github/knowledge/decisions.md`（38 条 ADR）
 
 ---
 

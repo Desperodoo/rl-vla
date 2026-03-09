@@ -212,6 +212,27 @@ class Args:
     """Action bounds for clamping during inference. Set to None to disable clamping.
     ManiSkill environments have action space [-1, 1], so we clamp by default."""
 
+    # ACP reward mode
+    reward_mode: Literal["sim", "acp", "acp_blend"] = "sim"
+    """Reward source for online RL:
+    - 'sim': ManiSkill dense reward (default, no behavior change)
+    - 'acp': ACP value model TD reward r(s,s') = (V(s')-V(s))*scale
+    - 'acp_blend': weighted blend of ACP + sim reward"""
+    acp_checkpoint: str = "checkpoints/vlaw/acp/iter1/best.safetensors"
+    """ACP value model checkpoint path (only used when reward_mode != 'sim')"""
+    acp_reward_scale: float = 100.0
+    """Scale factor for ACP TD rewards. V values are in [-1,0], diffs are O(0.01),
+    so scale ~100 brings rewards to O(1.0) comparable to sim dense reward."""
+    acp_blend_weight: float = 0.5
+    """Weight for ACP reward in blend mode: total = w*r_acp + (1-w)*r_sim"""
+    acp_device: Optional[str] = None
+    """Device for ACP model. Defaults to 'cuda:1' to separate from RL training GPU.
+    Set explicitly when using CUDA_VISIBLE_DEVICES remapping."""
+    acp_warmup_steps: int = 0
+    """Use sim reward for first N env steps before switching to ACP reward."""
+    acp_task_instruction: str = "Pick up the peg and lift it upright."
+    """Task instruction text for the ACP Gemma language encoder."""
+
 
 class AgentWrapper:
     """Wrapper for unified evaluation interface.
@@ -354,7 +375,7 @@ def make_train_envs(args):
         from mani_skill.utils.wrappers.flatten import FlattenRGBDObservationWrapper
     except ImportError:
         raise ImportError("ManiSkill3 is required. Install with: pip install mani-skill")
-    
+
     env_kwargs = dict(
         obs_mode="rgbd" if "rgb" in args.obs_mode else "state",
         control_mode=args.control_mode,
@@ -362,15 +383,40 @@ def make_train_envs(args):
         num_envs=args.num_envs,
         reward_mode="dense",
     )
-    
+
+    # ACP reward mode requires render_mode for the second camera viewpoint
+    if args.reward_mode in ("acp", "acp_blend"):
+        env_kwargs["render_mode"] = "rgb_array"
+
     if args.max_episode_steps is not None:
         env_kwargs["max_episode_steps"] = args.max_episode_steps
-    
+
     env = gym.make(args.env_id, **env_kwargs)
-    
+
+    # Insert ACP reward wrapper BEFORE FlattenRGBDObservationWrapper
+    if args.reward_mode in ("acp", "acp_blend"):
+        from rlft.envs.acp_reward_wrapper import DualCameraRewardWrapper, ACPRewardConfig
+        acp_config = ACPRewardConfig(
+            checkpoint_path=args.acp_checkpoint,
+            task_instruction=args.acp_task_instruction,
+            reward_scale=args.acp_reward_scale,
+            device=args.acp_device or "cuda:1",
+            warmup_steps=args.acp_warmup_steps,
+        )
+        if args.reward_mode == "acp_blend":
+            acp_config.use_sim_reward_bonus = True
+            acp_config.sim_reward_weight = 1.0 - args.acp_blend_weight
+        env = DualCameraRewardWrapper(env, acp_config)
+        print(f"ACP reward mode: {args.reward_mode}")
+        print(f"  checkpoint: {args.acp_checkpoint}")
+        print(f"  reward_scale: {args.acp_reward_scale}")
+        print(f"  device: {acp_config.device}")
+        if args.reward_mode == "acp_blend":
+            print(f"  blend_weight: {args.acp_blend_weight} (acp) / {1 - args.acp_blend_weight} (sim)")
+
     if "rgb" in args.obs_mode:
         env = FlattenRGBDObservationWrapper(env, rgb=True, depth=False, state=True)
-    
+
     return env
 
 
@@ -984,7 +1030,13 @@ def main():
             
             reward_np = reward.cpu().numpy() if torch.is_tensor(reward) else reward
             done_np = done.cpu().numpy() if torch.is_tensor(done) else done
-            
+
+            # Log ACP vs sim reward when using ACP reward mode
+            if args.reward_mode != "sim" and "sim_reward" in info:
+                sim_r = info["sim_reward"]
+                training_metrics["reward/sim_step_mean"].append(float(np.mean(sim_r)))
+                training_metrics["reward/acp_step_mean"].append(float(np.mean(reward_np)))
+
             obs_stacker.append(next_obs)
             chunk_collector.add(reward=reward_np, done=done_np.astype(np.float32))
             chunk_rewards.append(reward_np)
