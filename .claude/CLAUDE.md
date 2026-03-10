@@ -9,25 +9,99 @@
 
 ## 当前项目状态（手动更新）
 
+> ⚠️ 本文件由**两台设备**共享。`原设备`运行 WM 训练；`新设备（10x RTX 4090）`运行 ACP/RLPD 支线任务。
+
+---
+
+### 原设备状态
+
 **阶段**：Phase 2 — WM v4 重训练（BUG-A/BUG-B 修复后从零开始）+ ADR-036/037 Pipeline 优化
 **已修复 (2026-03-08)**：
-- **BUG-A (ADR-037)**：WM action conditioning 语义错配 — 从 delta pose 改为**绝对 EE 位姿** (对齐 DROID)。影响 8 个文件。stat.json 已重新生成。
-- **BUG-B (ADR-037)**：Camera VAE 编码差异 — 从像素空间拼接改为**独立 per-camera VAE 编码后 latent 空间拼接** (对齐 DROID)。影响 pipeline.py。
-- iter1_v3_ext 训练已停止（使用了错误 stat.json + 错误 latent 编码），需从零重训练。
-**当前阻塞**：WM v4 训练中 (step 0/4000, ~52s/step with 8 GPU, 预计 ~58h)
+- **BUG-A (ADR-037)**：WM action conditioning 语义错配 — 从 delta pose 改为**绝对 EE 位姿** (对齐 DROID)。stat.json 已重新生成。
+- **BUG-B (ADR-037)**：Camera VAE 编码差异 — 从像素空间拼接改为**独立 per-camera VAE 编码后 latent 空间拼接**。
+- iter1_v3_ext 训练已停止（使用了错误 stat.json + 错误 latent 编码）。
+**当前阻塞**：WM v4 训练中 (`checkpoints/vlaw/world_model/iter1_v4/`)
 **下游阻塞**：Imagination、策略更新、评估、Iter-2 全部暂停。
 
-**ACP 状态**：
-- Baseline: 代码实现 ✅ → Training 8000步 ✅ (best val MAE=0.1675 @ step 7200) → Inference dry-run ✅ → 训练报告 ✅ (`logs/vlaw/acp_report/`)
-- Evo-RL 对齐改进：训练已结束（GPU 2 已释放用于 WM 训练）
-- 改进计划详见：`.claude/plans/modular-finding-llama.md`
-
-**GPU 分配（当前）**：
+**原设备 GPU 分配**：
 
 | GPU | 任务 | 状态 |
 |-----|------|------|
 | 0-1 | LMStudio | 占用 |
 | 2-9 | WM v4 训练 iter1_v4 (8 GPU, DeepSpeed ZeRO-2) | 运行中 (~14GB/GPU) |
+
+---
+
+### 新设备状态（2026-03-10，10x RTX 4090）
+
+**ACP 在新设备上的情况**：
+- 环境：`rlft_ms3` + transformers 5.3.0 已安装 ✅
+- 模型权重：SigLIP ✅ (`checkpoints/vlaw/acp/pretrained/siglip/`) | Gemma ✅ (`checkpoints/vlaw/acp/pretrained/gemma/`)
+- 训练数据：**仅有 expert demo**（25 条轨迹，510 帧，100% 成功率） → `data/vlaw/rollouts/mixed/LiftPegUpright-v1/`
+  - ⚠️ 原设备的 1200 条混合质量数据（46% 成功率）未同步到此设备
+- ACP iter1（在此设备训练）：best MAE=0.0021（**严重过拟合**，仅 demo 数据）→ `checkpoints/vlaw/acp/iter1/best.safetensors`
+  - 注：原设备 ACP iter1 best MAE=0.1675（1200 条混合数据），更具参考价值
+- **预训练策略（新设备本地）**：`runs/fair_comparison/awsc/best_s42__1772570560/checkpoints/best.pt` ✅
+
+**RLPD + ACP 实验状态（2026-03-10）**：
+
+| 实验 | 脚本 | 状态 | 进度 |
+|------|------|------|------|
+| SAC + ACP iter1（demo-only，过拟合基线） | `run_rlpd_acp.sh` | ✅ 完成 GPU 0+1 | 500K steps wandb: `bxl448kv` |
+| SAC + ACP v2_combined（**数据修复后重训**） | `run_rlpd_sac_acp_v2.sh` | **运行中** GPU 0+1 | — |
+| AWSC + pretrained policy init + ACP v2_combined | `run_rlpd_awsc_acp.sh` | **运行中** GPU 2+3 | — |
+
+**ACP 数据多样化（ADR-039）— ✅ 全部完成**：
+
+数据采集结果：
+
+| Type | 分布 | Trajs | Frames | SR% |
+|------|------|-------|--------|-----|
+| A-demo | expert demos | 50 | 510 | 96.0% |
+| B-pretrained | 无噪声 AWSC rollout | 400 | 11,395 | 30.5% |
+| C-teleop | OU噪声（σ=0.07，pause 4%） | 400 | 13,040 | 7.0% |
+| D-rl_prior | Gaussian噪声（σ=0.25） | 400 | 13,243 | 3.5% |
+| E-random | 纯随机（ablation） | 100 | 3,500 | 0.0% |
+| **Total** | — | **1,350** | **41,688** | — |
+
+ACP 训练结果（5 版本全部完成，GPU 2-6 并行，`rlft_ms3` env）：
+
+| 版本 | 数据 | Checkpoint |
+|------|------|-----------|
+| v2_demo_only | A | `checkpoints/vlaw/acp/v2_demo_only/best.safetensors` ✅ |
+| v2_pretrained_pol | B | `checkpoints/vlaw/acp/v2_pretrained_pol/best.safetensors` ✅ |
+| v2_teleop_sim | C（**真机遥操作分布**） | `checkpoints/vlaw/acp/v2_teleop_sim/best.safetensors` ✅ |
+| v2_rl_prior | D（**真机RL微调分布**） | `checkpoints/vlaw/acp/v2_rl_prior/best.safetensors` ✅ |
+| v2_combined | A+B+C+D（**推荐**） | `checkpoints/vlaw/acp/v2_combined/best.safetensors` ✅ |
+
+注：新设备无 `vlaw_reward` env，ACP 训练使用 `rlft_ms3`（依赖齐全）。`train_acp_multi.sh` 已修改为使用 `rlft_ms3`。
+
+**ACP v2 训练结果汇总**：
+
+| 版本 | 数据 | Best MAE | Val Loss | 质量门控 |
+|------|------|----------|----------|---------|
+| v2_demo_only | A (50 traj) | 0.0026 | 1.382 | ⚠️ 过拟合 |
+| v2_pretrained_pol | B (400 traj) | 0.1272 | 3.250 | ✅ |
+| v2_teleop_sim | C (400 traj) | 0.0739 | 3.361 | ✅ |
+| v2_rl_prior | D (400 traj) | 0.0516 | 3.073 | ✅ |
+| v2_combined | A+B+C+D (1250 traj) | 0.0837 | 3.209 | ✅ 推荐 |
+
+详细结果+训练曲线图：`docs/vlaw/acp_pipeline.md` §8
+
+数据噪声设计依据：
+- **Type C (teleop_sim)**：Ornstein-Uhlenbeck 相关噪声（θ=0.15，σ=0.07）+ 随机暂停（4%/步），模拟人类视觉伺服控制的时空平滑性和停顿特征
+- **Type D (rl_prior)**：i.i.d. Gaussian（σ=0.25），模拟高熵SAC早期阶段的宽动作分布
+- 实现：`rlft/vlaw/data/noisy_policy.py`（`OUNoisePolicyWrapper` + `GaussianNoisePolicyWrapper`）
+
+**新设备 GPU 分配（当前）**：
+
+| GPU | 任务 | 状态 |
+|-----|------|------|
+| 0 | RLPD SAC + ACP v2_combined | 运行中 |
+| 1 | ACP v2 推理（SAC 实验） | 运行中 |
+| 2 | RLPD AWSC + pretrained + ACP v2_combined | 运行中 |
+| 3 | ACP v2 推理（AWSC 实验） | 运行中 |
+| 4-9 | 空闲 | 备用 / 评估 |
 
 ---
 
@@ -82,6 +156,24 @@ CUDA_VISIBLE_DEVICES=0,1 conda run -n rlft_ms3 python -m rlft.online.train_rlpd 
   --reward_mode acp --acp_checkpoint checkpoints/vlaw/acp/iter1/best.safetensors \
   --acp_device cuda:1 --total_timesteps 500000
 
+# ACP 数据多样化采集（rlft_ms3，GPU 2-5，并行）——ADR-039
+bash scripts/collect_acp_data.sh          # 采集 Type B/C/D/E 各200/200/200/100条
+# 或单独采集某类型：
+CUDA_VISIBLE_DEVICES=3 conda run -n rlft_ms3 python scripts/collect_acp_data.py \
+  --noise_mode teleop --ou_sigma 0.07 --pause_prob 0.04 \
+  --num_episodes 200 --output_dir data/vlaw/rollouts/teleop_sim --gpu_id 3
+
+# ACP 多版本训练（vlaw_reward，GPU 6，顺序）
+bash scripts/train_acp_multi.sh           # 训练5个版本（v2_demo_only/teleop/rl_prior/combined等）
+bash scripts/train_acp_multi.sh --parallel # 并行，GPU 2-6（数据采集完成后）
+bash scripts/train_acp_multi.sh --version v2_combined  # 仅训练 combined
+
+# RLPD SAC + ACP v2（重训，数据修复后）
+CUDA_VISIBLE_DEVICES=0,1 bash scripts/run_rlpd_sac_acp_v2.sh
+
+# RLPD AWSC + pretrained policy + ACP v2（并行实验）
+CUDA_VISIBLE_DEVICES=2,3 bash scripts/run_rlpd_awsc_acp.sh
+
 # 测试（无 GPU OK）
 conda run -n rlft_ms3 python -m pytest rlft/tests/vlaw/ -v --tb=short -q
 ```
@@ -118,14 +210,23 @@ rlft/
     hdf5_dataset.py      ← HDF5→Dataset（value 训练/推理）
     train_value_model.py ← Value model 训练循环
     infer_values.py      ← 批量推理+advantage 标注写回 HDF5
+    visualize.py         ← ACP 推理诊断可视化（scatter/trajectory/advantage 分布）
+    episode_viz.py       ← Episode 级可视化（双相机+value 曲线 → PNG/GIF）
   roboreward/            ← RoboReward 模块（arXiv:2601.00675）
   tests/vlaw/            ← 单元/集成测试（无真实 GPU/权重）
   online/                ← 训练入口脚本
+  vlaw/data/
+    collector.py         ← P1.1 VLAWDataCollector（生产数据采集）
+    noisy_policy.py      ← ACP数据多样化：OUNoisePolicyWrapper(teleop) + GaussianNoisePolicyWrapper(rl_prior)
 
 ctrl_world/              ← Ctrl-World（外部代码，最小修改原则，见 ctrl_world/CLAUDE.md）
 scripts/                 ← 辅助脚本
 checkpoints/vlaw/        ← 模型权重（见下方资产路径）
 data/vlaw/               ← 数据集
+docs/vlaw/               ← 技术文档
+  acp_pipeline.md        ← ACP 完整 pipeline 文档（图文并茂，含 v2 训练结果）
+  gen_acp_figures.py     ← ACP 可视化图表生成脚本（从 wandb 日志解析）
+  figures/               ← 生成的图表（9 张 ACP 训练/架构图）
 logs/vlaw/               ← 子 Agent RESULT_FILE 输出
 .github/agents/          ← VS Code Copilot Agent 定义（frontmatter 路由）
 .claude/skills/          ← Claude Code + Copilot 共享 skill（主要内容在此）
@@ -152,12 +253,18 @@ logs/vlaw/               ← 子 Agent RESULT_FILE 输出
 | State predictor | `checkpoints/vlaw/state_predictor/` |
 | ACP pretrained SigLIP | `checkpoints/vlaw/acp/pretrained/siglip/` (~3.3GB, 428M params) |
 | ACP pretrained Gemma | `checkpoints/vlaw/acp/pretrained/gemma/` (~549MB, 268M params) |
-| ACP value model iter1 | `checkpoints/vlaw/acp/iter1/` (baseline, 8000步, MAE=0.1675) |
+| ACP value model iter1 | `checkpoints/vlaw/acp/iter1/` (新设备: demo-only 数据，8000步，MAE=0.0021 过拟合；原设备: 混合1200条，MAE=0.1675) |
+| ACP v2_demo_only | `checkpoints/vlaw/acp/v2_demo_only/` (✅ 训练完成，A数据) |
+| ACP v2_pretrained_pol | `checkpoints/vlaw/acp/v2_pretrained_pol/` (✅ 训练完成，Type B数据) |
+| ACP v2_teleop_sim | `checkpoints/vlaw/acp/v2_teleop_sim/` (✅ 训练完成，**真机遥操作分布**) |
+| ACP v2_rl_prior | `checkpoints/vlaw/acp/v2_rl_prior/` (✅ 训练完成，**真机RL微调分布**) |
+| ACP v2_combined | `checkpoints/vlaw/acp/v2_combined/` (✅ 训练完成，推荐用于RLPD，A+B+C+D) |
 | ACP exp_aligned | `checkpoints/vlaw/acp/exp_aligned/` (Evo-RL 对齐实验, 训练中) |
 | ACP dryrun checkpoint | `checkpoints/vlaw/acp/dryrun/` (20步 dry-run, MAE=0.271) |
 | ACP 训练报告 | `logs/vlaw/acp_report/ACP_Training_Report.md` (8000步, best MAE=0.1675) |
 | ACP 对齐实验 log | `logs/vlaw/acp_exp_aligned.log` |
 | ACP 改进计划 | `.claude/plans/modular-finding-llama.md` |
+| ACP Pipeline 文档 | `docs/vlaw/acp_pipeline.md`（含 v2 五版本训练结果、9 张图表） |
 
 ---
 
@@ -172,7 +279,7 @@ logs/vlaw/               ← 子 Agent RESULT_FILE 输出
 | Policy success_rate 提升 | > 10% abs | > 20% abs | 39.2% abs |
 | Policy Iter-2 基线 | success_once ≥ 78% | — | — |
 | BC flywheel Go/No-Go | B > A + 3% | — | — |
-| ACP value MAE | < 0.1 | < 0.05 | baseline 0.1675, exp_aligned 训练中 (当前 best 0.1957 @ step 1200) |
+| ACP value MAE | < 0.1 | < 0.05 | 原设备 iter1: 0.1675 (1200条混合数据) / 新设备 iter1 demo-only: 0.0021（过拟合，仅供参考） |
 | ACP advantage positive_ratio | ~30% | — | 已达标 (dry-run 0.300) |
 
 ---
@@ -192,6 +299,7 @@ logs/vlaw/               ← 子 Agent RESULT_FILE 输出
 | ADR-036 | **Pipeline 参数优化**：WM num_workers 4→8 + GPU 扩展文档; Imagination 新增 `--num_inference_steps` CLI; ACP dtype float32→bfloat16 + autocast; VLM DataLoader num_workers 0→2; VLM use_flash_attention 默认 True; Policy visual encoder bfloat16 autocast | ✅ 已实施 |
 | ADR-037 | **WM action conditioning + VAE 编码对齐 DROID**：(A) Action conditioning 从 delta pose 改为绝对 EE 位姿 [tcp_xyz+euler_xyz+gripper_norm]；stat.json 从 joint angle percentiles 改为 EE pose percentiles。(B) VAE 编码从像素空间拼接改为独立 per-camera 编码+latent 空间拼接。影响：generate_stat_json, dataset_maniskill, ctrl_world_adapter, imagination_env, imagination_rl_env, imagination.py, pipeline.py。iter1_v3/v3_ext 训练数据全部作废，需重新编码+重训练。 | ✅ 代码修复完成 |
 | ADR-038 | **ACP Online Reward for RLPD**：用 ACP value model TD-shaped reward `r(s,s')=(V(s')-V(s))*scale` 替换 ManiSkill sim dense reward 进行 SAC/AWSC 在线训练。`DualCameraRewardWrapper` 在 `FlattenRGBDObservationWrapper` 前拦截 sensor_data + env.render() 获取双相机图像。支持三种模式：`sim`（默认不变）、`acp`（纯 ACP reward）、`acp_blend`（加权混合）。ACP model 默认部署到 cuda:1 与 RL 训练分 GPU。新增文件：`rlft/envs/acp_reward_wrapper.py`，修改 `train_rlpd.py` Args。 | ✅ 代码+测试完成 |
+| ADR-039 | **ACP 训练数据多样化**：iter1 因 demo-only 数据（25条，MAE=0.0021）严重过拟合。解决方案：采集4种分布 Type B/C/D/E 各100-200条，训练5个ACP版本（v2_demo_only/v2_pretrained_pol/v2_teleop_sim/v2_rl_prior/v2_combined）。Type C 用 OU 噪声（θ=0.15σ=0.07+停顿）模拟**真机遥操作**；Type D 用 i.i.d. Gaussian（σ=0.25）模拟**真机RL微调探索**。实现：`rlft/vlaw/data/noisy_policy.py`（OUNoisePolicyWrapper + GaussianNoisePolicyWrapper）。入口脚本：`scripts/collect_acp_data.sh`→`scripts/train_acp_multi.sh`。 | ✅ 数据采集（1350条）+5版本ACP训练全部完成 |
 
 完整决策记录：`.github/knowledge/decisions.md`（38 条 ADR）
 

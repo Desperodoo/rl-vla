@@ -1,0 +1,512 @@
+#!/usr/bin/env python3
+"""
+Data-Efficiency Fair Comparison — Analysis Tool
+================================================
+
+Compares AWSC (RLPD) vs PLD-SAC vs DSRL-SAC on the same x-axis
+(robot steps or chunk decisions, depending on comparison scheme).
+
+Features:
+1. Extract training curves from TensorBoard event files
+2. Normalize x-axis across algorithms (scheme A/B/C)
+3. Plot comparison curves with mean ± std across seeds
+4. Generate summary tables and markdown report
+
+Usage:
+    python analyze_sweep.py --sweep-dir runs/fair_comparison
+    python analyze_sweep.py --sweep-dir runs/fair_comparison --comparison-scheme A
+    python analyze_sweep.py --sweep-dir runs/fair_comparison --output-dir results/analysis
+"""
+
+import os
+import re
+import json
+import argparse
+from pathlib import Path
+from datetime import datetime
+from dataclasses import dataclass, field
+from typing import Any
+
+import numpy as np
+
+# Try imports with graceful fallback
+try:
+    import pandas as pd
+    HAS_PANDAS = True
+except ImportError:
+    HAS_PANDAS = False
+
+try:
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    HAS_MATPLOTLIB = True
+except ImportError:
+    HAS_MATPLOTLIB = False
+
+try:
+    from tensorboard.backend.event_processing import event_accumulator
+    HAS_TENSORBOARD = True
+except ImportError:
+    HAS_TENSORBOARD = False
+
+
+# =============================================================================
+# Data Classes
+# =============================================================================
+
+@dataclass
+class ExperimentResult:
+    """Single experiment result."""
+    algorithm: str          # awsc, pld, dsrl
+    config_name: str
+    seed: int = 42
+    success_once: float | None = None
+    success_at_end: float | None = None
+    status: str = "unknown"
+    exp_dir: str | None = None
+    # Training curves: tag -> list of (step, value)
+    training_curves: dict[str, list[tuple[int, float]]] = field(default_factory=dict)
+
+
+@dataclass
+class ComparisonAnalysis:
+    """Full comparison analysis results."""
+    experiments: list[ExperimentResult] = field(default_factory=list)
+    comparison_scheme: str = "A"
+    act_horizon: int = 7
+    best_algorithm: str | None = None
+    best_score: float = 0.0
+
+
+# =============================================================================
+# Algorithm Metadata
+# =============================================================================
+
+ALGO_DISPLAY = {
+    "awsc": {"label": "AWSC (RLPD)", "color": "#2196F3", "marker": "o"},
+    "pld":  {"label": "PLD-SAC",     "color": "#4CAF50", "marker": "s"},
+    "dsrl": {"label": "DSRL-SAC",    "color": "#FF5722", "marker": "^"},
+}
+
+METRICS_OF_INTEREST = [
+    "eval/success_once",
+    "eval/success_at_end",
+    "eval/episode_len",
+    "charts/critic_loss",
+]
+
+
+# =============================================================================
+# Data Extraction
+# =============================================================================
+
+class DataExtractor:
+    """Extract experiment results from log files and TensorBoard events."""
+
+    def __init__(self, sweep_dir: str, act_horizon: int = 7):
+        self.sweep_dir = Path(sweep_dir)
+        self.act_horizon = act_horizon
+
+    def find_all_experiments(self) -> list[ExperimentResult]:
+        """Find all experiment directories for all algorithms."""
+        results = []
+        for algo in ["awsc", "pld", "dsrl"]:
+            algo_dir = self.sweep_dir / algo
+            if not algo_dir.exists():
+                continue
+            for exp_dir in self._find_exp_dirs(algo_dir):
+                result = self._parse_experiment(algo, exp_dir)
+                results.append(result)
+        return results
+
+    def _find_exp_dirs(self, algo_dir: Path) -> list[Path]:
+        """Find experiment directories (with or without timestamp suffix)."""
+        dirs = []
+        for item in sorted(algo_dir.iterdir()):
+            if not item.is_dir():
+                continue
+            # Check if it's a valid experiment dir
+            if (item / "train.log").exists() or (item / "checkpoints").exists():
+                dirs.append(item)
+            # Also check for timestamped subdirs
+            for sub in algo_dir.glob(f"{item.name}__*"):
+                if sub.is_dir():
+                    dirs.append(sub)
+        return sorted(set(dirs))
+
+    def _parse_experiment(self, algorithm: str, exp_dir: Path) -> ExperimentResult:
+        """Parse an experiment from its directory."""
+        result = ExperimentResult(
+            algorithm=algorithm,
+            config_name=self._get_config_name(exp_dir),
+            exp_dir=str(exp_dir),
+        )
+
+        # Parse seed from directory name or log
+        seed_match = re.search(r'seed[_=]?(\d+)', exp_dir.name)
+        if seed_match:
+            result.seed = int(seed_match.group(1))
+
+        # Parse metrics from log
+        log_file = exp_dir / "train.log"
+        if log_file.exists():
+            self._parse_log_metrics(log_file, result)
+
+        # Parse training curves from TensorBoard events
+        if HAS_TENSORBOARD:
+            self._parse_tensorboard(exp_dir, result)
+
+        # Determine status
+        checkpoints = exp_dir / "checkpoints"
+        if checkpoints.exists() and any(checkpoints.glob("*.pt")):
+            result.status = "success"
+        elif log_file.exists():
+            text = log_file.read_text(errors='ignore')
+            if any(err in text for err in ["CUDA error", "OOM", "out of memory"]):
+                result.status = "failed"
+            else:
+                result.status = "running"
+        else:
+            result.status = "not_started"
+
+        return result
+
+    def _get_config_name(self, exp_dir: Path) -> str:
+        name = exp_dir.name
+        if "__" in name:
+            name = name.rsplit("__", 1)[0]
+        return name
+
+    def _parse_log_metrics(self, log_file: Path, result: ExperimentResult) -> None:
+        """Parse final metrics from training log."""
+        text = log_file.read_text(errors='ignore')
+
+        # Parse "Done. Best success rate: XX.XX%"
+        match = re.search(r'Done\. Best success rate: ([\d.]+)', text)
+        if match:
+            result.success_once = float(match.group(1)) / 100.0
+
+        # Parse wandb summary
+        for line in text.splitlines():
+            if 'wandb:' not in line:
+                continue
+            if 'eval/success_once' in line:
+                parts = line.strip().split()
+                if len(parts) >= 3:
+                    try:
+                        val = float(parts[-1])
+                        if result.success_once is None:
+                            result.success_once = val
+                    except ValueError:
+                        pass
+            if 'eval/success_at_end' in line:
+                parts = line.strip().split()
+                if len(parts) >= 3:
+                    try:
+                        result.success_at_end = float(parts[-1])
+                    except ValueError:
+                        pass
+
+    def _parse_tensorboard(self, exp_dir: Path, result: ExperimentResult) -> None:
+        """Parse training curves from TensorBoard event files."""
+        # Find event files
+        event_files = list(exp_dir.rglob("events.out.tfevents.*"))
+        if not event_files:
+            return
+
+        try:
+            ea = event_accumulator.EventAccumulator(
+                str(exp_dir),
+                size_guidance={event_accumulator.SCALARS: 0},  # Load all
+            )
+            ea.Reload()
+
+            for tag in METRICS_OF_INTEREST:
+                if tag in ea.Tags().get("scalars", []):
+                    events = ea.Scalars(tag)
+                    result.training_curves[tag] = [
+                        (e.step, e.value) for e in events
+                    ]
+        except Exception:
+            pass
+
+    def normalize_steps(
+        self,
+        results: list[ExperimentResult],
+        scheme: str = "A",
+    ) -> list[ExperimentResult]:
+        """Normalize x-axis steps according to comparison scheme.
+
+        Scheme A: Convert all to robot steps (AWSC already in robot steps;
+                  PLD/DSRL: multiply by act_horizon).
+        Scheme B: Convert all to chunk decisions (AWSC: divide by act_horizon;
+                  PLD/DSRL already in chunk decisions).
+        Scheme C: No normalization.
+        """
+        for result in results:
+            for tag, curve in result.training_curves.items():
+                if scheme.upper() == "A":
+                    if result.algorithm in ("pld", "dsrl"):
+                        # chunk decisions → robot steps
+                        result.training_curves[tag] = [
+                            (step * self.act_horizon, val) for step, val in curve
+                        ]
+                elif scheme.upper() == "B":
+                    if result.algorithm == "awsc":
+                        # robot steps → chunk decisions
+                        result.training_curves[tag] = [
+                            (step // self.act_horizon, val) for step, val in curve
+                        ]
+                # Scheme C: no change
+        return results
+
+
+# =============================================================================
+# Visualization
+# =============================================================================
+
+def plot_comparison(
+    results: list[ExperimentResult],
+    output_dir: Path,
+    scheme: str = "A",
+) -> None:
+    """Plot comparison curves for all algorithms."""
+    if not HAS_MATPLOTLIB:
+        print("Warning: matplotlib not available, skipping plots.")
+        return
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    x_label = {
+        "A": "Robot Steps",
+        "B": "Chunk Decisions",
+        "C": "Training Steps (raw, not aligned)",
+    }.get(scheme.upper(), "Steps")
+
+    for tag in METRICS_OF_INTEREST:
+        fig, ax = plt.subplots(1, 1, figsize=(10, 6))
+
+        has_data = False
+        for algo_key, meta in ALGO_DISPLAY.items():
+            algo_results = [r for r in results if r.algorithm == algo_key]
+            if not algo_results:
+                continue
+
+            curves = [r.training_curves.get(tag, []) for r in algo_results]
+            curves = [c for c in curves if len(c) > 0]
+            if not curves:
+                continue
+
+            has_data = True
+
+            if len(curves) == 1:
+                # Single seed: plot directly
+                steps, values = zip(*curves[0])
+                ax.plot(steps, values,
+                        label=meta["label"],
+                        color=meta["color"],
+                        marker=meta["marker"],
+                        markersize=4,
+                        markevery=max(1, len(steps) // 10),
+                        linewidth=2)
+            else:
+                # Multiple seeds: interpolate and compute mean ± std
+                all_steps = sorted(set(s for curve in curves for s, _ in curve))
+                matrix = np.full((len(curves), len(all_steps)), np.nan)
+
+                for i, curve in enumerate(curves):
+                    s_arr = np.array([s for s, _ in curve])
+                    v_arr = np.array([v for _, v in curve])
+                    matrix[i] = np.interp(all_steps, s_arr, v_arr)
+
+                mean = np.nanmean(matrix, axis=0)
+                std = np.nanstd(matrix, axis=0)
+
+                ax.plot(all_steps, mean,
+                        label=meta["label"],
+                        color=meta["color"],
+                        marker=meta["marker"],
+                        markersize=4,
+                        markevery=max(1, len(all_steps) // 10),
+                        linewidth=2)
+                ax.fill_between(all_steps, mean - std, mean + std,
+                                alpha=0.2, color=meta["color"])
+
+        if not has_data:
+            plt.close(fig)
+            continue
+
+        ax.set_xlabel(x_label, fontsize=12)
+        ax.set_ylabel(tag.replace("/", " / "), fontsize=12)
+        ax.set_title(f"Fair Comparison — {tag}", fontsize=14)
+        ax.legend(fontsize=11)
+        ax.grid(True, alpha=0.3)
+
+        safe_name = tag.replace("/", "_")
+        fig.tight_layout()
+        fig.savefig(output_dir / f"comparison_{safe_name}.png", dpi=150)
+        plt.close(fig)
+        print(f"  Saved: comparison_{safe_name}.png")
+
+
+# =============================================================================
+# Report Generation
+# =============================================================================
+
+def generate_report(
+    results: list[ExperimentResult],
+    output_dir: Path,
+    scheme: str = "A",
+    act_horizon: int = 7,
+) -> None:
+    """Generate a markdown comparison report."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    report_path = output_dir / "comparison_report.md"
+
+    lines = [
+        "# Data-Efficiency Fair Comparison Report",
+        f"",
+        f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        f"",
+        f"## Configuration",
+        f"- Comparison Scheme: **{scheme}**",
+        f"- Act Horizon: {act_horizon}",
+        f"- X-Axis: {'Robot Steps' if scheme == 'A' else 'Chunk Decisions' if scheme == 'B' else 'Raw Steps'}",
+        f"",
+        f"## Results Summary",
+        f"",
+        f"| Algorithm | success_once | success_at_end | Status |",
+        f"|-----------|:------------:|:--------------:|:------:|",
+    ]
+
+    best_algo, best_score = None, 0.0
+    for algo_key in ["awsc", "pld", "dsrl"]:
+        algo_results = [r for r in results if r.algorithm == algo_key]
+        if not algo_results:
+            lines.append(f"| {ALGO_DISPLAY[algo_key]['label']} | - | - | not started |")
+            continue
+
+        # Average across seeds
+        s_once = [r.success_once for r in algo_results if r.success_once is not None]
+        s_end = [r.success_at_end for r in algo_results if r.success_at_end is not None]
+        statuses = [r.status for r in algo_results]
+
+        once_str = f"{np.mean(s_once):.4f} ± {np.std(s_once):.4f}" if s_once else "-"
+        end_str = f"{np.mean(s_end):.4f} ± {np.std(s_end):.4f}" if s_end else "-"
+        status_str = "✓" if all(s == "success" for s in statuses) else "partial"
+
+        lines.append(f"| {ALGO_DISPLAY[algo_key]['label']} | {once_str} | {end_str} | {status_str} |")
+
+        if s_once and np.mean(s_once) > best_score:
+            best_score = np.mean(s_once)
+            best_algo = algo_key
+
+    lines.extend([
+        f"",
+        f"## Best Algorithm",
+        f"",
+        f"**{ALGO_DISPLAY.get(best_algo, {}).get('label', 'N/A')}** "
+        f"with success_once = {best_score:.4f}" if best_algo else "No completed experiments.",
+        f"",
+        f"## Comparison Scheme Notes",
+        f"",
+    ])
+
+    if scheme.upper() == "A":
+        lines.extend([
+            "- **Scheme A**: All x-axis values represent *robot steps*.",
+            f"- AWSC reports robot steps natively; PLD/DSRL steps are multiplied by act_horizon={act_horizon}.",
+            "- This is the fairest comparison in terms of physical environment interaction.",
+        ])
+    elif scheme.upper() == "B":
+        lines.extend([
+            "- **Scheme B**: All x-axis values represent *chunk decisions*.",
+            f"- PLD/DSRL report chunk decisions natively; AWSC steps are divided by act_horizon={act_horizon}.",
+            "- This aligns with SMDP semantics.",
+        ])
+    else:
+        lines.extend([
+            "- **Scheme C**: Raw training steps (not aligned between algorithms).",
+            "- **Not suitable for formal comparison!** Use Scheme A or B instead.",
+        ])
+
+    report_path.write_text("\n".join(lines))
+    print(f"Report saved to: {report_path}")
+
+
+# =============================================================================
+# Main
+# =============================================================================
+
+def main():
+    parser = argparse.ArgumentParser(description="Fair comparison analysis")
+    parser.add_argument("--sweep-dir", required=True, help="Sweep base directory")
+    parser.add_argument("--comparison-scheme", default="A", choices=["A", "B", "C"])
+    parser.add_argument("--act-horizon", type=int, default=7)
+    parser.add_argument("--output-dir", default=None, help="Output directory for plots and report")
+    args = parser.parse_args()
+
+    sweep_dir = Path(args.sweep_dir)
+    output_dir = Path(args.output_dir) if args.output_dir else sweep_dir / "analysis_results"
+
+    print(f"Sweep dir: {sweep_dir}")
+    print(f"Scheme: {args.comparison_scheme}")
+    print(f"Output: {output_dir}")
+    print()
+
+    # Extract data
+    extractor = DataExtractor(str(sweep_dir), act_horizon=args.act_horizon)
+    results = extractor.find_all_experiments()
+
+    if not results:
+        print("No experiments found!")
+        return
+
+    print(f"Found {len(results)} experiments:")
+    for r in results:
+        print(f"  {r.algorithm}/{r.config_name}: "
+              f"success_once={r.success_once}, status={r.status}")
+    print()
+
+    # Normalize x-axis
+    results = extractor.normalize_steps(results, scheme=args.comparison_scheme)
+
+    # Plot comparison
+    print("Generating plots...")
+    plot_comparison(results, output_dir, scheme=args.comparison_scheme)
+
+    # Generate report
+    print("Generating report...")
+    generate_report(results, output_dir,
+                    scheme=args.comparison_scheme,
+                    act_horizon=args.act_horizon)
+
+    # Export summary JSON
+    summary = {
+        "timestamp": datetime.now().isoformat(),
+        "comparison_scheme": args.comparison_scheme,
+        "act_horizon": args.act_horizon,
+        "algorithms": {},
+    }
+    for algo_key in ["awsc", "pld", "dsrl"]:
+        algo_results = [r for r in results if r.algorithm == algo_key]
+        s_once = [r.success_once for r in algo_results if r.success_once is not None]
+        s_end = [r.success_at_end for r in algo_results if r.success_at_end is not None]
+        summary["algorithms"][algo_key] = {
+            "num_seeds": len(algo_results),
+            "success_once_mean": float(np.mean(s_once)) if s_once else None,
+            "success_once_std": float(np.std(s_once)) if len(s_once) > 1 else 0.0,
+            "success_at_end_mean": float(np.mean(s_end)) if s_end else None,
+            "statuses": [r.status for r in algo_results],
+        }
+
+    summary_path = output_dir / "analysis_summary.json"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    summary_path.write_text(json.dumps(summary, indent=2))
+    print(f"Summary JSON: {summary_path}")
+    print("\nDone!")
+
+
+if __name__ == "__main__":
+    main()
