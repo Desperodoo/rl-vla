@@ -15,20 +15,27 @@
 
 ### 原设备状态
 
-**阶段**：Phase 2 — WM v4 重训练（BUG-A/BUG-B 修复后从零开始）+ ADR-036/037 Pipeline 优化
-**已修复 (2026-03-08)**：
-- **BUG-A (ADR-037)**：WM action conditioning 语义错配 — 从 delta pose 改为**绝对 EE 位姿** (对齐 DROID)。stat.json 已重新生成。
-- **BUG-B (ADR-037)**：Camera VAE 编码差异 — 从像素空间拼接改为**独立 per-camera VAE 编码后 latent 空间拼接**。
-- iter1_v3_ext 训练已停止（使用了错误 stat.json + 错误 latent 编码）。
-**当前阻塞**：WM v4 训练中 (`checkpoints/vlaw/world_model/iter1_v4/`)
-**下游阻塞**：Imagination、策略更新、评估、Iter-2 全部暂停。
+**阶段**：Phase 2 — WM v5 重训练（BUG-A/B/C 全部修复后从零开始）
+**已修复**：
+- **BUG-A (ADR-037, 2026-03-08)**：WM action conditioning 语义错配 — 从 delta pose 改为**绝对 EE 位姿** (对齐 DROID)。stat.json 已重新生成。
+- **BUG-B (ADR-037, 2026-03-08)**：Camera VAE 编码差异 — 从像素空间拼接改为**独立 per-camera VAE 编码后 latent 空间拼接**。
+- **BUG-C (ADR-040, 2026-03-11)**：VAE 编码器不匹配 — `pipeline.py` 误用 `sd-vae-ft-mse` 的 `AutoencoderKL` 编码，而 Ctrl-World 训练/推理使用 SVD 的 `AutoencoderKLTemporalDecoder`。两者权重不同，latent 分布存在偏差。已改为使用 SVD VAE 编码，数据重编码为 train_v5。
+**WM v4 评估结果 (2026-03-11)**：4000 步训练完成，best loss=0.177 (step 3400)。视觉质量尚可但物体动态弱（peg 基本静止），判定为**不可用**。分析发现 BUG-C 是主要根因。
+**当前进度**：v5 数据重编码完成 → WM v5 训练待启动 (`checkpoints/vlaw/world_model/iter1_v5/`)
+**下游阻塞**：Imagination、策略更新、评估、Iter-2 全部暂停，等 WM v5。
+
+**待消融 (Step 2 — 时间跳跃数据增强)**：
+- 官方 DROID 训练使用随机时间跳跃 `skip=randint(1,2)`, `skip_his=skip*4` (15% prob→0)
+- 我们的 ManiSkill dataset 使用严格连续帧 (`skip_step=1`)
+- 需修改 `ctrl_world/dataset/dataset_maniskill.py` 的 `__getitem__` 加入 DROID 风格随机 skip
+- 优先级：**v5 训练完成 + 评估后**，若质量仍不足再作为下一轮消融
 
 **原设备 GPU 分配**：
 
 | GPU | 任务 | 状态 |
 |-----|------|------|
 | 0-1 | LMStudio | 占用 |
-| 2-9 | WM v4 训练 iter1_v4 (8 GPU, DeepSpeed ZeRO-2) | 运行中 (~14GB/GPU) |
+| 2-9 | WM v5 训练 iter1_v5 (8 GPU, DeepSpeed ZeRO-2) | 待启动 |
 
 ---
 
@@ -243,7 +250,8 @@ logs/vlaw/               ← 子 Agent RESULT_FILE 输出
 | WM pretrained | `checkpoints/vlaw/world_model/pretrained/Ctrl-World/checkpoint-10000.pt` (8.7GB) |
 | WM iter1_v3（ckpt-400） | `checkpoints/vlaw/world_model/iter1_v3/` |
 | WM iter1_v3_ext（已废弃，BUG-A/B） | `checkpoints/vlaw/world_model/iter1_v3_ext/` |
-| WM iter1_v4（当前训练中） | `checkpoints/vlaw/world_model/iter1_v4/` |
+| WM iter1_v4（已废弃，BUG-C VAE不匹配） | `checkpoints/vlaw/world_model/iter1_v4/` |
+| WM iter1_v5（当前，BUG-A/B/C全修复） | `checkpoints/vlaw/world_model/iter1_v5/` |
 | SVD pretrained | `checkpoints/vlaw/world_model/pretrained/svd/` |
 | CLIP pretrained | `checkpoints/vlaw/world_model/pretrained/clip/` |
 | VLM base（Qwen3-VL-4B） | `checkpoints/vlaw/reward_model/qwen_vl/` (8.3GB) |
@@ -300,8 +308,9 @@ logs/vlaw/               ← 子 Agent RESULT_FILE 输出
 | ADR-037 | **WM action conditioning + VAE 编码对齐 DROID**：(A) Action conditioning 从 delta pose 改为绝对 EE 位姿 [tcp_xyz+euler_xyz+gripper_norm]；stat.json 从 joint angle percentiles 改为 EE pose percentiles。(B) VAE 编码从像素空间拼接改为独立 per-camera 编码+latent 空间拼接。影响：generate_stat_json, dataset_maniskill, ctrl_world_adapter, imagination_env, imagination_rl_env, imagination.py, pipeline.py。iter1_v3/v3_ext 训练数据全部作废，需重新编码+重训练。 | ✅ 代码修复完成 |
 | ADR-038 | **ACP Online Reward for RLPD**：用 ACP value model TD-shaped reward `r(s,s')=(V(s')-V(s))*scale` 替换 ManiSkill sim dense reward 进行 SAC/AWSC 在线训练。`DualCameraRewardWrapper` 在 `FlattenRGBDObservationWrapper` 前拦截 sensor_data + env.render() 获取双相机图像。支持三种模式：`sim`（默认不变）、`acp`（纯 ACP reward）、`acp_blend`（加权混合）。ACP model 默认部署到 cuda:1 与 RL 训练分 GPU。新增文件：`rlft/envs/acp_reward_wrapper.py`，修改 `train_rlpd.py` Args。 | ✅ 代码+测试完成 |
 | ADR-039 | **ACP 训练数据多样化**：iter1 因 demo-only 数据（25条，MAE=0.0021）严重过拟合。解决方案：采集4种分布 Type B/C/D/E 各100-200条，训练5个ACP版本（v2_demo_only/v2_pretrained_pol/v2_teleop_sim/v2_rl_prior/v2_combined）。Type C 用 OU 噪声（θ=0.15σ=0.07+停顿）模拟**真机遥操作**；Type D 用 i.i.d. Gaussian（σ=0.25）模拟**真机RL微调探索**。实现：`rlft/vlaw/data/noisy_policy.py`（OUNoisePolicyWrapper + GaussianNoisePolicyWrapper）。入口脚本：`scripts/collect_acp_data.sh`→`scripts/train_acp_multi.sh`。 | ✅ 数据采集（1350条）+5版本ACP训练全部完成 |
+| ADR-040 | **VAE 编码器不匹配修复 (BUG-C)**：`pipeline.py` 误用 `sd-vae-ft-mse` 的 `AutoencoderKL` 编码训练数据，但 Ctrl-World 训练/推理使用 SVD 的 `AutoencoderKLTemporalDecoder`。两者权重不同导致 latent 分布偏差，WM 在错误 latent 空间上训练。修复：改用 SVD VAE (`AutoencoderKLTemporalDecoder`) 编码，数据重编码为 train_v5。v4 评估: best loss=0.177 但物体动态弱，判定不可用。 | ✅ 代码修复+v5数据重编码完成 |
 
-完整决策记录：`.github/knowledge/decisions.md`（38 条 ADR）
+完整决策记录：`.github/knowledge/decisions.md`（40 条 ADR）
 
 ---
 

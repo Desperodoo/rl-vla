@@ -415,9 +415,14 @@ def _visualize_synthetic(h5_path: str, output_dir: str, vis_count: int = 5,
             T = latents.shape[0]
             # 第一帧 / 中间帧 / 最后帧
             idxs = np.array([0, T // 2, T - 1]) if T >= 3 else np.arange(T)
-            rgb = _decode_latent_for_viz(vae, latents, idxs, device)
-            # 拼 strip
-            strip = np.concatenate([rgb[j] for j in range(rgb.shape[0])], axis=1)
+            rgb = _decode_latent_for_viz(vae, latents, idxs, device)  # (N, H_full, W, 3)
+            H_half = rgb.shape[1] // 2
+            base_rgb = rgb[:, :H_half, :, :]     # base camera (top half)
+            render_rgb = rgb[:, H_half:, :, :]    # render/side camera (bottom half)
+            # 横拼各帧，再纵拼双相机
+            strip_base = np.concatenate([base_rgb[j] for j in range(base_rgb.shape[0])], axis=1)
+            strip_render = np.concatenate([render_rgb[j] for j in range(render_rgb.shape[0])], axis=1)
+            strip = np.concatenate([strip_base, strip_render], axis=0)
             img = PILImage.fromarray(strip)
             save_path = viz_dir / f"{traj_keys[i]}_strip.png"
             img.save(str(save_path))
@@ -431,7 +436,7 @@ def _visualize_synthetic(h5_path: str, output_dir: str, vis_count: int = 5,
 @torch.inference_mode()
 def _decode_latent_for_viz(vae, latents: np.ndarray, frame_indices: np.ndarray,
                           device: str, chunk_size: int = 4) -> np.ndarray:
-    """解码 VAE latent 为 RGB (base camera 上半部分)."""
+    """解码 VAE latent 为 RGB, 返回 (N, H_full, W, 3)，包含 base+render 双相机."""
     selected = torch.from_numpy(latents[frame_indices]).to(device).to(torch.float16)
     decoded_list = []
     for i in range(0, selected.shape[0], chunk_size):
@@ -440,7 +445,7 @@ def _decode_latent_for_viz(vae, latents: np.ndarray, frame_indices: np.ndarray,
         decoded_list.append(out)
     decoded = torch.cat(decoded_list, dim=0)
     decoded = (decoded / 2.0 + 0.5).clamp(0, 1) * 255
-    return decoded.float().cpu().numpy().transpose(0, 2, 3, 1).astype(np.uint8)[:, :192, :, :]
+    return decoded.float().cpu().numpy().transpose(0, 2, 3, 1).astype(np.uint8)
 
 
 if __name__ == "__main__":

@@ -3,9 +3,9 @@
 P1.2 阶段: 将 data_collector 收集的 HDF5 轨迹经过 Ctrl-World VAE 批量编码，
 生成 latent_concat 张量写回 HDF5 供世界模型训练使用。
 
-数据流 (对齐 DROID/Ctrl-World 官方: 各相机独立 VAE 编码):
+数据流 (对齐 DROID/Ctrl-World 官方: 各相机独立 SVD VAE 编码):
     HDF5[rgb_base (T,H,W,3) + rgb_render (T,H,W,3)]
-    → 各相机独立 AutoencoderKL encode
+    → 各相机独立 AutoencoderKLTemporalDecoder (SVD VAE) encode
     → latent_base (T, 4, H/8, W/8) + latent_render (T, 4, H/8, W/8)
     → latent 空间垂直拼接 → latent_concat (T, 4, 2*H/8, W/8) float16
     → 写回同一 HDF5 / 新 HDF5
@@ -50,13 +50,14 @@ class PipelineConfig:
     in_place: bool = False
     """True: 将 latent_concat 数据集写回原 HDF5; False: 写到新 HDF5"""
 
-    # VAE
-    vae_model_id: str = "stabilityai/sd-vae-ft-mse"
-    """HuggingFace 模型 ID 或本地路径"""
+    # VAE — 必须使用 SVD 的 AutoencoderKLTemporalDecoder, 与 CrtlWorld 训练/推理一致
+    # BUG-C (ADR-040): 之前误用 sd-vae-ft-mse 的 AutoencoderKL, 导致 latent 分布与
+    # CrtlWorld pretrained 模型期望的 SVD VAE latent 不匹配
+    vae_model_id: str = "stabilityai/stable-video-diffusion-img2vid"
+    """SVD VAE HuggingFace 模型 ID (subfolder='vae')"""
 
-    # VLAW MODIFICATION: 移除硬编码用户路径，改为空字符串并自动查找 HF 缓存
     vae_local_path: str = ""
-    """VAE 本地缓存路径 (优先于 vae_model_id); 空字符串则尝试自动从 HF 缓存查找，找不到则用 vae_model_id 在线下载"""
+    """SVD VAE 本地路径 (优先于 vae_model_id); 空字符串则尝试自动查找"""
 
     # 图像
     camera_height: int = 192
@@ -98,39 +99,60 @@ def load_vae(
     vae_model_id: str,
     vae_local_path: str,
     device: torch.device,
-) -> "AutoencoderKL":
-    """加载 stabilityai/sd-vae-ft-mse AutoencoderKL.
+):
+    """加载 SVD 的 AutoencoderKLTemporalDecoder (对齐 Ctrl-World 官方).
+
+    BUG-C (ADR-040): 之前误用 sd-vae-ft-mse 的 AutoencoderKL, latent 分布与
+    CrtlWorld 训练时使用的 SVD VAE 不匹配。现在改用同一个 SVD VAE 做编码。
 
     Args:
-        vae_model_id: HuggingFace 模型 ID
-        vae_local_path: 本地缓存路径 (优先)
+        vae_model_id: HuggingFace 模型 ID (e.g. 'stabilityai/stable-video-diffusion-img2vid')
+        vae_local_path: SVD VAE 本地路径 (优先). 可以是:
+            - 包含 vae/ 子目录的 SVD 根目录
+            - 直接指向 vae/ 子目录
         device: 目标设备
 
     Returns:
-        eval 模式下的 AutoencoderKL
+        eval 模式下的 AutoencoderKLTemporalDecoder
     """
-    from diffusers import AutoencoderKL
+    from diffusers.models import AutoencoderKLTemporalDecoder
 
-    # VLAW MODIFICATION: 支持自动查找 HF 缓存，避免硬编码路径
-    if not vae_local_path:
-        try:
-            from huggingface_hub import try_to_load_from_cache
-            cached = try_to_load_from_cache(vae_model_id, filename="config.json")
-            if cached is not None:
-                import os
-                # try_to_load_from_cache 返回文件路径，取其目录作为模型路径
-                vae_local_path = str(os.path.dirname(cached))
-                print(f"[VLAW-P1.2] 自动发现 VAE 缓存: {vae_local_path}")
-        except Exception:
-            pass
+    # 确定加载路径
+    load_from = None
+    subfolder = None
 
-    load_from = vae_local_path if vae_local_path else vae_model_id
-    print(f"[VLAW-P1.2] 加载 VAE: {load_from}")
-    vae = AutoencoderKL.from_pretrained(load_from, torch_dtype=torch.float32, low_cpu_mem_usage=False)
+    if vae_local_path:
+        vae_dir = Path(vae_local_path)
+        if (vae_dir / "vae" / "config.json").exists():
+            # 传入的是 SVD 根目录, 需要 subfolder="vae"
+            load_from = str(vae_dir)
+            subfolder = "vae"
+        elif (vae_dir / "config.json").exists():
+            # 直接传入 vae/ 子目录
+            load_from = str(vae_dir)
+        else:
+            print(f"[VLAW-P1.2] ⚠️  本地路径无效: {vae_local_path}, 回退到 model_id")
+
+    if load_from is None:
+        load_from = vae_model_id
+        subfolder = "vae"
+
+    print(f"[VLAW-P1.2] 加载 SVD VAE: {load_from}" +
+          (f" (subfolder={subfolder})" if subfolder else ""))
+
+    kwargs = {"torch_dtype": torch.float32}
+    if subfolder:
+        vae = AutoencoderKLTemporalDecoder.from_pretrained(
+            load_from, subfolder=subfolder, **kwargs
+        )
+    else:
+        vae = AutoencoderKLTemporalDecoder.from_pretrained(load_from, **kwargs)
+
     vae = vae.to(device).eval()
     for p in vae.parameters():
         p.requires_grad_(False)
-    print(f"[VLAW-P1.2] VAE 加载完成 (device={device})")
+    print(f"[VLAW-P1.2] SVD VAE 加载完成 (device={device}, "
+          f"scaling_factor={vae.config.scaling_factor})")
     return vae
 
 
@@ -203,7 +225,7 @@ def encode_frames_batch(
     """批量 VAE 编码帧序列.
 
     Args:
-        vae: AutoencoderKL
+        vae: AutoencoderKLTemporalDecoder (SVD VAE)
         frames: uint8 帧序列 (T, cH, cW, 3), cH/cW 必须为 8 的倍数
         batch_size: 每批帧数
         device: 计算设备
