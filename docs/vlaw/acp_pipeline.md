@@ -17,6 +17,8 @@
 7. [训练数据多样化 (ADR-039)](#7-训练数据多样化-adr-039)
 8. [训练结果](#8-训练结果)
 9. [文件结构与依赖](#9-文件结构与依赖)
+- [附录 A: ACP 与 VLM 标注的对比](#附录-a-acp-与-vlm-标注的对比)
+- [附录 B: 可视化图表索引](#附录-b-可视化图表索引)
 
 ---
 
@@ -137,11 +139,36 @@ Value Target 示意 (T=35)
 ![Value Target Illustration](figures/acp_value_target_illustration.png)
 *左图：成功/失败轨迹的 per-frame value target 曲线，两者之间有恒定 0.5 的 gap。右图：对应的 dense reward（value target 相邻差分），成功和失败在中间帧的 dense reward 几乎相同——真正的区分来自 advantage 计算。*
 
-- 成功/失败轨迹之间有恒定的 0.5 gap，提供清洗的监督信号
+- 成功/失败轨迹之间有恒定的 0.5 gap，提供清晰的监督信号
 - 同一轨迹内，值从负向零单调递增（时间越近末尾，价值越高）
 - 范围严格限制在 $[-1, 0]$
 
-### 2.4 代码位置
+### 2.4 关于 Hindsight Labeling
+
+**"t=0 时 value target 就已经区分了成功和失败，模型如何在推理时没有未来信息的情况下做出预测？"**
+
+这是一个常见的直觉疑问。Value target 使用整条轨迹的最终结果（`env_success.any()`）来标注每一帧，包括 t=0。这意味着 t=0 时成功轨迹的 target ≈ -0.2，失败轨迹的 target ≈ -1.0。
+
+这 **不是** 信息泄漏，而是**所有 value function 训练的标准方式**：
+
+- **MC return**：$V(s_t) \leftarrow G_t = \sum_{t'=t}^{T} r_{t'}$（使用全部未来信息）
+- **TD learning**：$V(s_t) \leftarrow r_t + \gamma V(s_{t+1})$（也使用了"未来"的 $s_{t+1}$）
+
+RECAP 论文（π\*₀.₆, arXiv: 2511.14759）在 Section 3.1 明确指出：
+
+> "This is a Monte Carlo estimator for the value function of the behavior policy. While this on-policy estimator is less optimal than a more classic off-policy Q-function estimator, we found it to be **simple and highly reliable**."
+
+**模型必须泛化**：训练时标签包含被未来信息，但模型只能接收当前帧的视觉观察 $o_t$ 作为输入。如果两个视觉相同的初始状态导致了不同的结局，模型学到的是 $E[R | o_t]$——该视觉状态的 **平均** value，这正是正确的 value function。
+
+实际场景中的真实 episode 可视化也验证了这一点：相同任务不同初始状态确实存在视觉差异（物体位置、机械臂姿态），模型可以从中提取有意义的特征。
+
+![Success Episode Keyframes](figures/episodes/traj_0005_success_keyframes.png)
+*成功 episode (T=16)：机器人快速接近并抬起 peg，value target 从 -0.21 线性上升至 0。*
+
+![Fail Episode Keyframes](figures/episodes/traj_0155_fail_keyframes.png)
+*失败 episode (T=34)：机器人未能完成任务，value target 始终在 [-1.0, -0.5] 区间。注意初始状态与成功 episode 在视觉上确有差异。*
+
+### 2.5 代码位置
 
 > `rlft/vlaw/acp/value_targets.py:17-56` — `compute_value_targets()`
 
@@ -746,7 +773,26 @@ bash scripts/train_acp_multi.sh --parallel  # GPU 2-6 并行
 | `09_success_vs_fail.png` | 成功/失败轨迹的预测值分布 + 分组 MAE 箱线图 | 模型对成功轨迹的预测是否显著高于失败轨迹；两组的 MAE 是否有显著差异。 |
 | `10_error_by_timestep.png` | MAE 随 frame index 的变化曲线 | 识别哪些时间步最难预测（通常是首帧和末帧附近）。 |
 
-### B.3 重新生成图表
+### B.3 Episode 级可视化（由 `episode_viz.py` 生成）
+
+双相机图像 + value 曲线的 episode 级可视化，支持 PNG（关键帧）和 GIF（逐帧动画）：
+
+| 文件名模式 | 内容 | 用途 |
+|-----------|------|------|
+| `traj_XXXX_success_keyframes.png` | 成功 episode 关键帧（双相机 + value 曲线） | 展示成功轨迹的视觉特征与 value 单调上升趋势 |
+| `traj_XXXX_fail_keyframes.png` | 失败 episode 关键帧 | 展示失败轨迹的视觉特征（物体未到位）与 value 偏低趋势 |
+| `traj_XXXX_success_episode.gif` | 成功 episode 逐帧动画 | 展示任务完成全过程与 value 曲线的实时进展 |
+| `traj_XXXX_fail_episode.gif` | 失败 episode 逐帧动画 | 展示失败过程：机器人未能抬起物体，value 始终偏低 |
+
+```bash
+# 生成 episode 可视化
+conda run -n rlft_ms3 python -m rlft.vlaw.acp.episode_viz \
+    --hdf5_paths data/vlaw/rollouts/pretrained_policy/*.h5 \
+    --output_dir docs/vlaw/figures/episodes \
+    --num_success 2 --num_fail 2 --num_keyframes 6 --gif_fps 4
+```
+
+### B.4 重新生成图表
 
 ```bash
 # 从 wandb 日志重新生成训练结果图表
