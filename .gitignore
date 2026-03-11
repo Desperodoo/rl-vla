@@ -63,3 +63,4 @@ results/vlaw/wm_eval_ckpt400_viz/
 results/vlaw/_archive/
 results/vlaw/imagination_eval/*.png
 results/vlaw/imagination_eval/**/*.png
+.hf_token_tmp
