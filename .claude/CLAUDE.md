@@ -39,7 +39,7 @@
 
 ---
 
-### 新设备状态（2026-03-10，10x RTX 4090）
+### 新设备状态（2026-03-11，10x RTX 4090）
 
 **ACP 在新设备上的情况**：
 - 环境：`rlft_ms3` + transformers 5.3.0 已安装 ✅
@@ -50,13 +50,37 @@
   - 注：原设备 ACP iter1 best MAE=0.1675（1200 条混合数据），更具参考价值
 - **预训练策略（新设备本地）**：`runs/fair_comparison/awsc/best_s42__1772570560/checkpoints/best.pt` ✅
 
-**RLPD + ACP 实验状态（2026-03-10）**：
+**RLPD + ACP 实验状态（2026-03-11）**：
 
-| 实验 | 脚本 | 状态 | 进度 |
+| 实验 | 脚本 | 状态 | 结果 |
 |------|------|------|------|
-| SAC + ACP iter1（demo-only，过拟合基线） | `run_rlpd_acp.sh` | ✅ 完成 GPU 0+1 | 500K steps wandb: `bxl448kv` |
-| SAC + ACP v2_combined（**数据修复后重训**） | `run_rlpd_sac_acp_v2.sh` | **运行中** GPU 0+1 | — |
-| AWSC + pretrained policy init + ACP v2_combined | `run_rlpd_awsc_acp.sh` | **运行中** GPU 2+3 | — |
+| SAC + ACP iter1（demo-only 过拟合） | `run_rlpd_acp.sh` | ✅ 完成 | 500K steps, best SR 1.56%（❌ 不可用） |
+| SAC + ACP v2_combined | `run_rlpd_sac_acp_v2.sh` | ✅ 完成 | 500K steps, best SR 1.56%（❌ SAC 模式不可用） |
+| AWSC + 错误 ckpt + ACP v2 | `run_rlpd_awsc_acp.sh` (旧) | ✅ 完成 | best SR 81.25%（⚠️ 使用了 RLPD-finetuned ckpt，无法体现提升） |
+
+**ACP Mirror 实验（2026-03-11）— ✅ 全部完成**：
+用 ACP reward 替换 sim reward，对比 `runs/fair_comparison/` 的 sim-reward 结果。
+使用正确的 IL-trained pretrained checkpoint（与 compare_data_efficiency 相同）。
+入口脚本：`scripts/run_acp_mirror_experiments.sh`
+
+| 实验 | GPU | total_steps | Best SR (once/end) | Final SR (once/end) | 状态 |
+|------|-----|-------------|---------------------|---------------------|------|
+| AWSC + ACP | 0+1 | 500K | 90%/66% | 62%/56% | ✅ 完成（⚠️ success_once 退化，success_at_end 持平 sim） |
+| PLD-SAC + ACP | 2+3 | 71K | 82%/2% | 58%/0% | ✅ 完成（❌ success_at_end=0%） |
+| DSRL-SAC + ACP | 4+5 | 71K | 92%/6% | 88%/2% | ✅ 完成（❌ success_at_end≈0%） |
+
+对比 sim-reward 基线 success_at_end（seed 42）：AWSC-sim best=72%, PLD-sim best=86%, DSRL-sim best=60%
+
+Pretrained checkpoint: `runs/maniskill_sweep_v3/aw_shortcut_flow/cw0.3_step0.15__1770390417/checkpoints/best_eval_success_once.pt`
+ACP checkpoint: `checkpoints/vlaw/acp/v2_combined/best.safetensors`
+WandB project: `rlpd-acp-mirror`
+Runs: `runs/{awsc,pld,dsrl}_acp_mirror_s42__177320867{4,5,5}/`
+
+**关键发现**：
+- `train/reward/acp_step_mean` 在 step 5200 后降至 0.0 — **已诊断为日志 bug**，value model 输出正常（std=0.059），wrapper 实际返回非零奖励，`online_cum_reward_mean` 全程非零
+- **success_at_end 才是真正核心指标**：仅 AWSC 在 success_at_end 上达到 66%（sim=72%），PLD/DSRL 的 success_at_end 均 ≤6%
+- ACP value 目标为 success_once 语义，无法引导 success_at_end 行为（根因）
+- 详细报告：`docs/vlaw/acp_mirror_experiments.md`
 
 **ACP 数据多样化（ADR-039）— ✅ 全部完成**：
 
@@ -104,11 +128,30 @@ ACP 训练结果（5 版本全部完成，GPU 2-6 并行，`rlft_ms3` env）：
 
 | GPU | 任务 | 状态 |
 |-----|------|------|
-| 0 | RLPD SAC + ACP v2_combined | 运行中 |
-| 1 | ACP v2 推理（SAC 实验） | 运行中 |
-| 2 | RLPD AWSC + pretrained + ACP v2_combined | 运行中 |
-| 3 | ACP v2 推理（AWSC 实验） | 运行中 |
-| 4-9 | 空闲 | 备用 / 评估 |
+| 0-9 | AWSC+ACP Sweep v2（15 configs, 5并行, PID 1550228） | 运行中 |
+
+**AWSC+ACP Sweep v2（2026-03-12）— 运行中**：
+
+基于 wandb 数据分析（`scripts/sweep_acp/fetch_wandb.py`）对 ACP mirror AWSC 内科诊断后重新设计。
+分析发现：online_cum_reward=0.05 vs offline=4.34（87x gap），success_once 后期退化 0.82→0.60。
+
+入口：`bash scripts/sweep_acp/sweep.sh run`
+WandB project: `ACP-Sweep`
+Log: `logs/vlaw/acp_sweep_awsc_v2.log`
+
+| 组别 | 参数 | Configs |
+|------|------|---------|
+| baseline | 默认(scale=100,bc=2,or=0.15,γ=0.9) | 1 |
+| scale | acp_reward_scale: 500/1000/2000 | 3 |
+| bc_weight | awsc_bc_weight: 4.0/8.0 | 2 |
+| online_ratio | online_ratio: 0.3/0.5 | 2 |
+| gamma | gamma: 0.7/0.5 | 2 |
+| combined | 多参数组合(5种) | 5 |
+| **Total** | — | **15** |
+
+监控：`bash scripts/sweep_acp/sweep.sh status` / `analyze` / `report`
+WandB 分析：`python scripts/sweep_acp/fetch_wandb.py -p ACP-Sweep --save_csv`
+已完成分析报告：`logs/vlaw/wandb_analysis/awsc_acp_mirror/analysis_report.md`
 
 ---
 
@@ -309,8 +352,10 @@ logs/vlaw/               ← 子 Agent RESULT_FILE 输出
 | ADR-038 | **ACP Online Reward for RLPD**：用 ACP value model TD-shaped reward `r(s,s')=(V(s')-V(s))*scale` 替换 ManiSkill sim dense reward 进行 SAC/AWSC 在线训练。`DualCameraRewardWrapper` 在 `FlattenRGBDObservationWrapper` 前拦截 sensor_data + env.render() 获取双相机图像。支持三种模式：`sim`（默认不变）、`acp`（纯 ACP reward）、`acp_blend`（加权混合）。ACP model 默认部署到 cuda:1 与 RL 训练分 GPU。新增文件：`rlft/envs/acp_reward_wrapper.py`，修改 `train_rlpd.py` Args。 | ✅ 代码+测试完成 |
 | ADR-039 | **ACP 训练数据多样化**：iter1 因 demo-only 数据（25条，MAE=0.0021）严重过拟合。解决方案：采集4种分布 Type B/C/D/E 各100-200条，训练5个ACP版本（v2_demo_only/v2_pretrained_pol/v2_teleop_sim/v2_rl_prior/v2_combined）。Type C 用 OU 噪声（θ=0.15σ=0.07+停顿）模拟**真机遥操作**；Type D 用 i.i.d. Gaussian（σ=0.25）模拟**真机RL微调探索**。实现：`rlft/vlaw/data/noisy_policy.py`（OUNoisePolicyWrapper + GaussianNoisePolicyWrapper）。入口脚本：`scripts/collect_acp_data.sh`→`scripts/train_acp_multi.sh`。 | ✅ 数据采集（1350条）+5版本ACP训练全部完成 |
 | ADR-040 | **VAE 编码器不匹配修复 (BUG-C)**：`pipeline.py` 误用 `sd-vae-ft-mse` 的 `AutoencoderKL` 编码训练数据，但 Ctrl-World 训练/推理使用 SVD 的 `AutoencoderKLTemporalDecoder`。两者权重不同导致 latent 分布偏差，WM 在错误 latent 空间上训练。修复：改用 SVD VAE (`AutoencoderKLTemporalDecoder`) 编码，数据重编码为 train_v5。v4 评估: best loss=0.177 但物体动态弱，判定不可用。 | ✅ 代码修复+v5数据重编码完成 |
+| ADR-041 | **ACP Mirror Experiments**：用 ACP reward 替换 sim dense reward 运行 AWSC/PLD-SAC/DSRL-SAC 三算法。**核心指标 success_at_end**：仅 AWSC 达到 66%（sim=72%，得益于 BC loss），PLD/DSRL 均 ≤6%（sim=86%/60%）。ACP value 目标为 success_once 语义，无法引导保持行为。`acp_step_mean=0` 已确认为日志 bug。入口：`scripts/run_acp_mirror_experiments.sh`。详细报告：`docs/vlaw/acp_mirror_experiments.md`。 | ✅ 完成 |
+| ADR-042 | **AWSC+ACP Sweep v2（数据驱动）**：基于 wandb 分析诊断（`fetch_wandb.py` 拉取 wa52z9ce 训练数据），发现 ACP mirror AWSC 3 个核心问题：(1) online_cum_reward=0.05 vs offline=4.34（87x gap，critic 被 demo 信号主导）；(2) success_once 后期退化 0.82→0.60（BC 锚定不足）；(3) advantage_mean≈0.8 正偏高。扫描 3 轴：A 放大 ACP 信号（scale 500-2000, online_ratio 0.3-0.5），B 防遗忘（bc_weight 4-8），C 缩短信用分配（gamma 0.5-0.7）。15 configs，仅 AWSC（PLD/DSRL 暂停）。入口：`scripts/sweep_acp/sweep.sh`。分析工具：`scripts/sweep_acp/fetch_wandb.py`。 | 🔄 运行中 |
 
-完整决策记录：`.github/knowledge/decisions.md`（40 条 ADR）
+完整决策记录：`.github/knowledge/decisions.md`（42 条 ADR）
 
 ---
 

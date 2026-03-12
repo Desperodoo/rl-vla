@@ -6,9 +6,8 @@
 #   cuda:0 → AWSC RL training + ManiSkill 16 envs
 #   cuda:1 → ACP value model inference
 #
-# Pretrained policy:
-#   runs/fair_comparison/awsc/best_s42__1772570560/checkpoints/best.pt
-#   (~78% success_once, best AWSC seed from fair comparison sweep)
+# Pretrained policy (original IL-trained, same as compare_data_efficiency input):
+#   runs/maniskill_sweep_v3/aw_shortcut_flow/cw0.3_step0.15__1770390417/checkpoints/best_eval_success_once.pt
 #
 # ACP checkpoint (update path after running train_acp_multi.sh):
 #   checkpoints/vlaw/acp/v2_combined/best.safetensors  ← use this after retrain
@@ -36,7 +35,10 @@ if [[ ! -f "$ACP_CKPT" ]]; then
     ACP_CKPT="checkpoints/vlaw/acp/iter1/best.safetensors"
 fi
 
-PRETRAIN_PATH="runs/fair_comparison/awsc/best_s42__1772570560/checkpoints/best.pt"
+# Use the ORIGINAL IL-trained ShortCut Flow policy (same as compare_data_efficiency input).
+# NOT the RLPD-finetuned output (best_s42__1772570560) — that already has high SR
+# and cannot demonstrate improvement from ACP reward.
+PRETRAIN_PATH="runs/maniskill_sweep_v3/aw_shortcut_flow/cw0.3_step0.15__1770390417/checkpoints/best_eval_success_once.pt"
 
 echo "[run_rlpd_awsc_acp] ACP checkpoint : ${ACP_CKPT}"
 echo "[run_rlpd_awsc_acp] Pretrain path  : ${PRETRAIN_PATH}"

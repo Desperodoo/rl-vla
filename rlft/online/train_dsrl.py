@@ -124,6 +124,18 @@ class Args:
     num_qs: int = 10
     use_layer_norm: bool = True
 
+    # ----- ACP reward mode -----
+    acp_reward: bool = False
+    """Replace sim dense reward with ACP TD-shaped reward."""
+    acp_checkpoint: str = "checkpoints/vlaw/acp/v2_combined/best.safetensors"
+    """ACP value model checkpoint (safetensors format)."""
+    acp_reward_scale: float = 100.0
+    """Scale for ACP TD rewards."""
+    acp_device: Optional[str] = None
+    """Device for ACP model. Defaults to cuda:1."""
+    acp_task_instruction: str = "Pick up the peg and lift it upright."
+    """Task instruction for the ACP Gemma encoder."""
+
     # ----- logging / eval / saving -----
     log_freq: int = 100
     eval_freq: int = 10_000
@@ -139,11 +151,8 @@ class Args:
 def _make_train_envs(args: Args):
     """Create GPU-vectorized training environments.
 
-    **Critical**: uses the same FrameStack + ManiSkillVectorEnv wrapping as
-    the eval envs so that obs_history is correctly managed by FrameStack
-    (including proper per-env reset on auto-reset).  Without FrameStack the
-    wrapper's manual obs_history roll contaminates observations across
-    episode boundaries.
+    When ``args.acp_reward`` is True, inserts ``DualCameraRewardWrapper``
+    before ``FlattenRGBDObservationWrapper``.
     """
     from mani_skill.utils.wrappers.flatten import FlattenRGBDObservationWrapper
 
@@ -155,7 +164,21 @@ def _make_train_envs(args: Args):
     if args.max_episode_steps is not None:
         env_kwargs["max_episode_steps"] = args.max_episode_steps
 
-    wrappers = [FlattenRGBDObservationWrapper] if "rgb" in args.obs_mode else []
+    wrappers = []
+
+    if args.acp_reward:
+        env_kwargs["render_mode"] = "rgb_array"
+        from rlft.envs.acp_reward_wrapper import DualCameraRewardWrapper, ACPRewardConfig
+        acp_config = ACPRewardConfig(
+            checkpoint_path=args.acp_checkpoint,
+            task_instruction=args.acp_task_instruction,
+            reward_scale=args.acp_reward_scale,
+            device=args.acp_device or "cuda:1",
+        )
+        wrappers.append(lambda env: DualCameraRewardWrapper(env, acp_config))
+
+    if "rgb" in args.obs_mode:
+        wrappers.append(FlattenRGBDObservationWrapper)
 
     return make_eval_envs(
         env_id=args.env_id,
@@ -430,6 +453,9 @@ def main():
     # =================================================================
     print("[2/5] Creating environments …")
     raw_train_env = _make_train_envs(args)
+    if args.acp_reward:
+        print(f"  ACP reward enabled: {args.acp_checkpoint}")
+        print(f"  ACP device: {args.acp_device or 'cuda:1'}, scale: {args.acp_reward_scale}")
 
     wrapped_train_env = ManiSkillFlowEnvWrapper(
         env=raw_train_env,
