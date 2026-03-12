@@ -2,7 +2,7 @@
 # =============================================================================
 # CARM 环境设置脚本
 # =============================================================================
-# 用法: source scripts/setup_carm_env.sh
+# 用法: source scripts/setup/setup_carm_env.sh
 #
 # 功能:
 #   1. 激活 conda 环境 (carm)
@@ -16,13 +16,13 @@
 # 检测是否通过 source 执行
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     echo "错误: 请使用 source 命令执行此脚本"
-    echo "  source scripts/setup_carm_env.sh"
+    echo "  source scripts/setup/setup_carm_env.sh"
     exit 1
 fi
 
 # 获取项目根目录
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
-export RL_VLA_ROOT="$( cd "$SCRIPT_DIR/.." && pwd )"
+export RL_VLA_ROOT="$( cd "$SCRIPT_DIR/../.." && pwd )"
 
 # -------------------------
 # 1. Conda 环境
@@ -85,7 +85,7 @@ echo "  SDK:    ${arm_control_sdk_DIR:-未加载}"
 if [ -f "$RL_VLA_ROOT/carm_ros_deploy/devel/setup.bash" ]; then
     echo "  Catkin: 已加载"
 else
-    echo "  Catkin: 未编译 (运行 ./scripts/build_catkin.sh)"
+    echo "  Catkin: 未编译 (运行 ./scripts/setup/build_catkin.sh)"
 fi
 echo "═══════════════════════════════════════════"
 echo ""

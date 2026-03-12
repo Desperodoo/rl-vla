@@ -285,7 +285,10 @@ def create_obs_process_fn(env_id: str, output_format: str = "NCHW") -> Callable:
 # =============================================================================
 
 def load_carm_episode(filepath: str) -> Dict[str, np.ndarray]:
-    """Load a single CARM episode from HDF5 file."""
+    """Load a single CARM episode from HDF5 file.
+
+    Supports both v1 (15D action) and v2 (8D action) formats.
+    """
     data = {}
     with File(filepath, 'r') as f:
         obs = f['observations']
@@ -294,12 +297,16 @@ def load_carm_episode(filepath: str) -> Dict[str, np.ndarray]:
         data['qpos_end'] = np.array(obs['qpos_end'])
         data['gripper'] = np.array(obs['gripper'])
         data['timestamps'] = np.array(obs['timestamps'])
-        
+
         if 'action' in f:
             data['action'] = np.array(f['action'])
-        
+
+        if 'teleop_scale' in f:
+            data['teleop_scale'] = np.array(f['teleop_scale'])
+
         data['num_steps'] = f.attrs.get('num_steps', len(data['timestamps']))
-    
+        data['data_version'] = f.attrs.get('data_version', 'v1')
+
     return data
 
 

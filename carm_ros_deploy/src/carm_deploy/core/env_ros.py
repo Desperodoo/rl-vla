@@ -9,7 +9,9 @@ import rospy
 import cv2
 import numpy as np
 import time
+import requests
 from scipy.spatial.transform import Rotation as R
+from typing import Optional
 
 # CARM SDK
 from carm import carm_py
@@ -278,7 +280,34 @@ class RealEnvironment:
             end_cmd = list(end_cmd) + [gripper]
             
             return np.concatenate([joints_cmd, end_cmd], axis=0)
-    
+
+    def get_teleop_action(self, backend_url: str = None) -> Optional[dict]:
+        """从 backend 获取遥操作目标位姿（GAP-1 修复）
+
+        通过 HTTP 请求 backend 的 /api/joystick/teleop_target 接口，
+        获取遥操作者通过 track_pose() 发送给 SDK 的真实目标位姿。
+
+        Args:
+            backend_url: Backend URL, 默认 http://{robot_ip}:1999/api/joystick/teleop_target
+
+        Returns:
+            dict with:
+                'target_pose': [x,y,z,qx,qy,qz,qw] or None
+                'gripper_pose': float or None
+                'scale': float
+                'active': bool (是否在主动控制中)
+            失败时返回 None
+        """
+        url = backend_url or f"http://{self.robot_ip}:1999/api/joystick/teleop_target"
+        try:
+            resp = requests.get(url, timeout=0.05)
+            if resp.status_code == 200:
+                body = resp.json()
+                return body.get('data', {})
+        except requests.RequestException:
+            pass
+        return None
+
     def end_control_nostep(self, action):
         """
         末端空间控制（不阻塞）

@@ -90,8 +90,11 @@ class InferenceNode:
         self.pos_lookahead_duration = config.get('pos_lookahead_duration', 0.015)
         self.check_workspace = True  # 默认开启 workspace 检测
         
-        # Teleop 对齐模式参数 (直接使用 teleop 默认值)
-        self.teleop_scale = config.get('teleop_scale', 0.4)  # 默认 0.4 对齐遥操
+        # Teleop 对齐模式参数
+        # teleop_scale 固定为 1.0: 训练数据的 action 已包含 scale 效果（GAP-2 修复）
+        self.teleop_scale = 1.0
+        # inference_speed_scale: 推理时可选调速（独立于 teleop scale 语义）
+        self.inference_speed_scale = config.get('inference_speed_scale', 1.0)
         self.control_freq = config.get('control_freq', 50)   # 默认 50Hz 对齐遥操
         
         # Action Chunk 执行模式参数
@@ -639,17 +642,17 @@ class InferenceNode:
                     #          3) safety clip (安全层)
                     # ============================================================
                     
-                    # 应用 teleop_scale 缩放 (joystick-style delta scaling)
-                    if self.teleop_scale != 1.0:
-                        # 只对 ee_delta_pose 模式应用 teleop_scale
+                    # 应用 inference_speed_scale 缩放 (推理时可选调速)
+                    if self.inference_speed_scale != 1.0:
+                        # 只对 ee_delta_pose 模式应用 scale
                         is_full_mode = (self._action_dim_full == 15)
                         rel_pose_start = 7 if is_full_mode else 0
                         rel_pose_end = 14 if is_full_mode else 7
-                        
+
                         for i in range(len(all_actions)):
                             # 提取 rel_pose [7]，应用缩放，写回
                             rel_pose = all_actions[i, rel_pose_start:rel_pose_end].copy()
-                            scaled_rel_pose = apply_teleop_scale(rel_pose, self.teleop_scale)
+                            scaled_rel_pose = apply_teleop_scale(rel_pose, self.inference_speed_scale)
                             all_actions[i, rel_pose_start:rel_pose_end] = scaled_rel_pose
                     
                     # 安全检查和裁剪
@@ -1052,9 +1055,11 @@ def parse_args():
     parser.add_argument('--joint_cmd_mode', action='store_true',
                         help='[DEPRECATED] Joint command mode is no longer supported. Will raise error if used.')
     
-    # Teleop 对齐模式参数 (使推理行为更接近手柄遥控，默认使用 teleop 参数)
+    # Teleop 对齐模式参数
     parser.add_argument('--teleop_scale', type=float, default=1.0,
-                        help='Scale factor for delta pose (default: 0.4, aligned with joystick)')
+                        help='[DEPRECATED] Fixed to 1.0. Use --inference_speed_scale for runtime speed control.')
+    parser.add_argument('--inference_speed_scale', type=float, default=1.0,
+                        help='Runtime speed scaling for predicted actions (default: 1.0 = no scaling)')
     parser.add_argument('--control_freq', type=int, default=50,
                         help='Control loop frequency in Hz (default: 50, aligned with joystick)')
     parser.add_argument('--gripper_hysteresis_window', type=int, default=1,
@@ -1123,7 +1128,7 @@ def main():
         'execution_mode', 'max_active_chunks', 'crossfade_steps', 
         'truncate_at_act_horizon', 'act_horizon',
         # Teleop 对齐模式参数
-        'teleop_scale', 'control_freq', 'gripper_hysteresis_window',
+        'teleop_scale', 'inference_speed_scale', 'control_freq', 'gripper_hysteresis_window',
         # 干预和采集参数
         'record_inference', 'intervention', 'intervention_mode',
         'intervention_xyz_scale', 'intervention_gripper_open', 'intervention_gripper_close',
@@ -1194,7 +1199,8 @@ def main():
     rospy.loginfo(f"  act_horizon: {config.get('act_horizon', 'same as pred_horizon')}")
     rospy.loginfo("-" * 60)
     rospy.loginfo("Teleop Alignment Parameters:")
-    rospy.loginfo(f"  teleop_scale: {config.get('teleop_scale', 0.4)} (delta pose scaling)")
+    rospy.loginfo(f"  teleop_scale: 1.0 (fixed, GAP-2 fix)")
+    rospy.loginfo(f"  inference_speed_scale: {config.get('inference_speed_scale', 1.0)} (runtime speed control)")
     rospy.loginfo(f"  control_freq: {config.get('control_freq', 50)}Hz")
     rospy.loginfo(f"  gripper_hysteresis_window: {config.get('gripper_hysteresis_window', 1)}")
     rospy.loginfo("-" * 60)

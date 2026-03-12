@@ -3,14 +3,14 @@
 # CARM catkin 工作空间编译脚本
 # =============================================================================
 # 用法:
-#   ./scripts/build_catkin.sh            # 增量编译
-#   ./scripts/build_catkin.sh --clean    # 清理后重新编译
+#   ./scripts/setup/build_catkin.sh            # 增量编译
+#   ./scripts/setup/build_catkin.sh --clean    # 清理后重新编译
 # =============================================================================
 
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 CATKIN_WS="$PROJECT_ROOT/carm_ros_deploy"
 
 # 颜色定义
@@ -94,5 +94,5 @@ catkin_make -DPYTHON_EXECUTABLE=$(which python) \
 
 echo -e ""
 echo -e "${GREEN}编译完成!${NC}"
-echo -e "加载环境: ${YELLOW}source scripts/setup_carm_env.sh${NC}"
+echo -e "加载环境: ${YELLOW}source scripts/setup/setup_carm_env.sh${NC}"
 echo -e ""

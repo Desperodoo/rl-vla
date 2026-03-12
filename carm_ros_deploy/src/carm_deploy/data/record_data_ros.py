@@ -71,6 +71,7 @@ class DataRecorder:
         self.record_freq = config.get('record_freq', 30)
         self.max_episodes = config.get('max_episodes', 100)
         self.max_steps = config.get('max_steps', 1000)
+        self.backend_url = config.get('backend_url', None)  # None = auto-detect from robot_ip
         
         # 图像参数
         self.image_width = config.get('image_width', 640)
@@ -107,7 +108,8 @@ class DataRecorder:
             'qpos_joint': [],
             'qpos_end': [],
             'qpos': [],           # 兼容旧版格式
-            'action': [],         # 动作命令
+            'action': [],         # 遥操作目标位姿 [target_pose(7), gripper(1)] = 8D
+            'teleop_scale': [],   # 遥操作 scale 值 (0 表示非活跃)
             'gripper': [],
             'timestamps': [],
         }
@@ -237,7 +239,8 @@ class DataRecorder:
             'qpos_joint': [],
             'qpos_end': [],
             'qpos': [],           # 兼容旧版格式
-            'action': [],         # 动作命令
+            'action': [],         # 遥操作目标位姿 [target_pose(7), gripper(1)] = 8D
+            'teleop_scale': [],   # 遥操作 scale 值 (0 表示非活跃)
             'gripper': [],
             'timestamps': [],
         }
@@ -315,11 +318,16 @@ class DataRecorder:
             timestamps = np.array(episode_data['timestamps'])  # [T]
             obs.create_dataset('timestamps', data=timestamps)
             
-            # 保存动作命令 (如果有)
+            # 保存动作命令 (新格式: 8D = target_pose(7) + gripper(1))
             if len(episode_data['action']) > 0:
-                action = np.array(episode_data['action'])  # [T, 15]
+                action = np.array(episode_data['action'])  # [T, 8]
                 f.create_dataset('action', data=action)
-            
+
+            # 保存遥操作 scale
+            if len(episode_data.get('teleop_scale', [])) > 0:
+                teleop_scale = np.array(episode_data['teleop_scale'])  # [T]
+                f.create_dataset('teleop_scale', data=teleop_scale)
+
             # 元数据
             f.attrs['num_steps'] = num_steps
             f.attrs['record_freq'] = self.record_freq
@@ -327,6 +335,7 @@ class DataRecorder:
             f.attrs['image_height'] = self.image_height
             f.attrs['robot_ip'] = self.config.get('robot_ip', '')
             f.attrs['created_at'] = timestamp
+            f.attrs['data_version'] = 'v2'  # 新格式标记
         
         rospy.loginfo(f"Episode saved: {num_steps} steps, {images.nbytes / 1e6:.1f} MB")
     
@@ -353,11 +362,23 @@ class DataRecorder:
         self.episode_data['gripper'].append(obs['gripper'])
         self.episode_data['timestamps'].append(obs['stamp'])
         
-        # 记录动作命令
+        # 记录遥操作目标位姿（GAP-1 修复：直接从 backend 获取 track_pose 目标）
         t_action_query_sys = time.time()
-        action = self.env.get_last_action()
-        if action is not None:
+        teleop_state = self.env.get_teleop_action(backend_url=self.backend_url)
+
+        if teleop_state and teleop_state.get('active') and teleop_state.get('target_pose') is not None:
+            target_pose = teleop_state['target_pose']    # [7] xyz+quat
+            gripper = teleop_state.get('gripper_pose', 0.0) or 0.0
+            teleop_scale = teleop_state.get('scale', 0.0) or 0.0
+
+            action = np.array(target_pose + [gripper], dtype=np.float64)
             self.episode_data['action'].append(action)
+            self.episode_data['teleop_scale'].append(teleop_scale)
+        else:
+            # 遥操作未激活（离合器松开等），使用当前实际状态作为 fallback
+            action = np.array(obs['qpos_end'], dtype=np.float64)  # 8D
+            self.episode_data['action'].append(action)
+            self.episode_data['teleop_scale'].append(0.0)
 
         if self.timeline_logger is not None:
             obs_stamp_ros = obs.get('stamp', None)
@@ -509,6 +530,10 @@ def parse_args():
     # 可视化
     parser.add_argument('--vis', action='store_true',
                         help='Visualize images')
+
+    # Backend URL（遥操作目标位姿获取）
+    parser.add_argument('--backend_url', type=str, default='',
+                        help='Backend API URL (default: http://{robot_ip}:1999/api/joystick/teleop_target)')
 
     # 时间线日志
     parser.add_argument('--timeline_enabled', action='store_true',

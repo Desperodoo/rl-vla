@@ -143,7 +143,7 @@ class CARMDataset(Dataset):
         num_episodes: Optional[int],
         obs_horizon: int,
         pred_horizon: int,
-        action_mode: str = "full",
+        action_mode: str = "ee_only",
         precompute_actions: bool = False,
         action_normalizer: Optional[ActionNormalizer] = None,
         gripper_threshold: float = 0.05,
@@ -155,14 +155,32 @@ class CARMDataset(Dataset):
         self.precompute_actions = precompute_actions
         self.action_normalizer = action_normalizer
         self.gripper_threshold = gripper_threshold
-        
-        # Determine action dimension (continuous only, gripper is discrete)
-        self.action_dim = 13 if action_mode == 'full' else 7
-        
+
+        # Action dimension: always 7D relative end-effector pose (ee_only)
+        # 'full' mode is deprecated with v2 data format
+        self.action_dim = 7
+        if action_mode == 'full':
+            print("WARNING: 'full' action_mode is deprecated with v2 data format. Using 'ee_only'.")
+            self.action_mode = 'ee_only'
+
         # Load dataset
         print(f"Loading CARM dataset from {data_path}...")
         raw_data = load_carm_dataset(data_path, num_episodes=num_episodes)
-        
+
+        # Detect data version from first episode's action shape
+        first_action = raw_data['action'][0] if raw_data['action'] else None
+        if first_action is not None and first_action.shape[-1] == 8:
+            self.data_version = 'v2'
+            # v2: action = [target_pose(7), gripper(1)]
+            self._target_pose_slice = slice(0, 7)
+            self._gripper_idx = 7
+        else:
+            self.data_version = 'v1'
+            # v1: action = [planned_joints(6), gripper(1), FK_end_pose(7), gripper(1)]
+            self._target_pose_slice = slice(7, 14)
+            self._gripper_idx = 14
+        print(f"Detected data version: {self.data_version}")
+
         print("Processing trajectories...")
         
         trajectories = {
@@ -196,16 +214,9 @@ class CARMDataset(Dataset):
             for t in range(0, len(raw_actions) - pred_horizon, pred_horizon):
                 ref_pose = qpos_end[t, :7]
                 for k in range(pred_horizon):
-                    target_pose = raw_actions[t + k, 7:14]
+                    target_pose = raw_actions[t + k, self._target_pose_slice]
                     relative_pose = compute_relative_pose_transform(ref_pose, target_pose)
-                    
-                    if self.action_mode == 'full':
-                        rel_action = np.zeros(self.action_dim, dtype=np.float32)
-                        rel_action[:6] = raw_actions[t + k, :6]
-                        rel_action[6:13] = relative_pose
-                    else:
-                        rel_action = relative_pose.astype(np.float32)
-                    
+                    rel_action = relative_pose.astype(np.float32)
                     all_relative_actions.append(rel_action)
         
         # Compute action normalization stats
@@ -273,16 +284,11 @@ class CARMDataset(Dataset):
             # Compute relative actions and gripper labels
             for k, act_idx in enumerate(act_indices):
                 raw_action = raw_actions[act_idx]
-                target_pose = raw_action[7:14]
+                target_pose = raw_action[self._target_pose_slice]
                 relative_pose = compute_relative_pose_transform(ref_pose, target_pose)
-                gripper_val = raw_action[14]
-                
-                if self.action_mode == 'full':
-                    self.precomputed_actions[idx, k, :6] = torch.from_numpy(raw_action[:6])
-                    self.precomputed_actions[idx, k, 6:13] = torch.from_numpy(relative_pose)
-                else:
-                    self.precomputed_actions[idx, k, :7] = torch.from_numpy(relative_pose)
-                
+                gripper_val = raw_action[self._gripper_idx]
+
+                self.precomputed_actions[idx, k, :7] = torch.from_numpy(relative_pose)
                 self.precomputed_gripper_labels[idx, k] = 1 if gripper_val < self.gripper_threshold else 0
             
             # Apply normalization
@@ -331,17 +337,12 @@ class CARMDataset(Dataset):
             gripper_label_list = []
             for idx in act_indices:
                 raw_action = raw_actions[idx]
-                target_pose = raw_action[7:14]
+                target_pose = raw_action[self._target_pose_slice]
                 relative_pose = compute_relative_pose_transform(ref_pose, target_pose)
-                gripper_val = raw_action[14]
-                
-                if self.action_mode == 'full':
-                    rel_action = np.zeros(self.action_dim, dtype=np.float32)
-                    rel_action[:6] = raw_action[:6]
-                    rel_action[6:13] = relative_pose
-                else:
-                    rel_action = relative_pose.astype(np.float32)
-                
+                gripper_val = raw_action[self._gripper_idx]
+
+                rel_action = relative_pose.astype(np.float32)
+
                 act_seq_list.append(rel_action)
                 gripper_label_list.append(1 if gripper_val < self.gripper_threshold else 0)
             
