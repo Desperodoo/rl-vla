@@ -487,3 +487,19 @@
 - **风险评估**: 全部为 frozen backbone 或 IO 层面优化, zero 精度风险。唯一需要人工确认的是 flash_attn 包在 vlaw_reward env 中是否已安装
 - **验证计划**: ACP bf16 dry-run 20步 对比 fp32 MAE; Imagination steps=15 vs 25 PSNR; Policy bf16 50步 loss 不发散
 - **日期**: 2026-03-08
+### ADR-043: Imagination 推理 Action Conditioning 修复 + WM v5 审查【活跃】
+
+- **背景**: WM v5 训练完成（4000 steps, BUG-A/B/C 全修复），20 checkpoint 并行 imagination eval 全部完成。所有 checkpoint 的 peg 动态评分 1/10（几乎完全静止），与 v4 一致。训练验证样本（GT actions）确认 WM 本身具备动态建模能力。
+- **根因诊断**:
+  1. **BUG-D [CRITICAL]**: `imagination_env.py` 推理时 future 5 帧全部 tile 当前 EE pose（L524-528），等于告诉 WM "臂不动"。训练时 WM 接收每帧不同的真实 EE 位姿
+  2. **BUG-E [HIGH]**: V5 latents 与 V4 几乎相同（corr=0.999999），BUG-C 修复对编码端无实质影响
+  3. **BUG-F [HIGH]**: ManiSkill 数据无 DROID 风格时间跳跃增强（skip=1 vs DROID skip=1-2）
+  4. **BUG-G [HIGH]**: Action Encoder (2.11M) 随机初始化，与 UNet (1524M) 共用 LR=1e-5，无 warmup
+  5. **BUG-H [MEDIUM]**: ee_pose_history 初始化仅 1 条（应为 num_history*4=24）
+- **修复**:
+  - BUG-D: `integrate_delta_to_ee_poses()` 将 policy delta actions 累积积分为绝对 EE pose 序列
+  - BUG-H: ee_pose_history 初始化改为 num_history*4 条
+  - BUG-F/G: 待 BUG-D 修复验证后决定是否需要重训练 WM v6
+- **验证**: 修复后在 step 3400/3800/4000 重跑 imagination eval (各 20 trajs, 10 viz)
+- **v5 视觉审查结论**: 场景重建 7/10, 臂动态 5/10, peg 动态 1/10, 不可用于下游 imagination pipeline
+- **日期**: 2026-03-14

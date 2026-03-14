@@ -62,6 +62,8 @@ from rlft.vlaw.data.collector import extract_agent_state
 # EE pose 提取 (WM action conditioning 对齐 DROID)
 from ctrl_world.dataset.dataset_maniskill import state_to_ee_pose_7d
 
+from scipy.spatial.transform import Rotation as Rot
+
 # 复用 imagination.py 中的数据容器和工具函数
 from rlft.vlaw.utils.imagination import SyntheticTrajectory, _load_initial_frames
 
@@ -99,6 +101,47 @@ def get_history_indices(total_len: int, history_idx: list[int] | None = None) ->
             abs_idx = max(0, total_len + idx)
         indices.append(abs_idx)
     return indices
+
+
+def integrate_delta_to_ee_poses(
+    current_ee: np.ndarray,
+    action_chunk: np.ndarray,
+) -> np.ndarray:
+    """Integrate policy delta actions into absolute EE pose sequence for WM conditioning.
+
+    ManiSkill ``pd_ee_delta_pose`` control mode outputs:
+        action[0:3] = delta position (xyz)
+        action[3:6] = delta orientation (euler xyz)
+        action[6]   = target gripper position
+
+    The WM expects absolute EE poses per frame (matching DROID training convention).
+    The official DROID rollout integrates policy predictions via a dynamics model + FK.
+    Here we approximate by accumulating deltas onto the current EE pose.
+
+    Args:
+        current_ee: (7,) current absolute EE pose [tcp_xyz, euler_xyz, gripper_norm]
+        action_chunk: (T, 7) delta actions from the policy
+
+    Returns:
+        (T, 7) absolute EE poses for each future frame
+    """
+    T = action_chunk.shape[0]
+    future_ee = np.zeros((T, 7), dtype=np.float32)
+    ee = current_ee.copy().astype(np.float64)
+
+    for t in range(T):
+        delta = action_chunk[t].astype(np.float64)
+        # Position: additive
+        ee[:3] = ee[:3] + delta[:3]
+        # Orientation: compose rotations (delta euler applied to current)
+        cur_rot = Rot.from_euler("xyz", ee[3:6])
+        delta_rot = Rot.from_euler("xyz", delta[3:6])
+        ee[3:6] = (delta_rot * cur_rot).as_euler("xyz")
+        # Gripper: use the absolute target from the action
+        ee[6] = np.clip(delta[6], 0.0, 1.0)
+        future_ee[t] = ee.astype(np.float32)
+
+    return future_ee
 
 
 # ---------------------------------------------------------------------------
@@ -422,9 +465,10 @@ class ImaginationEnvEngine:
         # 同时维护 ee_pose_history 用于 WM 输入中的历史 EE 位姿
         # (对齐 DROID: WM conditioning 使用绝对 EE 位姿而非 delta action)
         ee_pose_history: list[np.ndarray] = []
-        # 用初始状态的 EE pose 填充首帧
+        # 用初始状态的 EE pose 填充 (对齐 latent_history: num_history * 4 条)
         initial_ee_pose = state_to_ee_pose_7d(state_t)  # (7,)
-        ee_pose_history.append(initial_ee_pose)
+        for _ in range(num_history * 4):
+            ee_pose_history.append(initial_ee_pose.copy())
 
         # ---- obs 历史 ----
         obs_feat_dim = lat_ch * lat_h * lat_w  # 4608
@@ -521,11 +565,10 @@ class ImaginationEnvEngine:
                     hist_ee_list.append(initial_ee_pose.copy())
             hist_ee = np.stack(hist_ee_list, axis=0)  # (num_history, 7)
 
-            # 未来帧: 使用当前 state_t 的 EE pose 填充
-            # (WM 推理时未来帧的 action conditioning 用当前 EE 位姿,
-            #  因为真实 env.step() 尚未执行, 最佳近似是最新已知位姿)
+            # 未来帧: 将 policy delta actions 积分为绝对 EE pose 序列
+            # (对齐官方 DROID rollout: dynamics_model + FK → state_fk_skip)
             current_ee_pose = state_to_ee_pose_7d(state_t)  # (7,)
-            future_ee = np.tile(current_ee_pose[None, :], (act_steps, 1))  # (act_steps, 7)
+            future_ee = integrate_delta_to_ee_poses(current_ee_pose, action_chunk)
             full_ee_poses = np.concatenate([hist_ee, future_ee], axis=0)
 
             pred_latents = self.wm_adapter.rollout(
@@ -828,10 +871,10 @@ class ImaginationEnvEngine:
                         action_chunk = np.zeros((act_steps, 7), dtype=np.float32)
 
                     # ---- Step 4: 世界模型 ----
-                    # EE pose conditioning: 历史帧用初始 EE pose, 未来帧用当前 EE pose
+                    # EE pose conditioning: history from buffer, future from delta integration
                     current_ee = state_to_ee_pose_7d(per_env_states[ei])  # (7,)
                     hist_ee = np.tile(current_ee[None, :], (num_history, 1))  # (num_history, 7)
-                    future_ee = np.tile(current_ee[None, :], (act_steps, 1))  # (act_steps, 7)
+                    future_ee = integrate_delta_to_ee_poses(current_ee, action_chunk)
                     full_ee_poses = np.concatenate([hist_ee, future_ee], axis=0)
                     pred_latents = self.wm_adapter.rollout(
                         obs_latents=lat_buf.clone(),

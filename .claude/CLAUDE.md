@@ -19,23 +19,33 @@
 **已修复**：
 - **BUG-A (ADR-037, 2026-03-08)**：WM action conditioning 语义错配 — 从 delta pose 改为**绝对 EE 位姿** (对齐 DROID)。stat.json 已重新生成。
 - **BUG-B (ADR-037, 2026-03-08)**：Camera VAE 编码差异 — 从像素空间拼接改为**独立 per-camera VAE 编码后 latent 空间拼接**。
-- **BUG-C (ADR-040, 2026-03-11)**：VAE 编码器不匹配 — `pipeline.py` 误用 `sd-vae-ft-mse` 的 `AutoencoderKL` 编码，而 Ctrl-World 训练/推理使用 SVD 的 `AutoencoderKLTemporalDecoder`。两者权重不同，latent 分布存在偏差。已改为使用 SVD VAE 编码，数据重编码为 train_v5。
-**WM v4 评估结果 (2026-03-11)**：4000 步训练完成，best loss=0.177 (step 3400)。视觉质量尚可但物体动态弱（peg 基本静止），判定为**不可用**。分析发现 BUG-C 是主要根因。
-**当前进度**：v5 数据重编码完成 → WM v5 训练待启动 (`checkpoints/vlaw/world_model/iter1_v5/`)
-**下游阻塞**：Imagination、策略更新、评估、Iter-2 全部暂停，等 WM v5。
+- **BUG-C (ADR-040, 2026-03-11)**：VAE 编码器不匹配 — `pipeline.py` 误用 `sd-vae-ft-mse` 的 `AutoencoderKL` 编码，而 Ctrl-World 训练/推理使用 SVD 的 `AutoencoderKLTemporalDecoder`。两者权重不同，latent 分布存在偏差。已改为使用 SVD VAE 编码，数据重编码为 train_v5。⚠️ 后续发现 BUG-E：编码端两者权重几乎相同（corr=0.999999），实质影响仅在解码端。
+- **BUG-D (ADR-043, 2026-03-14)**：**[CRITICAL] Imagination 推理 future actions 使用 tiled 当前 EE pose** — 推理时 5 个未来帧全部填充相同的当前 EE 位姿（`np.tile`），而训练时 WM 接收每帧不同的真实 EE pose。Fix1 尝试：`integrate_delta_to_ee_poses()` 将 policy delta actions 积分为绝对 EE pose 序列。⚠️ **Fix1 验证失败**：用户肉眼判断效果比 tiled 更差。可能原因：(1) pd_ee_delta_pose 经 PD 控制器转换，raw delta ≠ 实际 EE 位移；(2) 积分 EE pose 超出 WM 训练分布；(3) 旋转合成顺序或 gripper 语义错误。**需要重新分析修复方案**。
+- **BUG-E (ADR-043, 2026-03-14)**：V5 latents 与 V4 几乎相同（corr=0.999999），BUG-C 修复对编码端无实质影响。SVD VAE 时序修改集中在解码器。
+- **BUG-H (ADR-043, 2026-03-14)**：ee_pose_history 初始化仅 1 条，应为 num_history*4=24 条（对齐 latent_history 和官方代码）。已修复。
+**WM v4 评估结果 (2026-03-11)**：4000 步训练完成，best loss=0.177 (step 3400)。视觉质量尚可但物体动态弱（peg 基本静止），判定为**不可用**。分析发现 BUG-C 是主要根因（后修正为 BUG-D 是真正根因）。
+**WM v5 评估结果 (2026-03-14)**：4000 步训练完成，best loss≈0.157 (step ~3900)。20 checkpoint 并行 imagination eval 完成：peg 动态 1/10，与 v4 一致。训练验证样本（GT actions）确认 WM 具备动态建模能力 → **BUG-D 是根因**。
+**BUG-D Fix1 验证 (2026-03-14)**：step 3400/3800/4000 三个 checkpoint 完成 fix1 eval（integrate delta→EE pose）。**❌ 效果更差**，用户肉眼验证不如原始 tiled 方案。Fix1 输出：`data/vlaw/synthetic/v5_fix1_step{3400,3800,4000}/viz/`。原始对照：`data/vlaw/synthetic/v5_eval_step*/viz/`。
+**当前进度**：BUG-D fix1 失败 → 需重新分析 delta action 到 EE pose 的正确积分方式，或转向训练端修复（BUG-F 时间跳跃 + BUG-G Action Encoder LR）
+**下游阻塞**：WM imagination 仍不可用。待定：(1) 修正 fix1 积分逻辑；(2) 若推理端无法解决 → WM v6 训练（BUG-F+G 修复）
 
 **待消融 (Step 2 — 时间跳跃数据增强)**：
 - 官方 DROID 训练使用随机时间跳跃 `skip=randint(1,2)`, `skip_his=skip*4` (15% prob→0)
-- 我们的 ManiSkill dataset 使用严格连续帧 (`skip_step=1`)
+- 我们的 ManiSkill dataset 使用严格连续帧 (`skip_step=1`)（BUG-F）
 - 需修改 `ctrl_world/dataset/dataset_maniskill.py` 的 `__getitem__` 加入 DROID 风格随机 skip
-- 优先级：**v5 训练完成 + 评估后**，若质量仍不足再作为下一轮消融
+- **优先级**：BUG-D 修复后 → 若 peg 动态恢复但不足 → 作为 WM v6 消融项
+
+**待改进 (Step 3 — Action Encoder 训练改进)**：
+- Action Encoder (2.11M) 随机初始化，与 UNet (1524M) 共用 LR=1e-5，无 warmup（BUG-G）
+- 需为 Action Encoder 设置独立高 LR（如 1e-4）+ 500 步 linear warmup
+- **优先级**：BUG-D 修复后 → 若 peg 动态恢复但不足 → 与时间跳跃一起作为 WM v6
 
 **原设备 GPU 分配**：
 
 | GPU | 任务 | 状态 |
 |-----|------|------|
 | 0-1 | LMStudio | 占用 |
-| 2-9 | WM v5 训练 iter1_v5 (8 GPU, DeepSpeed ZeRO-2) | 待启动 |
+| 2-9 | 空闲（fix1 eval 已完成） | — |
 
 ---
 
@@ -355,7 +365,9 @@ logs/vlaw/               ← 子 Agent RESULT_FILE 输出
 | ADR-041 | **ACP Mirror Experiments**：用 ACP reward 替换 sim dense reward 运行 AWSC/PLD-SAC/DSRL-SAC 三算法。**核心指标 success_at_end**：仅 AWSC 达到 66%（sim=72%，得益于 BC loss），PLD/DSRL 均 ≤6%（sim=86%/60%）。ACP value 目标为 success_once 语义，无法引导保持行为。`acp_step_mean=0` 已确认为日志 bug。入口：`scripts/run_acp_mirror_experiments.sh`。详细报告：`docs/vlaw/acp_mirror_experiments.md`。 | ✅ 完成 |
 | ADR-042 | **AWSC+ACP Sweep v2（数据驱动）**：基于 wandb 分析诊断（`fetch_wandb.py` 拉取 wa52z9ce 训练数据），发现 ACP mirror AWSC 3 个核心问题：(1) online_cum_reward=0.05 vs offline=4.34（87x gap，critic 被 demo 信号主导）；(2) success_once 后期退化 0.82→0.60（BC 锚定不足）；(3) advantage_mean≈0.8 正偏高。扫描 3 轴：A 放大 ACP 信号（scale 500-2000, online_ratio 0.3-0.5），B 防遗忘（bc_weight 4-8），C 缩短信用分配（gamma 0.5-0.7）。15 configs，仅 AWSC（PLD/DSRL 暂停）。入口：`scripts/sweep_acp/sweep.sh`。分析工具：`scripts/sweep_acp/fetch_wandb.py`。 | 🔄 运行中 |
 
-完整决策记录：`.github/knowledge/decisions.md`（42 条 ADR）
+| ADR-043 | **WM v5 审查 + Bug 分析 (BUG-D/E/F/G/H)**：20 checkpoint 视觉审查，peg 静止 1/10。BUG-D=tiled future EE pose（fix1 integrate_delta 失败，效果更差）。BUG-E=v5 latent≈v4（编码端无差异）。BUG-F=ManiSkill 无时间跳跃。BUG-G=Action Encoder 训练不足。BUG-H=history init 不足（已修复）。**Fix1 失败后需重新分析路线**：推理端修正 or 训练端 v6。 | ❌ Fix1 失败 |
+
+完整决策记录：`.github/knowledge/decisions.md`（43 条 ADR）
 
 ---
 
@@ -363,8 +375,8 @@ logs/vlaw/               ← 子 Agent RESULT_FILE 输出
 
 | 文件 | 内容 |
 |------|------|
-| `decisions.md` | 34 条 ADR，全部架构决策 |
-| `bugs-and-fixes.md` | 24 个 Bug 记录（BUG-001 ~ BUG-024） |
+| `decisions.md` | 43 条 ADR，全部架构决策 |
+| `bugs-and-fixes.md` | 27 个 Bug 记录（BUG-001 ~ BUG-027） |
 | `interfaces.md` | 模块间接口规范（obs shape、checkpoint key、API 签名） |
 | `env-setup.md` | 三套 conda 环境完整安装步骤 |
 | `maniskill-envs.md` | ManiSkill 任务列表、demo 数据路径、replay 命令 |

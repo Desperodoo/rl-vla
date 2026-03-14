@@ -340,3 +340,37 @@
   2. 采集后必须检查 success_at_end 比率，不应为 100% 或 0%
   3. 注意 ManiSkill3 所有任务都有 success → terminated 行为，成功 episode 时长 << 失败 episode
   4. 小批量 pilot 数据只能验证数据格式/质量，不能代表真实成功率分布
+
+---
+
+## BUG-025: Imagination 推理 future actions 使用 tiled 当前 EE pose (BUG-D)
+
+- **发现**: 2026-03-14 WM v5 imagination eval 全部 20 checkpoint peg 静止
+- **文件**: `rlft/vlaw/world_model/imagination_env.py:524-535`
+- **症状**: imagination 输出中 peg 完全静止，机械臂有运动但物体无动态；但训练验证样本（GT actions）中 WM 能正确预测动态
+- **根因**: 推理时 5 个未来帧全部使用 `np.tile(current_ee_pose, (act_steps, 1))`（相同的当前 EE 位姿），而训练时 WM 接收的是每帧不同的真实 EE 位姿序列。等于告诉模型"臂不动"，导致静态预测
+- **对照**: 官方 DROID rollout (`ctrl_world/scripts/rollout_interact_pi.py:258-290`) 用 dynamics_model + FK 计算实际未来 EE pose 序列
+- **修复**: 将 policy 预测的 delta actions 累积积分为绝对 EE pose 序列 (`integrate_delta_to_ee_poses()`)
+- **预防**: WM 推理时 action conditioning 必须与训练数据格式一致（每帧 varying EE pose）
+
+---
+
+## BUG-026: V5 VAE 重编码无实质效果 (BUG-E)
+
+- **发现**: 2026-03-14 对比 v4/v5 HDF5 训练数据
+- **文件**: 训练数据 `data/vlaw/encoded/train_v4/` vs `train_v5/`
+- **症状**: v5 (SVD VAE 编码) 与 v4 (sd-vae-ft-mse 编码) 的 latent 相关系数 = 0.99999977
+- **根因**: SVD VAE 的时序修改集中在**解码器**，编码器权重与 sd-vae-ft-mse 几乎相同。BUG-C (ADR-040) 在编码端无实质影响
+- **影响**: v5 训练数据与 v4 功能等价，无法从数据改变中获得改善
+- **备注**: BUG-C 修复在**解码端**仍然有意义（inference viz 质量），但不影响 WM 训练信号
+
+---
+
+## BUG-027: EE pose history buffer 初始化不足 (BUG-H)
+
+- **发现**: 2026-03-14 代码审查
+- **文件**: `rlft/vlaw/world_model/imagination_env.py:427`
+- **症状**: `ee_pose_history` 仅填入 1 条初始 EE pose，但稀疏采样 `hist_indices` 期望 buffer 中有 12+ 条目
+- **根因**: `latent_history` 填充了 `num_history * 4 = 24` 条，但 `ee_pose_history` 仅 1 条，造成越界时 fallback 到 `initial_ee_pose.copy()`
+- **修复**: 初始化 `ee_pose_history` 时填充 `num_history * 4` 条（对齐 `latent_history` 和官方代码）
+- **预防**: 所有 history buffer 的初始化长度应保持对齐
