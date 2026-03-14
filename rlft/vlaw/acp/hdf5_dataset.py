@@ -54,6 +54,7 @@ class ACPValueDataset(Dataset):
         """扫描所有 HDF5 文件，建立帧级索引。"""
         global_max_len = 0
         success_key = self.value_target_cfg.success_key if self.value_target_cfg else "env_success"
+        success_mode = self.value_target_cfg.success_mode if self.value_target_cfg else "success_once"
 
         # 第一遍：找全局 max episode length
         traj_meta: list[tuple[int, str, int, bool]] = []  # (path_idx, traj_key, length, success)
@@ -71,7 +72,7 @@ class ACPValueDataset(Dataset):
                         continue
 
                     # 确定轨迹长度和 success 信号
-                    T, success = self._read_traj_meta(grp, success_key)
+                    T, success = self._read_traj_meta(grp, success_key, success_mode)
                     if T is None:
                         continue
 
@@ -109,9 +110,14 @@ class ACPValueDataset(Dataset):
 
     @staticmethod
     def _read_traj_meta(
-        grp: h5py.Group, success_key: str
+        grp: h5py.Group, success_key: str, success_mode: str = "success_once"
     ) -> tuple[int | None, bool]:
         """从 HDF5 group 读取轨迹长度和 success 信号。
+
+        Args:
+            grp: HDF5 trajectory group
+            success_key: success 信号的来源 key
+            success_mode: 'success_once' (np.any) 或 'success_at_end' (最后一帧)
 
         Returns:
             (T, success) — 如果无法确定长度返回 (None, False)
@@ -121,7 +127,11 @@ class ACPValueDataset(Dataset):
             if "env_success" not in grp:
                 return None, False
             T = grp["env_success"].shape[0]
-            success = bool(np.asarray(grp["env_success"]).any())
+            env_success_arr = np.asarray(grp["env_success"])
+            if success_mode == "success_at_end":
+                success = bool(env_success_arr[-1])
+            else:
+                success = bool(env_success_arr.any())
             return T, success
         else:
             # VLM 等外部标签：scalar attribute，需要从其他 dataset 推断长度

@@ -234,6 +234,10 @@ class CollectorConfig:
     min_traj_length: int = 10
     """最小轨迹长度, 短于此的轨迹将被丢弃 (BUG-021 Fix 3)"""
 
+    ignore_terminations: bool = False
+    """True: 忽略 success 导致的 terminated 信号，episode 持续运行到 max_episode_steps。
+    用于 ACP 数据采集：确保成功轨迹不被提前截断，产生"成功后掉落"的多样数据。"""
+
     # GPU
     gpu_id: int = 4
     """使用的 GPU"""
@@ -803,6 +807,12 @@ class VLAWDataCollector:
                 obs, _reward, terminated, truncated, info = env.step(actions)
                 terminated_np = _np(terminated).astype(bool)
                 truncated_np = _np(truncated).astype(bool)
+
+                # ignore_terminations: 忽略 success 导致的 terminated，
+                # episode 持续到 max_episode_steps (truncated)
+                if cfg.ignore_terminations:
+                    terminated_np[:] = False
+
                 done = np.logical_or(terminated_np, truncated_np)
                 global_step += 1
 

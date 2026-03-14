@@ -1,0 +1,57 @@
+{
+  "scan_results": {
+    "A: Demo": {
+      "total": 50,
+      "success_once": 50,
+      "success_at_end": 48,
+      "mismatch": 2
+    },
+    "B: Pretrained": {
+      "total": 400,
+      "success_once": 122,
+      "success_at_end": 122,
+      "mismatch": 0
+    },
+    "C: Teleop": {
+      "total": 400,
+      "success_once": 28,
+      "success_at_end": 28,
+      "mismatch": 0
+    },
+    "D: RL Prior": {
+      "total": 400,
+      "success_once": 14,
+      "success_at_end": 14,
+      "mismatch": 0
+    }
+  },
+  "mismatch_details": [
+    {
+      "label": "A: Demo",
+      "file": "LiftPegUpright-v1_demo_1773061542.h5",
+      "traj": "traj_0010",
+      "length": 10,
+      "success_once": true,
+      "success_at_end": false,
+      "mean_diff": -0.5
+    },
+    {
+      "label": "A: Demo",
+      "file": "LiftPegUpright-v1_demo_1773061565.h5",
+      "traj": "traj_0010",
+      "length": 10,
+      "success_once": true,
+      "success_at_end": false,
+      "mean_diff": -0.5
+    }
+  ],
+  "total_trajs": 1250,
+  "total_mismatch": 2,
+  "mismatch_rate": 0.16,
+  "model_comparison": {
+    "num_trajs": 80,
+    "mean_v2": -0.6718048203798176,
+    "mean_v3": -0.6752927018307008,
+    "mean_diff": -0.00348788145088319
+  }
+}

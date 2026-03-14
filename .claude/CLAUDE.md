@@ -134,11 +134,51 @@ ACP 训练结果（5 版本全部完成，GPU 2-6 并行，`rlft_ms3` env）：
 - **Type D (rl_prior)**：i.i.d. Gaussian（σ=0.25），模拟高熵SAC早期阶段的宽动作分布
 - 实现：`rlft/vlaw/data/noisy_policy.py`（`OUNoisePolicyWrapper` + `GaussianNoisePolicyWrapper`）
 
+**ACP v3 数据采集（ADR-044, 2026-03-14）— ✅ 完成**：
+
+根因分析：ManiSkill 在 success 时立即 early-terminate episode，导致 v2 数据中 success_once ≈ success_at_end（99.84% 一致），ACP 无法学习"保持"语义。
+修复：`ignore_terminations=True` 强制 episode 运行到 max_episode_steps，产生"成功后掉落"轨迹。
+策略：PLD-SAC s42（SO=100%, SAE=86%），比之前 AWSC s42（SO=92%, SAE=72%）更强。
+
+v3 数据采集结果（`ignore_terminations=True` + PLD-SAC s42 策略）：
+
+| Type | 分布 | Trajs | Frames | S_once | S_end | Mismatch |
+|------|------|-------|--------|--------|-------|----------|
+| A-demo | expert demos（原有） | 50 | 510 | 50 (100%) | 48 (96%) | 2 (4%) |
+| B-pld_pretrained | PLD-SAC s42 无噪声 | 400 | 13,488 | 234 (58.5%) | 121 (30.2%) | **113 (28.2%)** |
+| C-pld_teleop | PLD-SAC s42 + OU噪声 | 400 | 13,488 | 58 (14.5%) | 1 (0.2%) | **57 (14.2%)** |
+| D-pld_rl_prior | PLD-SAC s42 + Gaussian噪声 | 400 | 13,488 | 21 (5.2%) | 1 (0.2%) | **20 (5.0%)** |
+| E-pld_random | 纯随机 | 100 | 3,500 | 0 | 0 | 0 |
+| **Total** | — | **1,350** | **44,474** | **363 (26.9%)** | **171 (12.7%)** | **192 (14.2%)** |
+
+数据路径：`data/vlaw/rollouts/v3_pld_{pretrained,teleop,rl_prior,random}/`
+验证脚本：`scripts/validate_v3_data.py`
+v2 对比：mismatch 0.0% → **14.2%**（192 条轨迹有"成功后掉落"信号）
+
+代码修改：
+- `rlft/vlaw/data/collector.py`：新增 `ignore_terminations` 配置
+- `scripts/collect_acp_data.py`：新增 `--ignore_terminations` CLI 参数
+- `rlft/vlaw/acp/config.py`：新增 `success_mode` 配置（`success_once`/`success_at_end`）
+- `rlft/vlaw/acp/value_targets.py`：支持 `success_mode` 分支
+- `rlft/vlaw/acp/hdf5_dataset.py`：支持 `success_mode` 传递
+
+**ACP v3 训练（2026-03-14）— ✅ 完成**：
+
+两版并行训练（GPU 6/7），使用 v3 数据（A+B+C+D combined），对比 success_once vs success_at_end 标签：
+
+| 版本 | success_mode | 数据 | Steps | Checkpoint |
+|------|-------------|------|-------|-----------|
+| v3_so | success_once | v3 combined (1250 traj) | 4000 | `checkpoints/vlaw/acp/v3_so/best.safetensors` ✅ |
+| v3_sae | success_at_end | v3 combined (1250 traj) | 4000 | `checkpoints/vlaw/acp/v3_sae/best.safetensors` ✅ |
+
+待做：RLPD 对比实验（v3_so vs v3_sae + AWSC/PLD/DSRL），验证 success_at_end 标签是否改善 SAE 指标。
+
 **新设备 GPU 分配（当前）**：
 
 | GPU | 任务 | 状态 |
 |-----|------|------|
-| 0-9 | AWSC+ACP Sweep v2（15 configs, 5并行, PID 1550228） | 运行中 |
+| 0-5 | AWSC/PLD/DSRL + ACP v3_at_end 实验（旧数据版本） | 可能已完成，待检查 |
+| 6-9 | 空闲（v3 数据采集+ACP训练已完成） | — |
 
 **AWSC+ACP Sweep v2（2026-03-12）— 运行中**：
 
@@ -321,10 +361,13 @@ logs/vlaw/               ← 子 Agent RESULT_FILE 输出
 | ACP v2_rl_prior | `checkpoints/vlaw/acp/v2_rl_prior/` (✅ 训练完成，**真机RL微调分布**) |
 | ACP v2_combined | `checkpoints/vlaw/acp/v2_combined/` (✅ 训练完成，推荐用于RLPD，A+B+C+D) |
 | ACP exp_aligned | `checkpoints/vlaw/acp/exp_aligned/` (Evo-RL 对齐实验, 训练中) |
+| ACP v3_so | `checkpoints/vlaw/acp/v3_so/` (✅ v3 数据 + success_once 标签, 4000步) |
+| ACP v3_sae | `checkpoints/vlaw/acp/v3_sae/` (✅ v3 数据 + success_at_end 标签, 4000步) |
 | ACP dryrun checkpoint | `checkpoints/vlaw/acp/dryrun/` (20步 dry-run, MAE=0.271) |
 | ACP 训练报告 | `logs/vlaw/acp_report/ACP_Training_Report.md` (8000步, best MAE=0.1675) |
 | ACP 对齐实验 log | `logs/vlaw/acp_exp_aligned.log` |
 | ACP 改进计划 | `.claude/plans/modular-finding-llama.md` |
+| ACP v3 分析报告 | `docs/vlaw/acp_v3_at_end_report.md`（v2 vs v3 对比，5 张图表） |
 | ACP Pipeline 文档 | `docs/vlaw/acp_pipeline.md`（含 v2 五版本训练结果、9 张图表） |
 
 ---
@@ -366,6 +409,7 @@ logs/vlaw/               ← 子 Agent RESULT_FILE 输出
 | ADR-042 | **AWSC+ACP Sweep v2（数据驱动）**：基于 wandb 分析诊断（`fetch_wandb.py` 拉取 wa52z9ce 训练数据），发现 ACP mirror AWSC 3 个核心问题：(1) online_cum_reward=0.05 vs offline=4.34（87x gap，critic 被 demo 信号主导）；(2) success_once 后期退化 0.82→0.60（BC 锚定不足）；(3) advantage_mean≈0.8 正偏高。扫描 3 轴：A 放大 ACP 信号（scale 500-2000, online_ratio 0.3-0.5），B 防遗忘（bc_weight 4-8），C 缩短信用分配（gamma 0.5-0.7）。15 configs，仅 AWSC（PLD/DSRL 暂停）。入口：`scripts/sweep_acp/sweep.sh`。分析工具：`scripts/sweep_acp/fetch_wandb.py`。 | 🔄 运行中 |
 
 | ADR-043 | **WM v5 审查 + Bug 分析 (BUG-D/E/F/G/H)**：20 checkpoint 视觉审查，peg 静止 1/10。BUG-D=tiled future EE pose（fix1 integrate_delta 失败，效果更差）。BUG-E=v5 latent≈v4（编码端无差异）。BUG-F=ManiSkill 无时间跳跃。BUG-G=Action Encoder 训练不足。BUG-H=history init 不足（已修复）。**Fix1 失败后需重新分析路线**：推理端修正 or 训练端 v6。 | ❌ Fix1 失败 |
+| ADR-044 | **ACP v3 数据多样化 + success_at_end 支持**：(1) ManiSkill early-termination 导致 v2 数据 success_once≈success_at_end（0% mismatch），ACP 无法学习"保持"语义。(2) `ignore_terminations=True` 强制 episode 运行到 max_episode_steps。(3) 改用 PLD-SAC s42（SO=100%,SAE=86%）替代 AWSC s42。(4) config 新增 `success_mode` 支持 `success_once`/`success_at_end` 两种标签。v3 数据 mismatch=14.2%（192/1350 条）。v3_so/v3_sae 两版 ACP 训练完成（4000 steps each）。 | ✅ 数据+训练完成 |
 
 完整决策记录：`.github/knowledge/decisions.md`（43 条 ADR）
 

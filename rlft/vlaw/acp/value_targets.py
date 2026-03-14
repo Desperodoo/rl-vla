@@ -39,8 +39,13 @@ def compute_value_targets(
     if max_episode_length <= 0:
         raise ValueError(f"max_episode_length 必须 > 0, got {max_episode_length}")
 
-    # 判断轨迹是否最终成功（任意帧 success=True 即为成功）
-    is_success = bool(np.any(env_success))
+    # 根据 success_mode 决定轨迹成功判定方式
+    if cfg.success_mode == "success_at_end":
+        # 仅看最后一帧是否成功（适用于需要"保持"的任务）
+        is_success = bool(env_success[-1])
+    else:
+        # 任意帧 success=True 即为成功（原始 success_once 行为）
+        is_success = bool(np.any(env_success))
     c_fail = float(max_episode_length) * cfg.c_fail_coef
 
     targets = np.zeros(T, dtype=np.float32)

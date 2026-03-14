@@ -111,6 +111,12 @@ class ValueTargetConfig:
     - 'vlm_success': VLM reward model 标注，per-trajectory scalar attribute（int 0/1）
     读取逻辑自动适配两种格式。"""
 
+    success_mode: str = "success_once"
+    """轨迹成功判定模式：
+    - 'success_once': np.any(env_success) — 任意帧成功即为成功（原始行为）
+    - 'success_at_end': env_success[-1] — 仅看最后一帧是否成功
+    对 LiftPegUpright 等需要"保持"的任务，success_at_end 更准确。"""
+
 
 # ---------------------------------------------------------------------------
 # Advantage 配置

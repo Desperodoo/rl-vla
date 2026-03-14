@@ -97,6 +97,10 @@ class DataCollectionArgs:
     frame_skip: int = 3
     min_traj_length: int = 10
 
+    ignore_terminations: bool = False
+    """True: 忽略 success 导致的 terminated，episode 持续到 max_episode_steps。
+    用于 ACP v3 数据采集：产生"成功后掉落"轨迹，使 success_once ≠ success_at_end。"""
+
     # ── Checkpoint ──────────────────────────────────────────────────────────
     checkpoint_path: str = (
         "runs/fair_comparison/awsc/best_s42__1772570560/checkpoints/best.pt"
@@ -221,6 +225,7 @@ def main(args: DataCollectionArgs) -> None:
         control_mode=args.control_mode,
         frame_skip=args.frame_skip,
         min_traj_length=args.min_traj_length,
+        ignore_terminations=args.ignore_terminations,
         checkpoint_path="" if args.noise_mode == "random" else args.checkpoint_path,
         use_random_policy=(args.noise_mode == "random"),
         gpu_id=args.gpu_id,
