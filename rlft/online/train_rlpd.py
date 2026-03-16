@@ -223,6 +223,10 @@ class Args:
     acp_reward_scale: float = 100.0
     """Scale factor for ACP TD rewards. V values are in [-1,0], diffs are O(0.01),
     so scale ~100 brings rewards to O(1.0) comparable to sim dense reward."""
+    acp_reward_shaping: str = "td"
+    """ACP reward shaping: 'td' = V(s')-V(s), 'potential' = V(s')."""
+    acp_reward_clip: float = 0.0
+    """Clip ACP reward to [-clip, +clip]. 0 = no clipping."""
     acp_blend_weight: float = 0.5
     """Weight for ACP reward in blend mode: total = w*r_acp + (1-w)*r_sim"""
     acp_device: Optional[str] = None
@@ -410,6 +414,8 @@ def make_train_envs(args):
             checkpoint_path=args.acp_checkpoint,
             task_instruction=args.acp_task_instruction,
             reward_scale=args.acp_reward_scale,
+            reward_shaping=args.acp_reward_shaping,
+            reward_clip=args.acp_reward_clip,
             device=args.acp_device or "cuda:1",
             warmup_steps=args.acp_warmup_steps,
         )

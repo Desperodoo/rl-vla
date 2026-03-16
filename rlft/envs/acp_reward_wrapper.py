@@ -12,7 +12,7 @@ Wrapper ordering: raw_env -> DualCameraRewardWrapper -> FlattenRGBDObservationWr
 
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 import gymnasium as gym
 import numpy as np
@@ -129,8 +129,17 @@ class ACPRewardConfig:
     """Task instruction text for the ACP Gemma encoder."""
 
     reward_scale: float = 100.0
-    """Multiplier for ACP TD rewards. V values are in [-1, 0], per-step diffs
+    """Multiplier for ACP rewards. V values are in [-1, 0], per-step diffs
     are O(0.005-0.05), so scale ~100 brings them to O(0.5-5.0) range."""
+
+    reward_shaping: Literal["td", "potential"] = "td"
+    """Reward shaping mode:
+    - 'td': r = (V(s') - V(s)) * scale  (difference-based, zero at steady state)
+    - 'potential': r = V(s') * scale  (absolute value, continuous signal at success)
+    """
+
+    reward_clip: float = 0.0
+    """Clip ACP reward to [-clip, +clip]. 0 = no clipping."""
 
     use_sim_reward_bonus: bool = False
     """When True, blend sim reward with ACP reward."""
@@ -233,7 +242,10 @@ class ACPRewardComputer:
     def compute_reward(
         self, rgb_base: np.ndarray, rgb_render: np.ndarray
     ) -> np.ndarray:
-        """Compute ACP TD reward: r = (V(s') - V(s)) * reward_scale.
+        """Compute ACP reward based on configured shaping mode.
+
+        TD mode:        r = (V(s') - V(s)) * reward_scale
+        Potential mode: r = V(s') * reward_scale
 
         On first call (prev_values is None), returns zeros and primes the cache.
         For envs that were reset (prev_values is NaN), returns 0 and re-primes.
@@ -248,21 +260,39 @@ class ACPRewardComputer:
         N = rgb_base.shape[0]
         current_values = self._predict_values(rgb_base, rgb_render)
 
-        if self._prev_values is None:
-            # First call: prime cache, return zeros
+        if self.config.reward_shaping == "potential":
+            # Potential-based: r = V(s') * scale
+            # V(s') ∈ [-1, 0], so reward ∈ [-scale, 0]
+            reward = current_values * self.config.reward_scale
+
+            # First call or reset envs: return zeros and prime cache
+            if self._prev_values is None:
+                self._prev_values = current_values.copy()
+                return np.zeros(N, dtype=np.float32)
+
+            # Zero out reward for envs that were reset
+            nan_mask = np.isnan(self._prev_values)
+            if nan_mask.any():
+                reward[nan_mask] = 0.0
+
             self._prev_values = current_values.copy()
-            return np.zeros(N, dtype=np.float32)
+        else:
+            # TD-shaped: r = (V(s') - V(s)) * scale
+            if self._prev_values is None:
+                self._prev_values = current_values.copy()
+                return np.zeros(N, dtype=np.float32)
 
-        # Compute TD reward
-        reward = (current_values - self._prev_values) * self.config.reward_scale
+            reward = (current_values - self._prev_values) * self.config.reward_scale
 
-        # Zero out reward for envs that were reset (prev_values is NaN)
-        nan_mask = np.isnan(self._prev_values)
-        if nan_mask.any():
-            reward[nan_mask] = 0.0
+            nan_mask = np.isnan(self._prev_values)
+            if nan_mask.any():
+                reward[nan_mask] = 0.0
 
-        # Update cache
-        self._prev_values = current_values.copy()
+            self._prev_values = current_values.copy()
+
+        # Apply reward clipping if configured
+        if self.config.reward_clip > 0:
+            reward = np.clip(reward, -self.config.reward_clip, self.config.reward_clip)
 
         return reward
 

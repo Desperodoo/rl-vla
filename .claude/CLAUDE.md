@@ -277,41 +277,71 @@ WandB runs: AWSC+so=7weycepc, AWSC+sae=d6wfjs2f, PLD+so=ynp44qlz, PLD+sae=4hjfih
 
 Early stopping 参数（AWSC 专用）：`--early_stop --early_stop_patience 5 --early_stop_so_threshold 0.8 --early_stop_min_steps 100000`
 
-**ACP v4 RLPD 实验（2026-03-16）— 🔄 运行中**：
+**ACP v4 RLPD 实验（2026-03-16）— ✅ 全部完成**：
 
 基于 v3 内科诊断处方，4 组精调实验。入口：`scripts/run_acp_v4_experiments.sh`。WandB project: `rlpd-acp-v4`。
 
-| 实验 | GPU | 核心变更 | 状态 | Log |
-|------|-----|---------|------|-----|
-| AWSC + bc=4 + scale=500 | 0+1 | bc_weight 2→4, scale 100→500, early_stop | 🔄 运行中 (PID=3272815) | `logs/vlaw/acp_v4_awsc_bc4_s42.log` |
-| AWSC + bc=8 + scale=500 | 2+3 | bc_weight 2→8, scale 100→500, early_stop | 🔄 运行中 (PID=3272816) | `logs/vlaw/acp_v4_awsc_bc8_s42.log` |
-| PLD + gamma=0.7 + scale=500 | 4+5 | **gamma 0.99→0.7**, scale 100→500 | 🔄 运行中 (PID=3308470) | `logs/vlaw/acp_v4_pld_gamma07_s42.log` |
-| DSRL + gamma=0.7 + scale=500 | 6+7 | **gamma 0.95→0.7**, scale 100→500 | 🔄 运行中 (PID=3308471) | `logs/vlaw/acp_v4_dsrl_gamma07_s42.log` |
+| 实验 | Best SO | Best SAE | Q_mean | critic_loss | 结论 |
+|------|---------|----------|--------|-------------|------|
+| AWSC + bc=4 + scale=500 | 88% | **66%** | 3.87 | 4.02 | ✅ Critic 稳定 |
+| AWSC + bc=8 + scale=500 | 88% | 64% | 3.90 | 4.33 | ✅ bc=4 略优 |
+| PLD + gamma=0.7 + scale=500 | 84% | 2% | 15.89 | 799.6 | ❌ Critic 未收敛 |
+| DSRL + gamma=0.7 + scale=500 | 90% | 6% | 28.99 | 1904.5 | ❌ Critic 未收敛 |
 
-处方变更对比：
-- AWSC: scale 100→500（+5x），bc_weight 2→4/8（+2x/4x），新增 early stopping，仅用 v3_so
-- PLD: **gamma 0.99→0.7**（修复 Q-value 暴涨，v3 Q_range=114-140），scale 100→500
-- DSRL: **gamma 0.95→0.7**（修复 Q-value 暴涨，v3 Q_range=76-86），scale 100→500
+**v4 失败根因（二次分析）**：v4 的 gamma↓(0.7) + scale↑(500) **自相矛盾**：降低 gamma 旨在压缩 Q-value，但 scale 5× 放大抵消了这一效果；同时 PLD/DSRL 完全缺失 Q-target clipping（AWSC 默认 clip=100）。正确做法是：降低 gamma + 保持 scale=100 + 添加 Q-target clipping + reward clipping。
 
-v3 PLD/DSRL 失败根因澄清：
-- 诊断报告误标为 "sim reward drowning" → 实际确认 `DualCameraRewardWrapper` **完全替换**了 sim reward
-- **真正根因**：gamma 过高导致 Q-value 暴涨（PLD=114-140, DSRL=76-86 vs AWSC=3.9），critic 不稳定
-- v4 修复：降低 gamma 到 0.7，压缩 Q-value scale，稳定 critic 训练
+v4 结果对比报告：`docs/vlaw/acp_v4_rlpd_report.md`（图文并茂，6 张图表）
 
-**下一步方向（优先级排序）**：
-- **P0 — 监控 v4 实验（4 组）**：AWSC 关注 early stop 触发 + SAE 突破；PLD/DSRL 关注 Q-value 是否稳定 + SAE 改善
-- **P1 — 分析 AWSC Sweep v2 结果**：`/training-internals rlpd-acp-v4` 到位后与 sweep 结果交叉验证
-- **P2 — 探索其他 reward 设计**：直接 value 作 reward、ACP-guided demo selection
+**ACP v5 Sweep（2026-03-16）— 🔄 Wave 1 运行中**：
+
+基于 v4 二次分析，15 组实验（5 AWSC + 5 PLD + 5 DSRL）。入口：`scripts/run_acp_v5_sweep.sh`。WandB project: `rlpd-acp-v5`。
+
+核心创新：
+1. **Q-target clipping**（PLD/DSRL 新增 clip=20，对齐 AWSC 保护机制）
+2. **Potential reward** `r = V(s') * scale`（解决"保持"状态信号为零问题）
+3. **Reward clipping** `|r| ≤ 5`（防止异常 TD reward 破坏 critic）
+4. **scale 保持 100 不变**（不与 gamma 修复交叉干扰）
+5. **v3_sae checkpoint** 对比 v3_so
+
+| # | 实验名 | 算法 | shaping | gamma | q_clip | r_clip | ckpt | 状态 |
+|---|--------|------|---------|-------|--------|--------|------|------|
+| 1 | awsc_v_reward | AWSC | potential | 0.9 | — | — | v3_so | ⏳ Wave 3 |
+| 2 | awsc_v_reward_sae | AWSC | potential | 0.9 | — | — | v3_sae | ⏳ Wave 3 |
+| 3 | awsc_td_sae | AWSC | td | 0.9 | — | — | v3_sae | ⏳ Wave 3 |
+| 4 | awsc_td_clip | AWSC | td | 0.9 | — | 5 | v3_so | ⏳ Wave 3 |
+| 5 | awsc_v4_repro | AWSC | td | 0.9 | — | — | v3_so | ⏳ Wave 3 |
+| 6 | pld_stable_g05 | PLD | td | 0.5 | 20 | 5 | v3_so | 🔄 运行中 |
+| 7 | pld_stable_g03 | PLD | td | 0.3 | 20 | 5 | v3_so | 🔄 运行中 |
+| 8 | pld_v_reward_g05 | PLD | potential | 0.5 | 20 | — | v3_so | 🔄 运行中 |
+| 9 | pld_v_reward_sae | PLD | potential | 0.5 | 20 | — | v3_sae | 🔄 运行中 |
+| 10 | pld_baseline_g07 | PLD | td | 0.7 | 20 | — | v3_so | 🔄 运行中 |
+| 11 | dsrl_stable_g05 | DSRL | td | 0.5 | 20 | 5 | v3_so | ⏳ Wave 2 |
+| 12 | dsrl_stable_g03 | DSRL | td | 0.3 | 20 | 5 | v3_so | ⏳ Wave 2 |
+| 13 | dsrl_v_reward_g05 | DSRL | potential | 0.5 | 20 | — | v3_so | ⏳ Wave 2 |
+| 14 | dsrl_v_reward_sae | DSRL | potential | 0.5 | 20 | — | v3_sae | ⏳ Wave 2 |
+| 15 | dsrl_baseline_g07 | DSRL | td | 0.7 | 20 | — | v3_so | ⏳ Wave 2 |
+
+PIDs（Wave 1）：4013427/4013428/4013429/4013430/4013431
+Logs: `logs/vlaw/acp_v5_pld_*.log`
+Monitor: `bash scripts/run_acp_v5_sweep.sh --status`
+
+**代码修改（v5 新增）**：
+- `rlft/envs/acp_reward_wrapper.py`：新增 `reward_shaping` (td/potential) + `reward_clip` 字段
+- `rlft/algorithms/online_rl/pld_sac.py`：新增 `q_target_clip` 参数（init + compute_critic_loss）
+- `rlft/algorithms/online_rl/dsrl_sac.py`：同上
+- `rlft/online/train_pld.py`：移除 blend 代码，新增 `acp_reward_shaping`/`acp_reward_clip`/`q_target_clip`
+- `rlft/online/train_dsrl.py`：同上
+- `rlft/online/train_rlpd.py`：新增 `acp_reward_shaping`/`acp_reward_clip`
 
 **新设备 GPU 分配（当前）**：
 
 | GPU | 任务 | 状态 |
 |-----|------|------|
-| 0+1 | AWSC v4 + bc=4 + scale=500 (500K max) | 🔄 运行中 |
-| 2+3 | AWSC v4 + bc=8 + scale=500 (500K max) | 🔄 运行中 |
-| 4+5 | PLD v4 + gamma=0.7 + scale=500 (71K) | 🔄 运行中 |
-| 6+7 | DSRL v4 + gamma=0.7 + scale=500 (71K) | 🔄 运行中 |
-| 8-9 | 空闲 | — |
+| 0+1 | PLD v5 #6: td+gamma=0.5+q_clip=20+r_clip=5 (71K) | 🔄 运行中 |
+| 2+3 | PLD v5 #7: td+gamma=0.3+q_clip=20+r_clip=5 (71K) | 🔄 运行中 |
+| 4+5 | PLD v5 #8: potential+gamma=0.5+q_clip=20 (71K) | 🔄 运行中 |
+| 6+7 | PLD v5 #9: potential+gamma=0.5+q_clip=20+v3_sae (71K) | 🔄 运行中 |
+| 8+9 | PLD v5 #10: td+gamma=0.7+q_clip=20 (71K) | 🔄 运行中 |
 
 **AWSC+ACP Sweep v2（2026-03-12）— 运行中**：
 
@@ -554,9 +584,10 @@ logs/vlaw/               ← 子 Agent RESULT_FILE 输出
 | ADR-043 | **WM v5 诊断 + Bug 分析 (BUG-D/E/F/G/H)**：7 组受控消融实验精确定位根因。BUG-D=**唯一显著根因**（-4.5~-8.5 dB），其余因素（AR误差/steps/history采样/history噪声）均<1 dB。Fix1 (integrate_delta) ❌ 失败。Alpha sweep 证实 α=1.0 (GT) 最优。D_MC 实验证实 AR 误差累积在 30 帧内不是问题。报告：`results/vlaw/wm_diagnostic/DIAGNOSTIC_REPORT.md`、`BUG_D_EXPLAINED.md`。诊断脚本：`scripts/vlaw/diagnostic/wm_diagnostic_battery.py`。 | ✅ 诊断完成，Fix1 ❌ |
 | ADR-045 | **BUG-D Fix2：pd_ee_pose 迁移（消除 WM-Policy 动作空间鸿沟）— ❌ 方案失败**：根本原因：pd_ee_pose PD 控制器不会在 1 步内到达目标（stiffness=1000, 1cm 需 ~5 步收敛），从 delta_pose 轨迹 env_states 提取 `action[t]=EE(state[t+1])` 的转换方式产生持续滞后；demo replay 0/20 成功。euler_rx 2π 偏移进一步恶化（控制器收到 3.15 但实际需 -3.13）。ManiSkill 官方也声明不支持 env_states + 控制模式转换。两轮 IL 训练均 0% 成功。Imagination loop 代码修改（`ee_pose_base_to_world`）逻辑正确但被阻塞。需要新方案：方向 A（pd_joint_delta_pos → pd_ee_pose 两步转换）/ 方向 B（motion planner 直接生成）/ 方向 C（1-step sim-in-loop）/ 方向 D（delta→ee MLP）。 | ❌ 方案失败，需重新设计 |
 | ADR-044 | **ACP v3 数据多样化 + success_at_end 支持**：(1) ManiSkill early-termination 导致 v2 数据 success_once≈success_at_end（0% mismatch），ACP 无法学习"保持"语义。(2) `ignore_terminations=True` 强制 episode 运行到 max_episode_steps。(3) 改用 PLD-SAC s42（SO=100%,SAE=86%）替代 AWSC s42。(4) config 新增 `success_mode` 支持 `success_once`/`success_at_end` 两种标签。v3 数据 mismatch=14.2%（192/1350 条）。v3_so/v3_sae 两版 ACP 训练完成（4000 steps each）。 | ✅ 数据+训练完成 |
-| ADR-046 | **ACP v4 Pipeline 修复 + 通用诊断工具**：基于 v3 内科诊断报告处方。(1) `train_rlpd.py` 新增 early stopping（AWSC 专用）+ SAE-aware `best_sae.pt`；(2) `train_pld.py`/`train_dsrl.py` 新增 SAE checkpoint；(3) `scripts/analyze_training_internals.py` — 通用五维诊断脚本（替代 hardcoded `analyze_rlpd_internals.py`）；(4) `/training-internals` skill 替代旧 `/rlpd-diagnosis`；(5) `scripts/run_acp_v4_experiments.sh` — 4 组实验：AWSC(bc=4/8,scale=500,early_stop) + PLD(gamma=0.7,scale=500) + DSRL(gamma=0.7,scale=500)；(6) v3 PLD/DSRL 失败根因澄清：非 sim reward 泄漏，而是 gamma 过高致 Q-value 暴涨。v4 实验已于 2026-03-16 启动。 | 🔄 v4 实验运行中 |
+| ADR-046 | **ACP v4 Pipeline 修复 + 通用诊断工具**：基于 v3 内科诊断报告处方。(1) `train_rlpd.py` 新增 early stopping（AWSC 专用）+ SAE-aware `best_sae.pt`；(2) `train_pld.py`/`train_dsrl.py` 新增 SAE checkpoint；(3) `scripts/analyze_training_internals.py` — 通用五维诊断脚本；(4) `/training-internals` skill；(5) `scripts/run_acp_v4_experiments.sh` — 4 组实验。v4 结果：AWSC 稳定（critic_loss=4.0, Q_mean=3.9）但 PLD/DSRL critic 仍爆炸（critic_loss=800/1904）。根因：gamma↓+scale↑ 自相矛盾 + 缺 Q-target clipping。 | ✅ 完成，结果→ADR-047 |
+| ADR-047 | **ACP v5 Sweep：Critic 稳定化 + Potential Reward**（2026-03-16）：基于 v4 二次分析设计 15 组 sweep（5 AWSC + 5 PLD + 5 DSRL）。核心修复：(1) PLD/DSRL 新增 `q_target_clip=20`（对齐 AWSC clip=100）；(2) `reward_shaping=potential`: `r=V(s')*scale`（解决"保持"状态信号缺失）；(3) `reward_clip=5`（限幅异常 TD）；(4) scale 保持 100（不再与 gamma 修复冲突）；(5) v3_sae checkpoint 测试。代码新增：`acp_reward_wrapper.py` reward_shaping/reward_clip，`pld_sac.py`/`dsrl_sac.py` q_target_clip，三个训练脚本同步支持。Wave 1（PLD #6-10）已于 2026-03-16 启动。 | 🔄 Wave 1 运行中 |
 
-完整决策记录：`.github/knowledge/decisions.md`（43 条 ADR）
+完整决策记录：`.github/knowledge/decisions.md`（45 条 ADR）
 
 ---
 

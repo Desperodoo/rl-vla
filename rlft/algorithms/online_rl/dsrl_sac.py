@@ -262,6 +262,7 @@ class DSRLSACAgent(nn.Module):
         target_entropy: float = -3.5,
         log_std_init: float = -5.0,
         use_layer_norm: bool = False,
+        q_target_clip: float = 0.0,
         device: str = "cuda",
     ):
         super().__init__()
@@ -275,6 +276,7 @@ class DSRLSACAgent(nn.Module):
         self.noise_dim = act_steps * action_dim
         self.gamma = gamma
         self.tau = tau
+        self.q_target_clip = q_target_clip
         self.target_entropy = target_entropy
         self.device = device
 
@@ -341,6 +343,8 @@ class DSRLSACAgent(nn.Module):
             target_q = self.critic_target.get_min_q(next_noise, next_obs)
             target_q = target_q - self.alpha.detach() * next_log_prob.unsqueeze(-1)
             td_target = rewards + (1 - dones) * self.gamma * target_q
+            if self.q_target_clip > 0:
+                td_target = torch.clamp(td_target, -self.q_target_clip, self.q_target_clip)
 
         q_all = self.critic(noise, obs)  # (num_qs, B, 1)
         critic_loss = sum(F.mse_loss(q, td_target) for q in q_all)
