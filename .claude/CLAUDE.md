@@ -200,21 +200,54 @@ v2 对比：mismatch 0.0% → **14.2%**（192 条轨迹有"成功后掉落"信�
 
 **ACP v3 训练（2026-03-14）— ✅ 完成**：
 
-两版并行训练（GPU 6/7），使用 v3 数据（A+B+C+D combined），对比 success_once vs success_at_end 标签：
+两版并行训练（GPU 6/7），使用 v3 数据（A+B+C+D combined, 1250 traj, 40974 帧），对比 success_once vs success_at_end 标签：
 
-| 版本 | success_mode | 数据 | Steps | Checkpoint |
-|------|-------------|------|-------|-----------|
-| v3_so | success_once | v3 combined (1250 traj) | 4000 | `checkpoints/vlaw/acp/v3_so/best.safetensors` ✅ |
-| v3_sae | success_at_end | v3 combined (1250 traj) | 4000 | `checkpoints/vlaw/acp/v3_sae/best.safetensors` ✅ |
+| 版本 | success_mode | Steps | bs | Best MAE | Inference MAE | Pearson r | Checkpoint |
+|------|-------------|-------|-----|----------|--------------|-----------|-----------|
+| v3_so | success_once | 12,000 | 128 | 0.0724 | 0.0714 | 0.8851 | `checkpoints/vlaw/acp/v3_so/best.safetensors` ✅ |
+| v3_sae | success_at_end | 12,000 | 128 | **0.0463** | **0.0452** | **0.9219** | `checkpoints/vlaw/acp/v3_sae/best.safetensors` ✅ |
 
-待做：RLPD 对比实验（v3_so vs v3_sae + AWSC/PLD/DSRL），验证 success_at_end 标签是否改善 SAE 指标。
+v3_sae MAE 优 36%，Pearson r 优 4.2%。success_at_end 标签与视觉终态一致，更容易学习。
+详细对比报告：`docs/vlaw/acp_v3_so_vs_sae_report.md`
+
+**ACP v3 RLPD 实验（2026-03-16）— ✅ 5/6 完成，1 运行中**：
+
+3 算法 × 2 ACP 版本 = 6 组在线 RLPD 实验。入口：`scripts/run_acp_v3_experiments.sh`。WandB project: `rlpd-acp-v3`。
+
+| 实验 | GPU | Steps | Best SO | Best SAE | Final SO | Final SAE | 状态 |
+|------|-----|-------|---------|----------|----------|-----------|------|
+| AWSC + v3_so | 0+1 | 500K | 90% | **68%** | 42% | 40% | ✅ 完成 |
+| AWSC + v3_sae | 2+3 | 500K | **92%** | 66% | 52% | 50% | ✅ 完成 |
+| PLD + v3_so | 4+5 | 71K | 80% | 8% | 70% | 0% | ✅ 完成 |
+| PLD + v3_sae | 6+7 | 71K | 50% | 16% | 2% | 0% | ✅ 完成（❌ 灾难性崩溃） |
+| DSRL + v3_so | 8+9 | 71K | **94%** | 6% | 76% | 4% | ✅ 完成 |
+| DSRL + v3_sae | 4+5 | 71K | — | — | — | — | 🔄 运行中 |
+
+WandB runs: AWSC+so=7weycepc, AWSC+sae=d6wfjs2f, PLD+so=ynp44qlz, PLD+sae=4hjfih2f, DSRL+so=m4wgw4ku, DSRL+sae=1blrmq2r
+
+**核心发现**：
+- **v3_sae 未表现出预期优势**：尽管模型质量优 36%，RLPD 效果与 v3_so 基本相同（AWSC SAE: 66% vs 68%）
+- **v3 对比 v2 无显著改善**：AWSC SAE 68% vs v2 66%，仅 +2%（统计波动范围内）
+- **PLD + v3_sae 灾难性崩溃**：SO 从 82% 降至 2%，无 BC 锚定下 v3_sae reward 信号毁灭性
+- **DSRL + v3_so 最高 SO=94%**：DSRL 保守正则化有效，但 SAE 仍 ≤6%
+- **根因**：success_at_end 信号在 TD reward 框架中被稀释（仅影响 15.4% mismatch 数据 → TD差异 → critic估计衰减 → 策略梯度微乎其微）
+- 详细报告：`docs/vlaw/acp_v3_rlpd_report.md`
+- 分析脚本：`scripts/analyze_acp_v3_rlpd_results.py`
+
+**下一步方向（优先级排序）**：
+- **P0 — 防止 SO 退化**：增大 BC weight（2→4-8），early stopping（~100-200K），SAE-aware checkpoint 选择
+- **P1 — 放大 ACP reward 信号**：scale 100→500-2000，online_ratio 0.15→0.3-0.5（AWSC Sweep v2 已启动）
+- **P2 — 放弃 PLD/DSRL + ACP 路线**：连续失败（v2 和 v3 均 SAE≤16%），集中资源在 AWSC+ACP
+- **P3 — 探索其他 reward 设计**：直接 value 作 reward、ACP-guided demo selection
 
 **新设备 GPU 分配（当前）**：
 
 | GPU | 任务 | 状态 |
 |-----|------|------|
-| 0-5 | AWSC/PLD/DSRL + ACP v3_at_end 实验（旧数据版本） | 可能已完成，待检查 |
-| 6-9 | 空闲（v3 数据采集+ACP训练已完成） | — |
+| 0+1 | AWSC+v3_so (500K) | ✅ 完成 |
+| 2+3 | AWSC+v3_sae (500K) | ✅ 完成 |
+| 4+5 | DSRL+v3_sae (71K, Wave 2) | 🔄 运行中 |
+| 6-9 | 空闲 | — |
 
 **AWSC+ACP Sweep v2（2026-03-12）— 运行中**：
 

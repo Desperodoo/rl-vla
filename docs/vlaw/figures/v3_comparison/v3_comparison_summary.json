@@ -1,0 +1,81 @@
+{
+  "scan_results": {
+    "A: Demo": {
+      "total": 50,
+      "success_once": 50,
+      "success_at_end": 48,
+      "mismatch": 2
+    },
+    "B: PLD-Pretrained": {
+      "total": 400,
+      "success_once": 234,
+      "success_at_end": 121,
+      "mismatch": 113
+    },
+    "C: PLD-Teleop": {
+      "total": 400,
+      "success_once": 58,
+      "success_at_end": 1,
+      "mismatch": 57
+    },
+    "D: PLD-RL Prior": {
+      "total": 400,
+      "success_once": 21,
+      "success_at_end": 1,
+      "mismatch": 20
+    }
+  },
+  "total_trajs": 1250,
+  "total_mismatch": 192,
+  "mismatch_rate": 15.36,
+  "training": {
+    "v3_so": {
+      "best_mae": 0.0724,
+      "final_val_mae": 0.0725,
+      "steps": 12000,
+      "batch_size": 128
+    },
+    "v3_sae": {
+      "best_mae": 0.0463,
+      "final_val_mae": 0.0466,
+      "steps": 12000,
+      "batch_size": 128
+    }
+  },
+  "inference": {
+    "v3_so": {
+      "num_frames": 40974,
+      "num_trajs": 1250,
+      "mae": 0.07139966636896133,
+      "rmse": 0.12308934330940247,
+      "pearson_r": 0.8851439731176464,
+      "positive_ratio": 0.29999511885585983,
+      "advantage_mean": 0.0013038442702963948,
+      "advantage_std": 0.0978584736585617,
+      "weight_mean": 0.45379638671875,
+      "weight_max": 1.0,
+      "target_mean": -0.5955961346626282,
+      "pred_mean": -0.5979819893836975
+    },
+    "v3_sae": {
+      "num_frames": 40974,
+      "num_trajs": 1250,
+      "mae": 0.045160457491874695,
+      "rmse": 0.08334475755691528,
+      "pearson_r": 0.921896334613206,
+      "positive_ratio": 0.29999511885585983,
+      "advantage_mean": 0.0011228193761780858,
+      "advantage_std": 0.0654873177409172,
+      "weight_mean": 0.544325053691864,
+      "weight_max": 1.0,
+      "target_mean": -0.6745608448982239,
+      "pred_mean": -0.6766407489776611
+    }
+  },
+  "model_comparison": {
+    "num_trajs": 80,
+    "mean_so": -0.5861524351801665,
+    "mean_sae": -0.6591707809104449,
+    "mean_diff": -0.07301834573027843
+  }
+}
