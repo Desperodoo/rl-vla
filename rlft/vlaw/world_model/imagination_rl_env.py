@@ -136,6 +136,9 @@ class ImaginationRLEnvConfig:
     state_predictor_ckpt: str = ""
     """State Predictor checkpoint 路径"""
 
+    dynamics_adapter_ckpt: str = ""
+    """Dynamics Adapter checkpoint 路径 (若非空则用 adapter 预测 future EE poses)"""
+
     # --- 调试 ---
     verbose: bool = False
     """是否输出详细日志"""
@@ -296,6 +299,19 @@ class ImaginationRLEnv(gym.Env):
         # 收集的帧序列 (用于 VLM 评估)
         self._collected_latents: list[torch.Tensor] = []
         self._episode_done: bool = False
+
+        # --- Dynamics Adapter (optional) ---
+        self._dynamics_adapter = None
+        self._adapter_norm = None
+        if cfg.dynamics_adapter_ckpt:
+            from rlft.vlaw.world_model.dynamics_adapter import DynamicsAdapterTrainer
+            adapter, norm_dict = DynamicsAdapterTrainer.load_from_checkpoint(
+                cfg.dynamics_adapter_ckpt, device=str(self.device)
+            )
+            self._dynamics_adapter = adapter
+            self._adapter_norm = norm_dict
+            if cfg.verbose:
+                print(f"[ImaginationRLEnv] Dynamics Adapter 已加载: {cfg.dynamics_adapter_ckpt}")
 
         if cfg.verbose:
             print(
@@ -590,6 +606,26 @@ class ImaginationRLEnv(gym.Env):
         # 缓冲耗尽, 需要新的 WM rollout
         return self._wm_rollout_and_buffer(action)
 
+    def _predict_future_ee(
+        self, state: np.ndarray, action_chunk: np.ndarray
+    ) -> np.ndarray:
+        """Predict future EE poses using dynamics adapter or fallback.
+
+        Args:
+            state:        (state_dim,) current agent_state (raw, unnormalized).
+            action_chunk: (wm_act_steps, action_dim) delta actions from policy.
+
+        Returns:
+            (wm_act_steps, 7) future EE poses in world frame.
+        """
+        if self._dynamics_adapter is not None:
+            # Normalize state before feeding to adapter
+            norm = self._adapter_norm
+            state_n = (state - norm["state_mean"]) / norm["state_std"]
+            return self._dynamics_adapter.predict(state_n, action_chunk)
+        # Fallback: treat action_chunk as base-frame EE pose
+        return ee_pose_base_to_world(action_chunk)
+
     def _wm_rollout_and_buffer(self, action: np.ndarray) -> torch.Tensor:
         """调用 WM rollout 生成 wm_act_steps 帧并缓冲.
 
@@ -634,9 +670,8 @@ class ImaginationRLEnv(gym.Env):
                 initial_ee = self._ee_pose_history[0] if self._ee_pose_history else np.zeros(cfg.action_dim, dtype=np.float32)
                 hist_ee_list.append(initial_ee)
         hist_ee = np.stack(hist_ee_list, axis=0)  # (num_history, 7)
-        # 未来帧 EE pose: pd_ee_pose 模式下 action 就是绝对 EE pose (base frame)
-        # 转换到 world frame 即可
-        future_ee = ee_pose_base_to_world(action_chunk)  # (wm_act_steps, 7)
+        # 未来帧 EE pose: 使用 Dynamics Adapter (若有) 或 ee_pose_base_to_world fallback
+        future_ee = self._predict_future_ee(self._current_state, action_chunk)  # (wm_act_steps, 7)
         full_ee_poses = np.concatenate([hist_ee, future_ee], axis=0)
 
         # ---- WM 推理 ----

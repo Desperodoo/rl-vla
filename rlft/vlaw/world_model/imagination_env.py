@@ -245,6 +245,9 @@ class ImaginationEnvConfig:
     max_episode_steps: int = 200
     """每幕最大步数"""
 
+    dynamics_adapter_ckpt: str = ""
+    """Dynamics Adapter checkpoint 路径 (若非空则用 adapter 预测 future EE poses)"""
+
 
 # ---------------------------------------------------------------------------
 # 核心引擎
@@ -280,10 +283,47 @@ class ImaginationEnvEngine:
         )
         # 缓存 env 实例，避免 SAPIEN Vulkan 资源泄漏（反复创建/销毁会耗尽 GPU 渲染资源）
         self._env_cache: dict[str, Any] = {}  # key: f"{task_id}_{num_envs}"
+
+        # --- Dynamics Adapter (optional) ---
+        self._dynamics_adapter = None
+        self._adapter_norm = None
+        if config.dynamics_adapter_ckpt:
+            from rlft.vlaw.world_model.dynamics_adapter import DynamicsAdapterTrainer
+            adapter, norm_dict = DynamicsAdapterTrainer.load_from_checkpoint(
+                config.dynamics_adapter_ckpt, device=str(self.device)
+            )
+            self._dynamics_adapter = adapter
+            self._adapter_norm = norm_dict
+            print(f"[VLAW-P4.3] Dynamics Adapter 已加载: {config.dynamics_adapter_ckpt}")
+
         print(
             f"[VLAW-P4.3] ImaginationEnvEngine 初始化完成, "
             f"device={self.device}, num_envs={config.num_envs}"
         )
+
+    # ------------------------------------------------------------------
+    # Dynamics Adapter helper
+    # ------------------------------------------------------------------
+
+    def _predict_future_ee(
+        self, state: np.ndarray, action_chunk: np.ndarray
+    ) -> np.ndarray:
+        """Predict future EE poses using dynamics adapter or fallback.
+
+        Args:
+            state:        (state_dim,) current agent_state (raw, unnormalized).
+            action_chunk: (act_steps, action_dim) delta actions from policy.
+
+        Returns:
+            (act_steps, 7) future EE poses in world frame.
+        """
+        if self._dynamics_adapter is not None:
+            # Normalize state before feeding to adapter
+            norm = self._adapter_norm
+            state_n = (state - norm["state_mean"]) / norm["state_std"]
+            return self._dynamics_adapter.predict(state_n, action_chunk)
+        # Fallback: treat action_chunk as base-frame EE pose
+        return ee_pose_base_to_world(action_chunk)
 
     # ------------------------------------------------------------------
     # 环境创建
@@ -589,9 +629,8 @@ class ImaginationEnvEngine:
                     hist_ee_list.append(initial_ee_pose.copy())
             hist_ee = np.stack(hist_ee_list, axis=0)  # (num_history, 7)
 
-            # 未来帧: pd_ee_pose 模式下, policy 直接输出绝对 EE pose (base frame)
-            # 转换到 world frame 即可送入 WM
-            future_ee = ee_pose_base_to_world(action_chunk)  # (act_steps, 7)
+            # 未来帧: 使用 Dynamics Adapter (若有) 或 ee_pose_base_to_world fallback
+            future_ee = self._predict_future_ee(state_t, action_chunk)  # (act_steps, 7)
             full_ee_poses = np.concatenate([hist_ee, future_ee], axis=0)
 
             pred_latents = self.wm_adapter.rollout(
@@ -897,7 +936,7 @@ class ImaginationEnvEngine:
                     # EE pose conditioning: history from buffer, future from policy ee_pose
                     current_ee = state_to_ee_pose_7d(per_env_states[ei])  # (7,) world frame
                     hist_ee = np.tile(current_ee[None, :], (num_history, 1))  # (num_history, 7)
-                    future_ee = ee_pose_base_to_world(action_chunk)  # (act_steps, 7)
+                    future_ee = self._predict_future_ee(per_env_states[ei], action_chunk)  # (act_steps, 7)
                     full_ee_poses = np.concatenate([hist_ee, future_ee], axis=0)
                     pred_latents = self.wm_adapter.rollout(
                         obs_latents=lat_buf.clone(),
