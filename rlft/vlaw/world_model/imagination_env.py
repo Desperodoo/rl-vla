@@ -151,13 +151,19 @@ def ee_pose_base_to_world(
         root_pos: *(3,)* — robot root position in world frame.
 
     Returns:
-        Same shape, with position shifted to world frame.
+        Same shape, with position shifted to world frame and Euler angles
+        re-wrapped to [-pi, pi] (the range the WM was trained on).
     """
     squeeze = ee_pose_base.ndim == 1
     if squeeze:
         ee_pose_base = ee_pose_base[None, :]
     result = ee_pose_base.copy().astype(np.float64)
     result[:, :3] += root_pos[None, :]
+    # Re-wrap Euler angles (dims 3:6) from policy's [0, 2*pi] back to
+    # WM's expected [-pi, pi].  The policy trains on unwrapped euler_rx
+    # to avoid bimodal discontinuity, but the WM uses standard [-pi, pi].
+    for d in range(3, 6):
+        result[:, d] = (result[:, d] + np.pi) % (2 * np.pi) - np.pi
     result = result.astype(np.float32)
     return result[0] if squeeze else result
 

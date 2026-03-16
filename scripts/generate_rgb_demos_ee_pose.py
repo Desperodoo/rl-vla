@@ -108,6 +108,11 @@ def main():
 
         env_states = traj["env_states"]
         actions = traj["actions"][:]  # (T, 7) pd_ee_pose
+        # Unwrap euler_rx (dim 3) from [-pi, pi] to [0, 2*pi] to eliminate
+        # bimodal discontinuity at ±pi that breaks Flow Matching training.
+        # ManiSkill's pd_ee_pose controller handles 2*pi-periodic angles correctly.
+        mask = actions[:, 3] < 0
+        actions[mask, 3] += 2 * np.pi
         T = actions.shape[0]
 
         # Collect T+1 observations (state 0..T)
