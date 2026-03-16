@@ -15,37 +15,73 @@
 
 ### 原设备状态
 
-**阶段**：Phase 2 — WM v5 重训练（BUG-A/B/C 全部修复后从零开始）
+**阶段**：Phase 2.5 — BUG-D Fix2（pd_ee_pose 迁移，WM v5 不重训）
 **已修复**：
 - **BUG-A (ADR-037, 2026-03-08)**：WM action conditioning 语义错配 — 从 delta pose 改为**绝对 EE 位姿** (对齐 DROID)。stat.json 已重新生成。
 - **BUG-B (ADR-037, 2026-03-08)**：Camera VAE 编码差异 — 从像素空间拼接改为**独立 per-camera VAE 编码后 latent 空间拼接**。
 - **BUG-C (ADR-040, 2026-03-11)**：VAE 编码器不匹配 — `pipeline.py` 误用 `sd-vae-ft-mse` 的 `AutoencoderKL` 编码，而 Ctrl-World 训练/推理使用 SVD 的 `AutoencoderKLTemporalDecoder`。两者权重不同，latent 分布存在偏差。已改为使用 SVD VAE 编码，数据重编码为 train_v5。⚠️ 后续发现 BUG-E：编码端两者权重几乎相同（corr=0.999999），实质影响仅在解码端。
-- **BUG-D (ADR-043, 2026-03-14)**：**[CRITICAL] Imagination 推理 future actions 使用 tiled 当前 EE pose** — 推理时 5 个未来帧全部填充相同的当前 EE 位姿（`np.tile`），而训练时 WM 接收每帧不同的真实 EE pose。Fix1 尝试：`integrate_delta_to_ee_poses()` 将 policy delta actions 积分为绝对 EE pose 序列。⚠️ **Fix1 验证失败**：用户肉眼判断效果比 tiled 更差。可能原因：(1) pd_ee_delta_pose 经 PD 控制器转换，raw delta ≠ 实际 EE 位移；(2) 积分 EE pose 超出 WM 训练分布；(3) 旋转合成顺序或 gripper 语义错误。**需要重新分析修复方案**。
+- **BUG-D (ADR-043+045, 2026-03-14~15)**：**[CRITICAL → 修复中] Imagination 推理 future actions 使用 tiled 当前 EE pose**。详见下方 WM v5 诊断报告。**Fix2 方案**：Policy 从 `pd_ee_delta_pose` 切换到 `pd_ee_pose`（绝对位姿），Imagination 中用 `ee_pose_base_to_world()` 转换 base→world frame（仅加 `[-0.615, 0, 0]`）。WM 不需要重训——其 action conditioning 来自 `state_to_ee_pose_7d()`（world frame），与 control_mode 无关。
 - **BUG-E (ADR-043, 2026-03-14)**：V5 latents 与 V4 几乎相同（corr=0.999999），BUG-C 修复对编码端无实质影响。SVD VAE 时序修改集中在解码器。
 - **BUG-H (ADR-043, 2026-03-14)**：ee_pose_history 初始化仅 1 条，应为 num_history*4=24 条（对齐 latent_history 和官方代码）。已修复。
-**WM v4 评估结果 (2026-03-11)**：4000 步训练完成，best loss=0.177 (step 3400)。视觉质量尚可但物体动态弱（peg 基本静止），判定为**不可用**。分析发现 BUG-C 是主要根因（后修正为 BUG-D 是真正根因）。
-**WM v5 评估结果 (2026-03-14)**：4000 步训练完成，best loss≈0.157 (step ~3900)。20 checkpoint 并行 imagination eval 完成：peg 动态 1/10，与 v4 一致。训练验证样本（GT actions）确认 WM 具备动态建模能力 → **BUG-D 是根因**。
-**BUG-D Fix1 验证 (2026-03-14)**：step 3400/3800/4000 三个 checkpoint 完成 fix1 eval（integrate delta→EE pose）。**❌ 效果更差**，用户肉眼验证不如原始 tiled 方案。Fix1 输出：`data/vlaw/synthetic/v5_fix1_step{3400,3800,4000}/viz/`。原始对照：`data/vlaw/synthetic/v5_eval_step*/viz/`。
-**当前进度**：BUG-D fix1 失败 → 需重新分析 delta action 到 EE pose 的正确积分方式，或转向训练端修复（BUG-F 时间跳跃 + BUG-G Action Encoder LR）
-**下游阻塞**：WM imagination 仍不可用。待定：(1) 修正 fix1 积分逻辑；(2) 若推理端无法解决 → WM v6 训练（BUG-F+G 修复）
 
-**待消融 (Step 2 — 时间跳跃数据增强)**：
+**WM v5 Imagination 诊断报告 (2026-03-14~15)**：
+通过 7 组受控消融实验（`scripts/vlaw/diagnostic/wm_diagnostic_battery.py`）精确隔离了 Imagination 质量退化的每个因素。完整报告：`results/vlaw/wm_diagnostic/DIAGNOSTIC_REPORT.md`、`results/vlaw/wm_diagnostic/BUG_D_EXPLAINED.md`。
+
+| 排名 | 因素 | PSNR 影响 | 实验组 | 结论 |
+|------|------|----------|--------|------|
+| **1** | **BUG-D: Action tiling（future EE pose 全相同）** | **-4.5 ~ -8.5 dB** | Group A/C/F2 | **唯一显著根因** |
+| 2 | num_inference_steps 50→25 | ~0.8 dB | Group B | 次要，非单调 |
+| 3 | 自回归误差累积（6 chunk AR） | ~0 dB | Group D_MC | **完全不是问题** |
+| 4 | History 采样策略（sparse vs contiguous） | <0.5 dB | Group E | 无影响 |
+| 5 | History latent 噪声敏感度 | PSNR 反而上升 | Group D3 | WM 非常鲁棒 |
+
+**关键实验**：
+- **Group C Alpha Sweep**：`future_ee = current_ee + α*(gt_ee - current_ee)`。α=1.0 (GT) 是明确最优点，单调升再单调降。动态大的样本 GT vs tiled 差距高达 **8.5 dB**（34.12 vs 26.60 dB）。
+- **Group D_MC (6-chunk AR)**：Oracle history vs predicted history，mean gap = **-0.2 dB**（AR 甚至略好）。无随 chunk 递增的退化趋势 → 自回归误差累积在 30 帧内完全不是问题。
+- **Group A**：GT actions=36.85, Tiled=32.35, Zero=29.77, Random=25.61 dB → 证实 WM 确实使用 action conditioning。
+
+**BUG-D 根本矛盾**：WM 需要 absolute EE pose（训练时从 `state[18:21]` 提取）；Policy 输出 delta action（`pd_ee_delta_pose`）；两者之间转换需 PD 控制器 + 物理仿真——而这恰是 Imagination 想绕开的。
+
+**Fix1 验证 (2026-03-14) — ❌ 失败**：`integrate_delta_to_ee_poses()` 将 policy delta 积分为绝对 EE pose。失败原因：PD 控制器使 raw delta ≠ 实际 EE 位移，积分 5 帧后累积误差超出 WM 训练分布。Fix1 输出比 tiled 更差。
+
+**Fix2 方案 (ADR-045, 2026-03-15) — 🔄 进行中**：将 Policy action space 从 `pd_ee_delta_pose` 切换到 `pd_ee_pose`。Policy 直接输出绝对 EE 位姿（robot base frame），Imagination 只需加上 robot root offset `[-0.615, 0, 0]` 即可对齐 WM 的 world frame。WM 不需要重训（action conditioning 来自 state vector，与 control_mode 无关）。
+
+Fix2 进度：
+
+| Step | 内容 | 状态 |
+|------|------|------|
+| Step 0 | pd_ee_pose demo 转换 | ✅ 完成（669 traj, 27951 frames, 100% success） |
+| Step 0.5 | 生成带 RGB obs 的 demo（policy 训练需要） | ⏳ 待做 |
+| Step 1 | 训练 ShortCut Flow IL policy（pd_ee_pose + minmax normalizer） | ⏳ 待做 |
+| Step 2 | Imagination loop 代码修改（`ee_pose_base_to_world`） | ✅ 完成 |
+| Step 3 | Imagination PSNR 验证 | ⏳ 待做 |
+
+**Step 0 详情**：ManiSkill `replay_trajectory` 不支持 ee_delta_pose→ee_pose 转换（3 种尝试均失败）。自建转换脚本 `scripts/convert_demos_to_ee_pose.py`：从 HDF5 env_states 恢复仿真状态 → 读取 base frame EE pose → action[t] = EE_pose(state[t+1])。输出：`~/.maniskill/demos/LiftPegUpright-v1/rl/trajectory.none.pd_ee_pose.physx_cpu.h5`（669 traj, 27951 frames）。Action 值域：tcp_x [0.40, 0.67], tcp_z [0.01, 0.25], euler_rx ±π, gripper [-1, 1]。
+
+**Step 2 详情**：`imagination_env.py` 新增 `ee_pose_base_to_world()` 函数（`ROBOT_ROOT_POS=[-0.615, 0, 0]`，仅平移位置维度），替换 `_run_rollout_in_env()` 和 `_batch_rollout_in_env()` 中已废弃的 `integrate_delta_to_ee_poses()` 调用。`imagination_rl_env.py` 同步替换 `np.tile(current_ee, ...)` 为 `ee_pose_base_to_world(action_chunk)`。
+
+**pd_ee_pose 关键技术细节**：
+- 7D: `[target_xyz, euler_xyz, gripper]`，robot base frame（非 world frame）
+- `normalize_action=False`，unbounded action space（arm 维度 NaN bounds，gripper [-1,1]）
+- Robot root: `[-0.615, 0, 0]`，identity rotation → world_pos = base_pos + root_pos，euler 不变
+- 训练时用 `ActionNormalizer(minmax)` 映射到 [-1,1]，与 `ShortCutFlow.action_bounds=(-1,1)` 兼容
+- `CtrlWorldAdapter.rollout()` 内部用 stat.json 的 world frame percentiles 归一化 → 传入 world frame EE 即可
+
+**待消融 (BUG-F — 时间跳跃数据增强)**：
 - 官方 DROID 训练使用随机时间跳跃 `skip=randint(1,2)`, `skip_his=skip*4` (15% prob→0)
-- 我们的 ManiSkill dataset 使用严格连续帧 (`skip_step=1`)（BUG-F）
-- 需修改 `ctrl_world/dataset/dataset_maniskill.py` 的 `__getitem__` 加入 DROID 风格随机 skip
-- **优先级**：BUG-D 修复后 → 若 peg 动态恢复但不足 → 作为 WM v6 消融项
+- 我们的 ManiSkill dataset 使用严格连续帧 (`skip_step=1`)
+- **优先级**：BUG-D Fix2 验证后 → 若 peg 动态恢复但不足 → 作为 WM v6 消融项
 
-**待改进 (Step 3 — Action Encoder 训练改进)**：
-- Action Encoder (2.11M) 随机初始化，与 UNet (1524M) 共用 LR=1e-5，无 warmup（BUG-G）
-- 需为 Action Encoder 设置独立高 LR（如 1e-4）+ 500 步 linear warmup
-- **优先级**：BUG-D 修复后 → 若 peg 动态恢复但不足 → 与时间跳跃一起作为 WM v6
+**待改进 (BUG-G — Action Encoder 训练)**：
+- Action Encoder (2.11M) 随机初始化，与 UNet (1524M) 共用 LR=1e-5，无 warmup
+- **优先级**：BUG-D Fix2 验证后 → 若 peg 动态恢复但不足 → 与时间跳跃一起作为 WM v6
 
 **原设备 GPU 分配**：
 
 | GPU | 任务 | 状态 |
 |-----|------|------|
 | 0-1 | LMStudio | 占用 |
-| 2-9 | 空闲（fix1 eval 已完成） | — |
+| 2-9 | 空闲（BUG-D Fix2 Step 1 训练待启动） | — |
 
 ---
 
@@ -367,6 +403,12 @@ logs/vlaw/               ← 子 Agent RESULT_FILE 输出
 | ACP 训练报告 | `logs/vlaw/acp_report/ACP_Training_Report.md` (8000步, best MAE=0.1675) |
 | ACP 对齐实验 log | `logs/vlaw/acp_exp_aligned.log` |
 | ACP 改进计划 | `.claude/plans/modular-finding-llama.md` |
+| BUG-D Fix2 计划 | `.claude/plans/toasty-imagining-moon.md` |
+| WM 诊断报告 | `results/vlaw/wm_diagnostic/DIAGNOSTIC_REPORT.md` |
+| BUG-D 深度解析 | `results/vlaw/wm_diagnostic/BUG_D_EXPLAINED.md` |
+| WM 诊断脚本 | `scripts/vlaw/diagnostic/wm_diagnostic_battery.py` |
+| pd_ee_pose Demo 转换脚本 | `scripts/convert_demos_to_ee_pose.py` |
+| pd_ee_pose Demo（无 obs） | `~/.maniskill/demos/LiftPegUpright-v1/rl/trajectory.none.pd_ee_pose.physx_cpu.h5` (669 traj, 27951 frames) |
 | ACP v3 分析报告 | `docs/vlaw/acp_v3_at_end_report.md`（v2 vs v3 对比，5 张图表） |
 | ACP Pipeline 文档 | `docs/vlaw/acp_pipeline.md`（含 v2 五版本训练结果、9 张图表） |
 
@@ -408,7 +450,8 @@ logs/vlaw/               ← 子 Agent RESULT_FILE 输出
 | ADR-041 | **ACP Mirror Experiments**：用 ACP reward 替换 sim dense reward 运行 AWSC/PLD-SAC/DSRL-SAC 三算法。**核心指标 success_at_end**：仅 AWSC 达到 66%（sim=72%，得益于 BC loss），PLD/DSRL 均 ≤6%（sim=86%/60%）。ACP value 目标为 success_once 语义，无法引导保持行为。`acp_step_mean=0` 已确认为日志 bug。入口：`scripts/run_acp_mirror_experiments.sh`。详细报告：`docs/vlaw/acp_mirror_experiments.md`。 | ✅ 完成 |
 | ADR-042 | **AWSC+ACP Sweep v2（数据驱动）**：基于 wandb 分析诊断（`fetch_wandb.py` 拉取 wa52z9ce 训练数据），发现 ACP mirror AWSC 3 个核心问题：(1) online_cum_reward=0.05 vs offline=4.34（87x gap，critic 被 demo 信号主导）；(2) success_once 后期退化 0.82→0.60（BC 锚定不足）；(3) advantage_mean≈0.8 正偏高。扫描 3 轴：A 放大 ACP 信号（scale 500-2000, online_ratio 0.3-0.5），B 防遗忘（bc_weight 4-8），C 缩短信用分配（gamma 0.5-0.7）。15 configs，仅 AWSC（PLD/DSRL 暂停）。入口：`scripts/sweep_acp/sweep.sh`。分析工具：`scripts/sweep_acp/fetch_wandb.py`。 | 🔄 运行中 |
 
-| ADR-043 | **WM v5 审查 + Bug 分析 (BUG-D/E/F/G/H)**：20 checkpoint 视觉审查，peg 静止 1/10。BUG-D=tiled future EE pose（fix1 integrate_delta 失败，效果更差）。BUG-E=v5 latent≈v4（编码端无差异）。BUG-F=ManiSkill 无时间跳跃。BUG-G=Action Encoder 训练不足。BUG-H=history init 不足（已修复）。**Fix1 失败后需重新分析路线**：推理端修正 or 训练端 v6。 | ❌ Fix1 失败 |
+| ADR-043 | **WM v5 诊断 + Bug 分析 (BUG-D/E/F/G/H)**：7 组受控消融实验精确定位根因。BUG-D=**唯一显著根因**（-4.5~-8.5 dB），其余因素（AR误差/steps/history采样/history噪声）均<1 dB。Fix1 (integrate_delta) ❌ 失败。Alpha sweep 证实 α=1.0 (GT) 最优。D_MC 实验证实 AR 误差累积在 30 帧内不是问题。报告：`results/vlaw/wm_diagnostic/DIAGNOSTIC_REPORT.md`、`BUG_D_EXPLAINED.md`。诊断脚本：`scripts/vlaw/diagnostic/wm_diagnostic_battery.py`。 | ✅ 诊断完成，Fix1 ❌ |
+| ADR-045 | **BUG-D Fix2：pd_ee_pose 迁移（消除 WM-Policy 动作空间鸿沟）**：Policy 从 `pd_ee_delta_pose` 切换到 `pd_ee_pose`（绝对位姿 base frame），Imagination 用 `ee_pose_base_to_world()` 加 `[-0.615,0,0]` 转为 world frame。WM 不需重训（action conditioning 来自 state vector）。Demo 转换用自建脚本（ManiSkill replay 不支持此路径）：`scripts/convert_demos_to_ee_pose.py`。Policy 训练用 `ActionNormalizer(minmax)` → [-1,1]。代码修改：`imagination_env.py`（新增 `ee_pose_base_to_world`，废弃 `integrate_delta_to_ee_poses`，替换 2 处调用）、`imagination_rl_env.py`（替换 `np.tile` 为 `ee_pose_base_to_world`）。计划：`.claude/plans/toasty-imagining-moon.md`。 | 🔄 进行中（Step 0/2 ✅，Step 0.5/1/3 待做） |
 | ADR-044 | **ACP v3 数据多样化 + success_at_end 支持**：(1) ManiSkill early-termination 导致 v2 数据 success_once≈success_at_end（0% mismatch），ACP 无法学习"保持"语义。(2) `ignore_terminations=True` 强制 episode 运行到 max_episode_steps。(3) 改用 PLD-SAC s42（SO=100%,SAE=86%）替代 AWSC s42。(4) config 新增 `success_mode` 支持 `success_once`/`success_at_end` 两种标签。v3 数据 mismatch=14.2%（192/1350 条）。v3_so/v3_sae 两版 ACP 训练完成（4000 steps each）。 | ✅ 数据+训练完成 |
 
 完整决策记录：`.github/knowledge/decisions.md`（43 条 ADR）

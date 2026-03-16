@@ -236,7 +236,7 @@ class Args:
     """Whether to normalize actions during training"""
     action_norm_mode: Literal["standard", "minmax"] = "standard"
     """Action normalization mode: 'standard' (zero mean, unit var) or 'minmax' (scale to [-1, 1])"""
-    action_bounds: Optional[tuple] = (-1.0, 1.0)
+    action_bounds: Optional[tuple[float, float]] = (-1.0, 1.0)
     """Action bounds for clamping during inference. Set to None to disable clamping.
     ManiSkill environments have action space [-1, 1], so we clamp by default."""
 

@@ -84,7 +84,26 @@ def main(args):
         now = datetime.datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
         tag = args.tag
         run_name = f"train_{now}_{tag}"
-        accelerator.init_trackers(args.wandb_project_name,config={}, init_kwargs={"wandb":{"name":run_name}})
+        # VLAW MODIFICATION: 记录完整训练配置到 wandb
+        wandb_config = {
+            "learning_rate": args.learning_rate,
+            "train_batch_size": args.train_batch_size,
+            "gradient_accumulation_steps": args.gradient_accumulation_steps,
+            "effective_batch_size": args.train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps,
+            "max_train_steps": args.max_train_steps,
+            "mixed_precision": args.mixed_precision,
+            "num_frames": args.num_frames,
+            "num_history": args.num_history,
+            "action_dim": args.action_dim,
+            "height": args.height,
+            "width": args.width,
+            "freeze_unet_spatial": getattr(args, 'freeze_unet_spatial', False),
+            "guidance_scale": args.guidance_scale,
+            "motion_bucket_id": args.motion_bucket_id,
+            "max_grad_norm": args.max_grad_norm,
+            "task_type": getattr(args, 'task_type', 'droid'),
+        }
+        accelerator.init_trackers(args.wandb_project_name, config=wandb_config, init_kwargs={"wandb":{"name":run_name}})
         os.makedirs(args.output_dir, exist_ok=True)
         # count parameters num in each part
         num_params = sum(p.numel() for p in model.unet.parameters())
@@ -151,24 +170,40 @@ def main(args):
     global_step = getattr(args, 'initial_step', 0) or 0
     forward_step=0
     train_loss = 0.0
+    # VLAW MODIFICATION: per-frame loss accumulators
+    num_future_frames = args.num_frames  # typically 5
+    train_per_frame_loss = torch.zeros(num_future_frames)
     progress_bar = tqdm(range(global_step, args.max_train_steps), disable=not accelerator.is_local_main_process)
     progress_bar.set_description("Steps")
+
+    # VLAW MODIFICATION: identify action_encoder params for separate grad norm tracking
+    _unwrapped = accelerator.unwrap_model(model)
+    _ae_param_set = set(id(p) for p in _unwrapped.action_encoder.parameters())
 
     for epoch in range(num_train_epochs):
         for step, batch in enumerate(train_dataloader):
             with accelerator.accumulate(model):
                 with accelerator.autocast():
-                    loss_gen, _ = model(batch)
+                    loss_gen, per_frame_loss = model(batch)
                 avg_loss = accelerator.gather(loss_gen.repeat(args.train_batch_size)).mean()
                 train_loss += avg_loss.item()/ args.gradient_accumulation_steps
+                # accumulate per-frame losses (gathered across GPUs)
+                per_frame_gathered = accelerator.gather(per_frame_loss.unsqueeze(0)).mean(dim=0)
+                train_per_frame_loss += per_frame_gathered.cpu() / args.gradient_accumulation_steps
                 accelerator.backward(loss_gen)
                 params_to_clip = model.parameters()
                 if accelerator.sync_gradients:
-                    accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
+                    # compute action encoder grad norm BEFORE clipping
+                    _ae_grad_sq = 0.0
+                    for p in _unwrapped.action_encoder.parameters():
+                        if p.grad is not None:
+                            _ae_grad_sq += p.grad.data.norm(2).item() ** 2
+                    _ae_grad_norm = _ae_grad_sq ** 0.5
+                    grad_norm = accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
                 optimizer.step()
                 optimizer.zero_grad()
                 forward_step += 1
-            
+
             if accelerator.sync_gradients:
                 progress_bar.update(1)
                 global_step += 1
@@ -176,8 +211,48 @@ def main(args):
                 _log_every = getattr(args, 'log_every_n_steps', 100)
                 if global_step % _log_every == 0:
                     progress_bar.set_postfix({"loss": train_loss})
-                    accelerator.log({"train_loss": train_loss / _log_every}, step=global_step)
+                    # VLAW MODIFICATION: comprehensive metrics logging
+                    log_dict = {
+                        "train_loss": train_loss / _log_every,
+                        "grad_norm": grad_norm.item() if torch.is_tensor(grad_norm) else float(grad_norm),
+                    }
+                    # per-frame loss breakdown
+                    avg_per_frame = train_per_frame_loss / _log_every
+                    for fi in range(num_future_frames):
+                        log_dict[f"train_loss_frame{fi+1}"] = avg_per_frame[fi].item()
+                    # frame decay ratio: last_frame / first_frame
+                    if avg_per_frame[0].item() > 0:
+                        log_dict["frame_decay_ratio"] = avg_per_frame[-1].item() / avg_per_frame[0].item()
+                    # action encoder grad norm (computed before clipping)
+                    log_dict["action_encoder_grad_norm"] = _ae_grad_norm
+                    accelerator.log(log_dict, step=global_step)
                     train_loss = 0.0
+                    train_per_frame_loss.zero_()
+
+                # VLAW MODIFICATION: validation loss every validation_steps (cheap, no VAE decode)
+                _val_every = getattr(args, 'validation_steps', 500)
+                if global_step % _val_every == 0 and accelerator.is_main_process:
+                    model.eval()
+                    val_losses = []
+                    val_per_frame = []
+                    _n_val_batches = min(10, len(val_dataloader))
+                    with torch.no_grad():
+                        for vi, vbatch in enumerate(val_dataloader):
+                            if vi >= _n_val_batches:
+                                break
+                            with accelerator.autocast():
+                                vloss, vpf = model(vbatch)
+                            val_losses.append(vloss.item())
+                            val_per_frame.append(vpf.cpu())
+                    val_log = {"val_loss": np.mean(val_losses)}
+                    val_pf = torch.stack(val_per_frame).mean(dim=0)
+                    for fi in range(num_future_frames):
+                        val_log[f"val_loss_frame{fi+1}"] = val_pf[fi].item()
+                    accelerator.log(val_log, step=global_step)
+                    logger.info(f"Step {global_step}: val_loss={val_log['val_loss']:.4f}  "
+                                f"per-frame=[{', '.join(f'{val_pf[i]:.4f}' for i in range(num_future_frames))}]")
+                    model.train()
+
                 # save ckpt every checkpointing_steps
                 if global_step % args.checkpointing_steps == 0 and accelerator.is_main_process:
                     save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}.pt")

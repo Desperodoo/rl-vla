@@ -36,7 +36,7 @@ if TYPE_CHECKING:
     from rlft.vlaw.world_model.ctrl_world_adapter import CtrlWorldAdapter
 
 try:
-    from rlft.vlaw.world_model.imagination_env import get_history_indices
+    from rlft.vlaw.world_model.imagination_env import get_history_indices, ee_pose_base_to_world
     from ctrl_world.dataset.dataset_maniskill import state_to_ee_pose_7d
 except ImportError:
     # 作为脚本直接运行时的 fallback
@@ -47,7 +47,7 @@ except ImportError:
     )
     if _script_root not in _sys.path:
         _sys.path.insert(0, _script_root)
-    from rlft.vlaw.world_model.imagination_env import get_history_indices
+    from rlft.vlaw.world_model.imagination_env import get_history_indices, ee_pose_base_to_world
     from ctrl_world.dataset.dataset_maniskill import state_to_ee_pose_7d
 
 
@@ -634,9 +634,9 @@ class ImaginationRLEnv(gym.Env):
                 initial_ee = self._ee_pose_history[0] if self._ee_pose_history else np.zeros(cfg.action_dim, dtype=np.float32)
                 hist_ee_list.append(initial_ee)
         hist_ee = np.stack(hist_ee_list, axis=0)  # (num_history, 7)
-        # 未来帧 EE pose: 用当前 state 的 EE pose 填充
-        current_ee = state_to_ee_pose_7d(self._current_state)  # (7,)
-        future_ee = np.tile(current_ee[None, :], (cfg.wm_act_steps, 1))  # (wm_act_steps, 7)
+        # 未来帧 EE pose: pd_ee_pose 模式下 action 就是绝对 EE pose (base frame)
+        # 转换到 world frame 即可
+        future_ee = ee_pose_base_to_world(action_chunk)  # (wm_act_steps, 7)
         full_ee_poses = np.concatenate([hist_ee, future_ee], axis=0)
 
         # ---- WM 推理 ----

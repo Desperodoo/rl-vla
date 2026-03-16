@@ -1,0 +1,16 @@
+{
+  "F2-0_baseline": {
+    "psnr": 36.31492685428758,
+    "description": "GT everything, 50 steps"
+  },
+  "F2-1_25steps": {
+    "psnr": 37.60745427261101,
+    "delta": -1.2925274183234308,
+    "description": "25 steps"
+  },
+  "F2-2_tiled_actions": {
+    "psnr": 35.139556862810295,
+    "delta": 2.467897409800713,
+    "description": "tiled actions"
+  }
+}
