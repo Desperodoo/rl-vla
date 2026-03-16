@@ -233,6 +233,16 @@ class Args:
     acp_task_instruction: str = "Pick up the peg and lift it upright."
     """Task instruction text for the ACP Gemma language encoder."""
 
+    # Early stopping (AWSC only) — stops when SO degrades while flow_loss drops
+    early_stop: bool = False
+    """Enable early stopping based on SO degradation detection (AWSC only)."""
+    early_stop_patience: int = 5
+    """Number of consecutive eval periods with SO below peak*threshold before stopping."""
+    early_stop_so_threshold: float = 0.8
+    """Stop if current SO < peak_SO * threshold for patience consecutive evals."""
+    early_stop_min_steps: int = 100_000
+    """Minimum training steps before early stopping can trigger."""
+
 
 class AgentWrapper:
     """Wrapper for unified evaluation interface.
@@ -979,7 +989,11 @@ def main():
     episode_lengths = defaultdict(int)
     episode_successes = []
     best_success_rate = 0.0
-    
+    best_success_at_end = 0.0
+    # Early stopping state (AWSC only)
+    peak_so = 0.0
+    so_degradation_count = 0
+
     # Per-env success_once tracking: accumulates success across steps within an episode
     # Reset on episode done. Used when success_criteria='success_once'.
     episode_has_succeeded = np.zeros(args.num_envs, dtype=np.float32)
@@ -1295,8 +1309,10 @@ def main():
                 wandb_eval = {f"eval/{k}": v for k, v in eval_metrics.items()}
                 wandb.log(wandb_eval, step=total_steps)
             
-            if eval_metrics.get("success_once", 0) > best_success_rate:
-                best_success_rate = eval_metrics["success_once"]
+            # Save best checkpoint by success_once
+            current_so = eval_metrics.get("success_once", 0)
+            if current_so > best_success_rate:
+                best_success_rate = current_so
                 from rlft.utils.checkpoint import save_checkpoint as _save_ckpt
                 _save_ckpt(
                     path=f"{log_dir}/checkpoints/best.pt",
@@ -1306,7 +1322,39 @@ def main():
                     args=args,
                     save_args_json=False,
                 )
-                print(f"  New best! Saved checkpoint.")
+                print(f"  New best SO! ({current_so:.2%}) Saved best.pt")
+
+            # Save best checkpoint by success_at_end
+            current_sae = eval_metrics.get("success_at_end", 0)
+            if current_sae > best_success_at_end:
+                best_success_at_end = current_sae
+                from rlft.utils.checkpoint import save_checkpoint as _save_ckpt
+                _save_ckpt(
+                    path=f"{log_dir}/checkpoints/best_sae.pt",
+                    agent=agent,
+                    visual_encoder=visual_encoder,
+                    action_normalizer=action_normalizer,
+                    args=args,
+                    save_args_json=False,
+                )
+                print(f"  New best SAE! ({current_sae:.2%}) Saved best_sae.pt")
+
+            # Early stopping logic (AWSC only)
+            if args.early_stop and args.algorithm == "awsc" and total_steps >= args.early_stop_min_steps:
+                peak_so = max(peak_so, current_so)
+                if peak_so > 0 and current_so < peak_so * args.early_stop_so_threshold:
+                    so_degradation_count += 1
+                    print(f"  [Early Stop] SO degradation {so_degradation_count}/{args.early_stop_patience} "
+                          f"(current={current_so:.2%}, peak={peak_so:.2%})")
+                    if so_degradation_count >= args.early_stop_patience:
+                        print(f"\n{'='*50}")
+                        print(f"[Early Stop] Triggered at step {total_steps}!")
+                        print(f"  Peak SO: {peak_so:.2%}, Current SO: {current_so:.2%}")
+                        print(f"  Best SAE: {best_success_at_end:.2%}")
+                        print(f"{'='*50}\n")
+                        break
+                else:
+                    so_degradation_count = 0
         
         # Save checkpoint
         if total_steps % args.save_freq == 0:
@@ -1351,10 +1399,11 @@ def main():
         # Log final best metrics
         wandb.log({
             "final/best_success_rate": best_success_rate,
+            "final/best_success_at_end": best_success_at_end,
         })
         wandb.finish()
-    
-    print(f"\nTraining complete! Best success rate: {best_success_rate:.2%}")
+
+    print(f"\nTraining complete! Best SO: {best_success_rate:.2%}, Best SAE: {best_success_at_end:.2%}")
 
 
 if __name__ == "__main__":

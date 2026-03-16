@@ -210,7 +210,7 @@ v2 对比：mismatch 0.0% → **14.2%**（192 条轨迹有"成功后掉落"信�
 v3_sae MAE 优 36%，Pearson r 优 4.2%。success_at_end 标签与视觉终态一致，更容易学习。
 详细对比报告：`docs/vlaw/acp_v3_so_vs_sae_report.md`
 
-**ACP v3 RLPD 实验（2026-03-16）— ✅ 5/6 完成，1 运行中**：
+**ACP v3 RLPD 实验（2026-03-16）— ✅ 全部完成**：
 
 3 算法 × 2 ACP 版本 = 6 组在线 RLPD 实验。入口：`scripts/run_acp_v3_experiments.sh`。WandB project: `rlpd-acp-v3`。
 
@@ -221,9 +221,10 @@ v3_sae MAE 优 36%，Pearson r 优 4.2%。success_at_end 标签与视觉终态�
 | PLD + v3_so | 4+5 | 71K | 80% | 8% | 70% | 0% | ✅ 完成 |
 | PLD + v3_sae | 6+7 | 71K | 50% | 16% | 2% | 0% | ✅ 完成（❌ 灾难性崩溃） |
 | DSRL + v3_so | 8+9 | 71K | **94%** | 6% | 76% | 4% | ✅ 完成 |
-| DSRL + v3_sae | 4+5 | 71K | — | — | — | — | 🔄 运行中 |
+| DSRL + v3_sae | 4+5 | 71K | — | — | — | — | ✅ 完成 |
 
 WandB runs: AWSC+so=7weycepc, AWSC+sae=d6wfjs2f, PLD+so=ynp44qlz, PLD+sae=4hjfih2f, DSRL+so=m4wgw4ku, DSRL+sae=1blrmq2r
+内科诊断报告：`docs/vlaw/figures/rlpd_acp_v3_internals/diagnosis_report.md`（由 `scripts/analyze_training_internals.py` 生成）
 
 **核心发现**：
 - **v3_sae 未表现出预期优势**：尽管模型质量优 36%，RLPD 效果与 v3_so 基本相同（AWSC SAE: 66% vs 68%）
@@ -234,20 +235,55 @@ WandB runs: AWSC+so=7weycepc, AWSC+sae=d6wfjs2f, PLD+so=ynp44qlz, PLD+sae=4hjfih
 - 详细报告：`docs/vlaw/acp_v3_rlpd_report.md`
 - 分析脚本：`scripts/analyze_acp_v3_rlpd_results.py`
 
+**Pipeline 修复（ADR-046, 2026-03-16）— ✅ 已完成**：
+
+基于 v3 内科诊断报告的处方，对三个训练脚本进行增强：
+
+| 文件 | 修改内容 |
+|------|---------|
+| `rlft/online/train_rlpd.py` | 新增 early stopping（patience/threshold/min_steps Args）+ SAE-aware `best_sae.pt` checkpoint |
+| `rlft/online/train_pld.py` | 新增 SAE-aware `best_sae.pt` checkpoint + `best_success_at_end` wandb 日志 |
+| `rlft/online/train_dsrl.py` | 新增 SAE-aware `best_sae.pt` checkpoint + `best_success_at_end` wandb 日志 |
+| `scripts/analyze_training_internals.py` | 新增通用内科诊断脚本（替代 `analyze_rlpd_internals.py`） |
+| `.claude/skills/training-internals/SKILL.md` | 新增通用诊断 skill（替代旧 `rlpd-diagnosis`） |
+
+Early stopping 参数（AWSC 专用）：`--early_stop --early_stop_patience 5 --early_stop_so_threshold 0.8 --early_stop_min_steps 100000`
+
+**ACP v4 RLPD 实验（2026-03-16）— 🔄 运行中**：
+
+基于 v3 内科诊断处方，4 组精调实验。入口：`scripts/run_acp_v4_experiments.sh`。WandB project: `rlpd-acp-v4`。
+
+| 实验 | GPU | 核心变更 | 状态 | Log |
+|------|-----|---------|------|-----|
+| AWSC + bc=4 + scale=500 | 0+1 | bc_weight 2→4, scale 100→500, early_stop | 🔄 运行中 (PID=3272815) | `logs/vlaw/acp_v4_awsc_bc4_s42.log` |
+| AWSC + bc=8 + scale=500 | 2+3 | bc_weight 2→8, scale 100→500, early_stop | 🔄 运行中 (PID=3272816) | `logs/vlaw/acp_v4_awsc_bc8_s42.log` |
+| PLD + gamma=0.7 + scale=500 | 4+5 | **gamma 0.99→0.7**, scale 100→500 | 🔄 运行中 (PID=3308470) | `logs/vlaw/acp_v4_pld_gamma07_s42.log` |
+| DSRL + gamma=0.7 + scale=500 | 6+7 | **gamma 0.95→0.7**, scale 100→500 | 🔄 运行中 (PID=3308471) | `logs/vlaw/acp_v4_dsrl_gamma07_s42.log` |
+
+处方变更对比：
+- AWSC: scale 100→500（+5x），bc_weight 2→4/8（+2x/4x），新增 early stopping，仅用 v3_so
+- PLD: **gamma 0.99→0.7**（修复 Q-value 暴涨，v3 Q_range=114-140），scale 100→500
+- DSRL: **gamma 0.95→0.7**（修复 Q-value 暴涨，v3 Q_range=76-86），scale 100→500
+
+v3 PLD/DSRL 失败根因澄清：
+- 诊断报告误标为 "sim reward drowning" → 实际确认 `DualCameraRewardWrapper` **完全替换**了 sim reward
+- **真正根因**：gamma 过高导致 Q-value 暴涨（PLD=114-140, DSRL=76-86 vs AWSC=3.9），critic 不稳定
+- v4 修复：降低 gamma 到 0.7，压缩 Q-value scale，稳定 critic 训练
+
 **下一步方向（优先级排序）**：
-- **P0 — 防止 SO 退化**：增大 BC weight（2→4-8），early stopping（~100-200K），SAE-aware checkpoint 选择
-- **P1 — 放大 ACP reward 信号**：scale 100→500-2000，online_ratio 0.15→0.3-0.5（AWSC Sweep v2 已启动）
-- **P2 — 放弃 PLD/DSRL + ACP 路线**：连续失败（v2 和 v3 均 SAE≤16%），集中资源在 AWSC+ACP
-- **P3 — 探索其他 reward 设计**：直接 value 作 reward、ACP-guided demo selection
+- **P0 — 监控 v4 实验（4 组）**：AWSC 关注 early stop 触发 + SAE 突破；PLD/DSRL 关注 Q-value 是否稳定 + SAE 改善
+- **P1 — 分析 AWSC Sweep v2 结果**：`/training-internals rlpd-acp-v4` 到位后与 sweep 结果交叉验证
+- **P2 — 探索其他 reward 设计**：直接 value 作 reward、ACP-guided demo selection
 
 **新设备 GPU 分配（当前）**：
 
 | GPU | 任务 | 状态 |
 |-----|------|------|
-| 0+1 | AWSC+v3_so (500K) | ✅ 完成 |
-| 2+3 | AWSC+v3_sae (500K) | ✅ 完成 |
-| 4+5 | DSRL+v3_sae (71K, Wave 2) | 🔄 运行中 |
-| 6-9 | 空闲 | — |
+| 0+1 | AWSC v4 + bc=4 + scale=500 (500K max) | 🔄 运行中 |
+| 2+3 | AWSC v4 + bc=8 + scale=500 (500K max) | 🔄 运行中 |
+| 4+5 | PLD v4 + gamma=0.7 + scale=500 (71K) | 🔄 运行中 |
+| 6+7 | DSRL v4 + gamma=0.7 + scale=500 (71K) | 🔄 运行中 |
+| 8-9 | 空闲 | — |
 
 **AWSC+ACP Sweep v2（2026-03-12）— 运行中**：
 
@@ -442,6 +478,7 @@ logs/vlaw/               ← 子 Agent RESULT_FILE 输出
 | WM 诊断脚本 | `scripts/vlaw/diagnostic/wm_diagnostic_battery.py` |
 | pd_ee_pose Demo 转换脚本 | `scripts/convert_demos_to_ee_pose.py` |
 | pd_ee_pose Demo（无 obs） | `~/.maniskill/demos/LiftPegUpright-v1/rl/trajectory.none.pd_ee_pose.physx_cpu.h5` (669 traj, 27951 frames) |
+| ACP v3 内科诊断报告 | `docs/vlaw/figures/rlpd_acp_v3_internals/diagnosis_report.md`（由 analyze_training_internals.py 生成） |
 | ACP v3 分析报告 | `docs/vlaw/acp_v3_at_end_report.md`（v2 vs v3 对比，5 张图表） |
 | ACP Pipeline 文档 | `docs/vlaw/acp_pipeline.md`（含 v2 五版本训练结果、9 张图表） |
 
@@ -486,6 +523,7 @@ logs/vlaw/               ← 子 Agent RESULT_FILE 输出
 | ADR-043 | **WM v5 诊断 + Bug 分析 (BUG-D/E/F/G/H)**：7 组受控消融实验精确定位根因。BUG-D=**唯一显著根因**（-4.5~-8.5 dB），其余因素（AR误差/steps/history采样/history噪声）均<1 dB。Fix1 (integrate_delta) ❌ 失败。Alpha sweep 证实 α=1.0 (GT) 最优。D_MC 实验证实 AR 误差累积在 30 帧内不是问题。报告：`results/vlaw/wm_diagnostic/DIAGNOSTIC_REPORT.md`、`BUG_D_EXPLAINED.md`。诊断脚本：`scripts/vlaw/diagnostic/wm_diagnostic_battery.py`。 | ✅ 诊断完成，Fix1 ❌ |
 | ADR-045 | **BUG-D Fix2：pd_ee_pose 迁移（消除 WM-Policy 动作空间鸿沟）**：Policy 从 `pd_ee_delta_pose` 切换到 `pd_ee_pose`（绝对位姿 base frame），Imagination 用 `ee_pose_base_to_world()` 加 `[-0.615,0,0]` 转为 world frame。WM 不需重训（action conditioning 来自 state vector）。Demo 转换用自建脚本（ManiSkill replay 不支持此路径）：`scripts/convert_demos_to_ee_pose.py`。Policy 训练用 `ActionNormalizer(minmax)` → [-1,1]。代码修改：`imagination_env.py`（新增 `ee_pose_base_to_world`，废弃 `integrate_delta_to_ee_poses`，替换 2 处调用）、`imagination_rl_env.py`（替换 `np.tile` 为 `ee_pose_base_to_world`）。计划：`.claude/plans/toasty-imagining-moon.md`。 | 🔄 进行中（Step 0/2 ✅，Step 0.5/1/3 待做） |
 | ADR-044 | **ACP v3 数据多样化 + success_at_end 支持**：(1) ManiSkill early-termination 导致 v2 数据 success_once≈success_at_end（0% mismatch），ACP 无法学习"保持"语义。(2) `ignore_terminations=True` 强制 episode 运行到 max_episode_steps。(3) 改用 PLD-SAC s42（SO=100%,SAE=86%）替代 AWSC s42。(4) config 新增 `success_mode` 支持 `success_once`/`success_at_end` 两种标签。v3 数据 mismatch=14.2%（192/1350 条）。v3_so/v3_sae 两版 ACP 训练完成（4000 steps each）。 | ✅ 数据+训练完成 |
+| ADR-046 | **ACP v4 Pipeline 修复 + 通用诊断工具**：基于 v3 内科诊断报告处方。(1) `train_rlpd.py` 新增 early stopping（AWSC 专用）+ SAE-aware `best_sae.pt`；(2) `train_pld.py`/`train_dsrl.py` 新增 SAE checkpoint；(3) `scripts/analyze_training_internals.py` — 通用五维诊断脚本（替代 hardcoded `analyze_rlpd_internals.py`）；(4) `/training-internals` skill 替代旧 `/rlpd-diagnosis`；(5) `scripts/run_acp_v4_experiments.sh` — 4 组实验：AWSC(bc=4/8,scale=500,early_stop) + PLD(gamma=0.7,scale=500) + DSRL(gamma=0.7,scale=500)；(6) v3 PLD/DSRL 失败根因澄清：非 sim reward 泄漏，而是 gamma 过高致 Q-value 暴涨。v4 实验已于 2026-03-16 启动。 | 🔄 v4 实验运行中 |
 
 完整决策记录：`.github/knowledge/decisions.md`（43 条 ADR）
 

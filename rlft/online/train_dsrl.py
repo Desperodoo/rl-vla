@@ -556,6 +556,7 @@ def main():
     obs, _ = train_adapter.reset()
     total_steps = 0
     best_success = 0.0
+    best_success_at_end = 0.0
     ep_rews = defaultdict(float)
     ep_successes: list = []
     training_metrics = defaultdict(list)
@@ -675,7 +676,19 @@ def main():
                     total_steps=total_steps,
                     save_args_json=False,
                 )
-                print(f"  New best! ({sr:.2%})")
+                print(f"  New best SO! ({sr:.2%})")
+
+            sae = eval_met.get("success_at_end", 0)
+            if sae > best_success_at_end:
+                best_success_at_end = sae
+                save_checkpoint(
+                    path=f"{log_dir}/checkpoints/best_sae.pt",
+                    agent=agent,
+                    args=args,
+                    total_steps=total_steps,
+                    save_args_json=False,
+                )
+                print(f"  New best SAE! ({sae:.2%})")
 
         # ---- checkpoint ----
         if total_steps % args.save_freq < train_adapter.num_envs:
@@ -713,10 +726,13 @@ def main():
     writer.close()
 
     if args.track and HAS_WANDB:
-        wandb.log({"final/best_success_rate": best_success})
+        wandb.log({
+            "final/best_success_rate": best_success,
+            "final/best_success_at_end": best_success_at_end,
+        })
         wandb.finish()
 
-    print(f"\nDone. Best success rate: {best_success:.2%}")
+    print(f"\nDone. Best SO: {best_success:.2%}, Best SAE: {best_success_at_end:.2%}")
 
 
 if __name__ == "__main__":

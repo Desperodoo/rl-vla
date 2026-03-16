@@ -1,0 +1,280 @@
+{
+  "dsrl_acp_v3_sae_s42": {
+    "algo": "dsrl",
+    "overall": "B",
+    "dimensions": {
+      "critic": {
+        "grade": "F",
+        "score": 10.0,
+        "evidence": {
+          "q_mean_avg": 57.33,
+          "q_range": 85.7,
+          "critic_loss_final": 79.77,
+          "td_target_std": 14.991
+        }
+      },
+      "actor": {
+        "grade": "A",
+        "score": 100.0,
+        "evidence": {
+          "entropy_min": -9.86,
+          "entropy_final": -1.85
+        }
+      },
+      "exploration": {
+        "grade": "A",
+        "score": 100.0,
+        "evidence": {
+          "temperature_avg": 0.2565,
+          "temperature_final": 0.1866,
+          "entropy_min": -9.86
+        }
+      },
+      "reward": {
+        "grade": "B",
+        "score": 80.0,
+        "evidence": {
+          "q_mean_avg": 57.33
+        }
+      },
+      "advantage": {
+        "grade": "N/A",
+        "score": 100,
+        "evidence": {}
+      }
+    }
+  },
+  "pld_acp_v3_sae_s42": {
+    "algo": "pld",
+    "overall": "B",
+    "dimensions": {
+      "critic": {
+        "grade": "F",
+        "score": 25.0,
+        "evidence": {
+          "q_mean_avg": 23.45,
+          "q_range": 140.4,
+          "critic_loss_final": 24.55,
+          "td_target_std": 14.662
+        }
+      },
+      "actor": {
+        "grade": "B",
+        "score": 70.0,
+        "evidence": {
+          "entropy_min": -77.95,
+          "entropy_final": -3.49
+        }
+      },
+      "exploration": {
+        "grade": "B",
+        "score": 70.0,
+        "evidence": {
+          "temperature_avg": 0.1458,
+          "temperature_final": 0.1655,
+          "entropy_min": -77.95
+        }
+      },
+      "reward": {
+        "grade": "A",
+        "score": 100.0,
+        "evidence": {
+          "q_mean_avg": 23.45
+        }
+      },
+      "advantage": {
+        "grade": "N/A",
+        "score": 100,
+        "evidence": {}
+      }
+    }
+  },
+  "awsc_acp_v3_so_s42": {
+    "algo": "awsc",
+    "overall": "C",
+    "dimensions": {
+      "critic": {
+        "grade": "A",
+        "score": 100.0,
+        "evidence": {
+          "q_mean_avg": 3.83,
+          "q_range": 3.9,
+          "critic_loss_final": 0.17,
+          "td_target_std": 0.038
+        }
+      },
+      "actor": {
+        "grade": "C",
+        "score": 60.0,
+        "evidence": {
+          "flow_loss_first": 0.1223,
+          "flow_loss_last": 0.025,
+          "flow_loss_ratio": 0.204,
+          "so_decline": "81.83%\u219258.15%"
+        }
+      },
+      "exploration": {
+        "grade": "N/A",
+        "score": 100,
+        "evidence": {}
+      },
+      "reward": {
+        "grade": "D",
+        "score": 45.0,
+        "evidence": {
+          "online_cum_reward_avg": 0.0124,
+          "offline_cum_reward_avg": 4.3366,
+          "reward_gap_ratio": 349.5,
+          "acp_step_mean": 0.0001
+        }
+      },
+      "advantage": {
+        "grade": "C",
+        "score": 65.0,
+        "evidence": {
+          "advantage_mean_avg": 0.98,
+          "weight_max_peak": 23.2
+        }
+      }
+    }
+  },
+  "awsc_acp_v3_sae_s42": {
+    "algo": "awsc",
+    "overall": "B",
+    "dimensions": {
+      "critic": {
+        "grade": "A",
+        "score": 100.0,
+        "evidence": {
+          "q_mean_avg": 3.83,
+          "q_range": 3.9,
+          "critic_loss_final": 0.13,
+          "td_target_std": 0.038
+        }
+      },
+      "actor": {
+        "grade": "C",
+        "score": 60.0,
+        "evidence": {
+          "flow_loss_first": 0.1184,
+          "flow_loss_last": 0.0254,
+          "flow_loss_ratio": 0.215,
+          "so_decline": "81.00%\u219258.31%"
+        }
+      },
+      "exploration": {
+        "grade": "N/A",
+        "score": 100,
+        "evidence": {}
+      },
+      "reward": {
+        "grade": "C",
+        "score": 65.0,
+        "evidence": {
+          "online_cum_reward_avg": 0.0483,
+          "offline_cum_reward_avg": 4.3366,
+          "reward_gap_ratio": 89.8,
+          "acp_step_mean": 0.0002
+        }
+      },
+      "advantage": {
+        "grade": "C",
+        "score": 65.0,
+        "evidence": {
+          "advantage_mean_avg": 0.938,
+          "weight_max_peak": 32.8
+        }
+      }
+    }
+  },
+  "dsrl_acp_v3_so_s42": {
+    "algo": "dsrl",
+    "overall": "B",
+    "dimensions": {
+      "critic": {
+        "grade": "F",
+        "score": 10.0,
+        "evidence": {
+          "q_mean_avg": 26.94,
+          "q_range": 76.0,
+          "critic_loss_final": 132.1,
+          "td_target_std": 11.761
+        }
+      },
+      "actor": {
+        "grade": "A",
+        "score": 100.0,
+        "evidence": {
+          "entropy_min": -23.62,
+          "entropy_final": 0.74
+        }
+      },
+      "exploration": {
+        "grade": "A",
+        "score": 100.0,
+        "evidence": {
+          "temperature_avg": 0.3217,
+          "temperature_final": 0.3104,
+          "entropy_min": -23.62
+        }
+      },
+      "reward": {
+        "grade": "A",
+        "score": 100.0,
+        "evidence": {
+          "q_mean_avg": 26.94
+        }
+      },
+      "advantage": {
+        "grade": "N/A",
+        "score": 100,
+        "evidence": {}
+      }
+    }
+  },
+  "pld_acp_v3_so_s42": {
+    "algo": "pld",
+    "overall": "B",
+    "dimensions": {
+      "critic": {
+        "grade": "F",
+        "score": 10.0,
+        "evidence": {
+          "q_mean_avg": 11.36,
+          "q_range": 114.3,
+          "critic_loss_final": 59.32,
+          "td_target_std": 10.849
+        }
+      },
+      "actor": {
+        "grade": "B",
+        "score": 70.0,
+        "evidence": {
+          "entropy_min": -105.03,
+          "entropy_final": -3.1
+        }
+      },
+      "exploration": {
+        "grade": "B",
+        "score": 70.0,
+        "evidence": {
+          "temperature_avg": 0.2492,
+          "temperature_final": 0.2532,
+          "entropy_min": -105.03
+        }
+      },
+      "reward": {
+        "grade": "A",
+        "score": 100.0,
+        "evidence": {
+          "q_mean_avg": 11.36
+        }
+      },
+      "advantage": {
+        "grade": "N/A",
+        "score": 100,
+        "evidence": {}
+      }
+    }
+  }
+}
