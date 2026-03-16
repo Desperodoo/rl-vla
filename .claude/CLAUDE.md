@@ -44,26 +44,54 @@
 
 **Fix1 验证 (2026-03-14) — ❌ 失败**：`integrate_delta_to_ee_poses()` 将 policy delta 积分为绝对 EE pose。失败原因：PD 控制器使 raw delta ≠ 实际 EE 位移，积分 5 帧后累积误差超出 WM 训练分布。Fix1 输出比 tiled 更差。
 
-**Fix2 方案 (ADR-045, 2026-03-15) — 🔄 进行中**：将 Policy action space 从 `pd_ee_delta_pose` 切换到 `pd_ee_pose`。Policy 直接输出绝对 EE 位姿（robot base frame），Imagination 只需加上 robot root offset `[-0.615, 0, 0]` 即可对齐 WM 的 world frame。WM 不需要重训（action conditioning 来自 state vector，与 control_mode 无关）。
+**Fix2 方案 (ADR-045, 2026-03-15~16) — ❌ 方案失败，需重新设计**：将 Policy action space 从 `pd_ee_delta_pose` 切换到 `pd_ee_pose`。Policy 直接输出绝对 EE 位姿（robot base frame），Imagination 只需加上 robot root offset `[-0.615, 0, 0]` 即可对齐 WM 的 world frame。WM 不需要重训（action conditioning 来自 state vector，与 control_mode 无关）。
 
 Fix2 进度：
 
 | Step | 内容 | 状态 |
 |------|------|------|
-| Step 0 | pd_ee_pose demo 转换 | ✅ 完成（669 traj, 27951 frames, 100% success） |
-| Step 0.5 | 生成带 RGB obs 的 demo（policy 训练需要） | ⏳ 待做 |
-| Step 1 | 训练 ShortCut Flow IL policy（pd_ee_pose + minmax normalizer） | ⏳ 待做 |
+| Step 0 | pd_ee_pose demo 转换 | ❌ **Demo 无效**（见下方根因分析） |
+| Step 0.5 | 生成带 RGB obs 的 demo + euler_rx unwrap | ✅ 完成（669 traj, 27951 frames, 但基于无效 demo） |
+| Step 1 | 训练 ShortCut Flow IL policy | ❌ 两轮训练均 0% 成功率 |
 | Step 2 | Imagination loop 代码修改（`ee_pose_base_to_world`） | ✅ 完成 |
-| Step 3 | Imagination PSNR 验证 | ⏳ 待做 |
+| Step 3 | Imagination PSNR 验证 | ⛔ 被 Step 1 阻塞 |
 
-**Step 0 详情**：ManiSkill `replay_trajectory` 不支持 ee_delta_pose→ee_pose 转换（3 种尝试均失败）。自建转换脚本 `scripts/convert_demos_to_ee_pose.py`：从 HDF5 env_states 恢复仿真状态 → 读取 base frame EE pose → action[t] = EE_pose(state[t+1])。输出：`~/.maniskill/demos/LiftPegUpright-v1/rl/trajectory.none.pd_ee_pose.physx_cpu.h5`（669 traj, 27951 frames）。Action 值域：tcp_x [0.40, 0.67], tcp_z [0.01, 0.25], euler_rx ±π, gripper [-1, 1]。
+**Step 0 根因分析 (2026-03-16) — ❌ Demo 转换方案根本性缺陷**：
 
-**Step 2 详情**：`imagination_env.py` 新增 `ee_pose_base_to_world()` 函数（`ROBOT_ROOT_POS=[-0.615, 0, 0]`，仅平移位置维度），替换 `_run_rollout_in_env()` 和 `_batch_rollout_in_env()` 中已废弃的 `integrate_delta_to_ee_poses()` 调用。`imagination_rl_env.py` 同步替换 `np.tile(current_ee, ...)` 为 `ee_pose_base_to_world(action_chunk)`。
+`convert_demos_to_ee_pose.py` 的方案 `action[t] = EE_pose(state[t+1])` **在物理层面上就不可行**：
+
+1. **PD 控制器不会在 1 步内到达目标**：pd_ee_pose 使用 PD 控制器（stiffness=1000, damping=100），给定目标 1cm 远需要 ~5 步才收敛。因此 `target[t] = position[t+1]` 时，实际到达位置 = `position[t] + 0.4*(position[t+1]-position[t])`（约 40% 衰减系数），轨迹严重滞后。
+2. **Demo replay 验证**：用 `set_state_dict()` 恢复 traj_0 初始状态后，用 demo actions 重放 — **0/20 轨迹成功**，pos_err 从 0.019 累积到 0.059。
+3. **Euler angle 误差更严重**：euler_err 从第 1 步起就高达 6.3（≈ 2π），原因是 `scipy.Rotation.as_euler('xyz')` 返回 [-π, π] 但 unwrap 后变为 [0, 2π]，PD 控制器按最短路径旋转时被误导。
+4. **ManiSkill 官方确认**：`replay_trajectory.py` 第 308-310 行明确声明 "Cannot use env states when trying to convert from one control mode to another. This is because control mode conversion causes there to be changes in how many actions are taken to achieve the same states"。
+
+**两轮 IL 训练尝试详情**：
+
+| Run | wandb | Steps | Loss | Success Rate | 失败原因 |
+|-----|-------|-------|------|-------------|---------|
+| il_shortcut_flow_pd_ee_pose_s42 | u1b7d3fa | 175K | 0.013 | **0%** | euler_rx ±π 双峰分布 + demo 无效 |
+| il_shortcut_flow_pd_ee_pose_unwrap_s42 | riv6riu7 | 175K | 0.013 | **0%** | demo 本身无效（见上方根因分析） |
+
+euler_rx 双峰问题（已修复但不影响结论）：653/669 轨迹（97.6%）的 euler_rx 存在 ±π 大跳变（44% 近 -π，56% 近 +π）。Flow Matching 平均两模态 → 预测 euler_rx ≈ 0（完全错误）。修复：负值 += 2π 映射到 [0, 2π] 单峰分布。已 commit (8ad4b2a)。但由于 demo 根本无效，修复 euler 后仍 0% 成功率。
+
+**Step 0.5 详情**：新建 `scripts/generate_rgb_demos_ee_pose.py`，从 `trajectory.none.pd_ee_pose.physx_cpu.h5` 重放 env_states 获取 RGB obs。输出：`trajectory.rgb.pd_ee_pose.physx_cpu.h5`（669 traj, 27951 frames, 1357.6 MB, 73秒生成）。内含 euler_rx unwrap（负→+2π）。但底层 demo 无效，RGB obs 只是原始 delta_pose 轨迹的快照，不对应 pd_ee_pose 的实际动态。
+
+**Step 2 详情**：`imagination_env.py` 新增 `ee_pose_base_to_world()` 函数（`ROBOT_ROOT_POS=[-0.615, 0, 0]`，仅平移位置维度 + euler re-wrap [-π,π]），替换 `_run_rollout_in_env()` 和 `_batch_rollout_in_env()` 中已废弃的 `integrate_delta_to_ee_poses()` 调用。`imagination_rl_env.py` 同步替换 `np.tile(current_ee, ...)` 为 `ee_pose_base_to_world(action_chunk)`。**代码逻辑正确，但依赖 Step 1 提供有效策略。**
+
+**BUG-D Fix2 失败后的可选方向**：
+
+| 方向 | 描述 | 可行性 |
+|------|------|--------|
+| **A: pd_joint_delta_pos → pd_ee_pose 两步转换** | ManiSkill 支持 `pd_joint_pos → pd_ee_pose`（`from_pd_joint_pos_to_ee`）。现有 `trajectory.none.pd_joint_delta_pos.physx_cuda.h5`（993 traj）。路径：pd_joint_delta_pos → pd_joint_pos → pd_ee_pose。但 pd_joint_delta_pos→pd_joint_pos 转换需验证。 | ⚠️ 需验证 |
+| **B: 直接用 motion planning 生成 pd_ee_pose demo** | 用 ManiSkill 的 motion planner 在 pd_ee_pose 控制模式下从头生成 demo，跳过转换。 | ⚠️ 需确认 MP 是否支持 pd_ee_pose |
+| **C: 放弃 pd_ee_pose，改善 Imagination 的 action 方案** | 不改变 policy action space，在 Imagination 中用 sim env 跑 1 步 delta pose 获取真实 EE pose（1-step sim-in-loop）。牺牲速度但保证精度。 | ✅ 最可靠 |
+| **D: 训练 delta→ee 转换网络** | 训练小 MLP 把 (current_state, delta_action) 映射到 next_ee_pose。需收集训练数据对。 | ⚠️ 间接方案 |
 
 **pd_ee_pose 关键技术细节**：
 - 7D: `[target_xyz, euler_xyz, gripper]`，robot base frame（非 world frame）
 - `normalize_action=False`，unbounded action space（arm 维度 NaN bounds，gripper [-1,1]）
 - Robot root: `[-0.615, 0, 0]`，identity rotation → world_pos = base_pos + root_pos，euler 不变
+- PD 控制器特性（stiffness=1000, damping=100）：1cm 目标需 ~5 步收敛，不适合 1-step action 转换
 - 训练时用 `ActionNormalizer(minmax)` 映射到 [-1,1]，与 `ShortCutFlow.action_bounds=(-1,1)` 兼容
 - `CtrlWorldAdapter.rollout()` 内部用 stat.json 的 world frame percentiles 归一化 → 传入 world frame EE 即可
 
@@ -477,7 +505,10 @@ logs/vlaw/               ← 子 Agent RESULT_FILE 输出
 | BUG-D 深度解析 | `results/vlaw/wm_diagnostic/BUG_D_EXPLAINED.md` |
 | WM 诊断脚本 | `scripts/vlaw/diagnostic/wm_diagnostic_battery.py` |
 | pd_ee_pose Demo 转换脚本 | `scripts/convert_demos_to_ee_pose.py` |
-| pd_ee_pose Demo（无 obs） | `~/.maniskill/demos/LiftPegUpright-v1/rl/trajectory.none.pd_ee_pose.physx_cpu.h5` (669 traj, 27951 frames) |
+| pd_ee_pose RGB Demo 生成脚本 | `scripts/generate_rgb_demos_ee_pose.py` |
+| pd_ee_pose Demo（无 obs，❌ 无效） | `~/.maniskill/demos/LiftPegUpright-v1/rl/trajectory.none.pd_ee_pose.physx_cpu.h5` (669 traj, 27951 frames, demo replay 0% 成功) |
+| pd_ee_pose Demo（RGB obs，❌ 无效） | `~/.maniskill/demos/LiftPegUpright-v1/rl/trajectory.rgb.pd_ee_pose.physx_cpu.h5` (669 traj, 27951 frames, 1357.6 MB, 基于无效 demo) |
+| pd_joint_delta_pos Demo | `~/.maniskill/demos/LiftPegUpright-v1/rl/trajectory.none.pd_joint_delta_pos.physx_cuda.h5` (993 traj, 可能可用于方向 A 转换) |
 | ACP v3 内科诊断报告 | `docs/vlaw/figures/rlpd_acp_v3_internals/diagnosis_report.md`（由 analyze_training_internals.py 生成） |
 | ACP v3 分析报告 | `docs/vlaw/acp_v3_at_end_report.md`（v2 vs v3 对比，5 张图表） |
 | ACP Pipeline 文档 | `docs/vlaw/acp_pipeline.md`（含 v2 五版本训练结果、9 张图表） |
@@ -521,7 +552,7 @@ logs/vlaw/               ← 子 Agent RESULT_FILE 输出
 | ADR-042 | **AWSC+ACP Sweep v2（数据驱动）**：基于 wandb 分析诊断（`fetch_wandb.py` 拉取 wa52z9ce 训练数据），发现 ACP mirror AWSC 3 个核心问题：(1) online_cum_reward=0.05 vs offline=4.34（87x gap，critic 被 demo 信号主导）；(2) success_once 后期退化 0.82→0.60（BC 锚定不足）；(3) advantage_mean≈0.8 正偏高。扫描 3 轴：A 放大 ACP 信号（scale 500-2000, online_ratio 0.3-0.5），B 防遗忘（bc_weight 4-8），C 缩短信用分配（gamma 0.5-0.7）。15 configs，仅 AWSC（PLD/DSRL 暂停）。入口：`scripts/sweep_acp/sweep.sh`。分析工具：`scripts/sweep_acp/fetch_wandb.py`。 | 🔄 运行中 |
 
 | ADR-043 | **WM v5 诊断 + Bug 分析 (BUG-D/E/F/G/H)**：7 组受控消融实验精确定位根因。BUG-D=**唯一显著根因**（-4.5~-8.5 dB），其余因素（AR误差/steps/history采样/history噪声）均<1 dB。Fix1 (integrate_delta) ❌ 失败。Alpha sweep 证实 α=1.0 (GT) 最优。D_MC 实验证实 AR 误差累积在 30 帧内不是问题。报告：`results/vlaw/wm_diagnostic/DIAGNOSTIC_REPORT.md`、`BUG_D_EXPLAINED.md`。诊断脚本：`scripts/vlaw/diagnostic/wm_diagnostic_battery.py`。 | ✅ 诊断完成，Fix1 ❌ |
-| ADR-045 | **BUG-D Fix2：pd_ee_pose 迁移（消除 WM-Policy 动作空间鸿沟）**：Policy 从 `pd_ee_delta_pose` 切换到 `pd_ee_pose`（绝对位姿 base frame），Imagination 用 `ee_pose_base_to_world()` 加 `[-0.615,0,0]` 转为 world frame。WM 不需重训（action conditioning 来自 state vector）。Demo 转换用自建脚本（ManiSkill replay 不支持此路径）：`scripts/convert_demos_to_ee_pose.py`。Policy 训练用 `ActionNormalizer(minmax)` → [-1,1]。代码修改：`imagination_env.py`（新增 `ee_pose_base_to_world`，废弃 `integrate_delta_to_ee_poses`，替换 2 处调用）、`imagination_rl_env.py`（替换 `np.tile` 为 `ee_pose_base_to_world`）。计划：`.claude/plans/toasty-imagining-moon.md`。 | 🔄 进行中（Step 0/2 ✅，Step 0.5/1/3 待做） |
+| ADR-045 | **BUG-D Fix2：pd_ee_pose 迁移（消除 WM-Policy 动作空间鸿沟）— ❌ 方案失败**：根本原因：pd_ee_pose PD 控制器不会在 1 步内到达目标（stiffness=1000, 1cm 需 ~5 步收敛），从 delta_pose 轨迹 env_states 提取 `action[t]=EE(state[t+1])` 的转换方式产生持续滞后；demo replay 0/20 成功。euler_rx 2π 偏移进一步恶化（控制器收到 3.15 但实际需 -3.13）。ManiSkill 官方也声明不支持 env_states + 控制模式转换。两轮 IL 训练均 0% 成功。Imagination loop 代码修改（`ee_pose_base_to_world`）逻辑正确但被阻塞。需要新方案：方向 A（pd_joint_delta_pos → pd_ee_pose 两步转换）/ 方向 B（motion planner 直接生成）/ 方向 C（1-step sim-in-loop）/ 方向 D（delta→ee MLP）。 | ❌ 方案失败，需重新设计 |
 | ADR-044 | **ACP v3 数据多样化 + success_at_end 支持**：(1) ManiSkill early-termination 导致 v2 数据 success_once≈success_at_end（0% mismatch），ACP 无法学习"保持"语义。(2) `ignore_terminations=True` 强制 episode 运行到 max_episode_steps。(3) 改用 PLD-SAC s42（SO=100%,SAE=86%）替代 AWSC s42。(4) config 新增 `success_mode` 支持 `success_once`/`success_at_end` 两种标签。v3 数据 mismatch=14.2%（192/1350 条）。v3_so/v3_sae 两版 ACP 训练完成（4000 steps each）。 | ✅ 数据+训练完成 |
 | ADR-046 | **ACP v4 Pipeline 修复 + 通用诊断工具**：基于 v3 内科诊断报告处方。(1) `train_rlpd.py` 新增 early stopping（AWSC 专用）+ SAE-aware `best_sae.pt`；(2) `train_pld.py`/`train_dsrl.py` 新增 SAE checkpoint；(3) `scripts/analyze_training_internals.py` — 通用五维诊断脚本（替代 hardcoded `analyze_rlpd_internals.py`）；(4) `/training-internals` skill 替代旧 `/rlpd-diagnosis`；(5) `scripts/run_acp_v4_experiments.sh` — 4 组实验：AWSC(bc=4/8,scale=500,early_stop) + PLD(gamma=0.7,scale=500) + DSRL(gamma=0.7,scale=500)；(6) v3 PLD/DSRL 失败根因澄清：非 sim reward 泄漏，而是 gamma 过高致 Q-value 暴涨。v4 实验已于 2026-03-16 启动。 | 🔄 v4 实验运行中 |
 
