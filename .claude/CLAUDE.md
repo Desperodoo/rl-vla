@@ -292,9 +292,9 @@ Early stopping 参数（AWSC 专用）：`--early_stop --early_stop_patience 5 -
 
 v4 结果对比报告：`docs/vlaw/acp_v4_rlpd_report.md`（图文并茂，6 张图表）
 
-**ACP v5 Sweep（2026-03-16）— 🔄 Wave 1 运行中**：
+**ACP v5 Sweep（2026-03-16~17）— ✅ 全部完成**：
 
-基于 v4 二次分析，15 组实验（5 AWSC + 5 PLD + 5 DSRL）。入口：`scripts/run_acp_v5_sweep.sh`。WandB project: `rlpd-acp-v5`。
+基于 v4 二次分析，15 组实验（5 AWSC + 5 PLD + 5 DSRL）。入口：`scripts/run_acp_v5_sweep.sh` + `scripts/acp_v5_scheduler.py`。WandB project: `rlpd-acp-v5`。
 
 核心创新：
 1. **Q-target clipping**（PLD/DSRL 新增 clip=20，对齐 AWSC 保护机制）
@@ -303,27 +303,19 @@ v4 结果对比报告：`docs/vlaw/acp_v4_rlpd_report.md`（图文并茂，6 张
 4. **scale 保持 100 不变**（不与 gamma 修复交叉干扰）
 5. **v3_sae checkpoint** 对比 v3_so
 
-| # | 实验名 | 算法 | shaping | gamma | q_clip | r_clip | ckpt | 状态 |
-|---|--------|------|---------|-------|--------|--------|------|------|
-| 1 | awsc_v_reward | AWSC | potential | 0.9 | — | — | v3_so | ⏳ Wave 3 |
-| 2 | awsc_v_reward_sae | AWSC | potential | 0.9 | — | — | v3_sae | ⏳ Wave 3 |
-| 3 | awsc_td_sae | AWSC | td | 0.9 | — | — | v3_sae | ⏳ Wave 3 |
-| 4 | awsc_td_clip | AWSC | td | 0.9 | — | 5 | v3_so | ⏳ Wave 3 |
-| 5 | awsc_v4_repro | AWSC | td | 0.9 | — | — | v3_so | ⏳ Wave 3 |
-| 6 | pld_stable_g05 | PLD | td | 0.5 | 20 | 5 | v3_so | 🔄 运行中 |
-| 7 | pld_stable_g03 | PLD | td | 0.3 | 20 | 5 | v3_so | 🔄 运行中 |
-| 8 | pld_v_reward_g05 | PLD | potential | 0.5 | 20 | — | v3_so | 🔄 运行中 |
-| 9 | pld_v_reward_sae | PLD | potential | 0.5 | 20 | — | v3_sae | 🔄 运行中 |
-| 10 | pld_baseline_g07 | PLD | td | 0.7 | 20 | — | v3_so | 🔄 运行中 |
-| 11 | dsrl_stable_g05 | DSRL | td | 0.5 | 20 | 5 | v3_so | ⏳ Wave 2 |
-| 12 | dsrl_stable_g03 | DSRL | td | 0.3 | 20 | 5 | v3_so | ⏳ Wave 2 |
-| 13 | dsrl_v_reward_g05 | DSRL | potential | 0.5 | 20 | — | v3_so | ⏳ Wave 2 |
-| 14 | dsrl_v_reward_sae | DSRL | potential | 0.5 | 20 | — | v3_sae | ⏳ Wave 2 |
-| 15 | dsrl_baseline_g07 | DSRL | td | 0.7 | 20 | — | v3_so | ⏳ Wave 2 |
+v5 关键结果：
 
-PIDs（Wave 1）：4013427/4013428/4013429/4013430/4013431
-Logs: `logs/vlaw/acp_v5_pld_*.log`
-Monitor: `bash scripts/run_acp_v5_sweep.sh --status`
+| 指标 | v4 最佳 | v5 最佳 | 来源 |
+|------|---------|---------|------|
+| **Best SO** | 90% | **96%** (awsc_v_reward, dsrl_v_reward_sae) | Potential reward |
+| **Best SAE** | 66% | **70%** (awsc_td_clip) | Reward clipping |
+| **PLD/DSRL critic** | loss=800-1900 | **loss<40** | Q-clip + lower gamma |
+| **Final SO 稳定性** | 80% | **92%** (pld_v_reward_sae) | Potential reward + q_clip |
+
+**AWSC track 已归档**：最佳配置 `awsc_td_clip`（td, scale=100, r_clip=5, bc=4, early_stop）→ SAE=70%。默认参数已更新到 pipeline 代码中。
+
+详细报告：`docs/vlaw/acp_v5_rlpd_report.md`（图文并茂，6 张图表）
+五维诊断报告：`docs/vlaw/figures/rlpd-acp-v5_internals/diagnosis_report.md`
 
 **代码修改（v5 新增）**：
 - `rlft/envs/acp_reward_wrapper.py`：新增 `reward_shaping` (td/potential) + `reward_clip` 字段
@@ -333,15 +325,38 @@ Monitor: `bash scripts/run_acp_v5_sweep.sh --status`
 - `rlft/online/train_dsrl.py`：同上
 - `rlft/online/train_rlpd.py`：新增 `acp_reward_shaping`/`acp_reward_clip`
 
+**ACP v6 Sweep（2026-03-17）— 🔄 准备启动**：
+
+基于 v5 分析，PLD/DSRL SAE 瓶颈的根因是 ACP value 无法编码"保持"语义。v6 核心创新：**显式 grasp bonus** `r += c * is_grasping`（ManiSkill `agent.is_grasping(peg)` API）。
+
+10 组实验（5 PLD + 5 DSRL），入口：`scripts/acp_v6_scheduler.py`。WandB project: `rlpd-acp-v6`。
+
+| # | 实验名 | 算法 | shaping | grasp | gamma | 其他 |
+|---|--------|------|---------|-------|-------|------|
+| 1 | pld_grasp1_td | PLD | td | 1.0 | 0.5 | r_clip=5 |
+| 2 | pld_grasp2_td | PLD | td | 2.0 | 0.5 | r_clip=5 |
+| 3 | pld_grasp5_td | PLD | td | 5.0 | 0.5 | r_clip=5 |
+| 4 | pld_grasp1_pot | PLD | potential | 1.0 | 0.5 | — |
+| 5 | pld_entropy_grasp | PLD | td | 1.0 | 0.5 | target_ent=-2, init_temp=1.0 |
+| 6 | dsrl_grasp1_td | DSRL | td | 1.0 | 0.5 | r_clip=5 |
+| 7 | dsrl_grasp2_td | DSRL | td | 2.0 | 0.5 | r_clip=5 |
+| 8 | dsrl_grasp5_td | DSRL | td | 5.0 | 0.5 | r_clip=5 |
+| 9 | dsrl_grasp1_pot | DSRL | potential | 1.0 | 0.5 | — |
+| 10 | dsrl_long_grasp | DSRL | td | 1.0 | 0.5 | total=200K |
+
+所有配置固定：q_target_clip=20, acp_ckpt=v3_so, scale=100(td)/5(pot)
+
+**代码修改（v6 新增）**：
+- `rlft/envs/acp_reward_wrapper.py`：新增 `grasp_bonus` 字段 + `DualCameraRewardWrapper.step()` 中 `agent.is_grasping()` 调用
+- `rlft/online/train_pld.py`：新增 `acp_grasp_bonus` 参数，默认值更新（acp_ckpt→v3_so, q_clip→20, r_clip→5）
+- `rlft/online/train_dsrl.py`：同上
+- `rlft/online/train_rlpd.py`：AWSC 默认值归档（acp_ckpt→v3_so, bc_weight→4.0, r_clip→5.0）
+
 **新设备 GPU 分配（当前）**：
 
 | GPU | 任务 | 状态 |
 |-----|------|------|
-| 0+1 | PLD v5 #6: td+gamma=0.5+q_clip=20+r_clip=5 (71K) | 🔄 运行中 |
-| 2+3 | PLD v5 #7: td+gamma=0.3+q_clip=20+r_clip=5 (71K) | 🔄 运行中 |
-| 4+5 | PLD v5 #8: potential+gamma=0.5+q_clip=20 (71K) | 🔄 运行中 |
-| 6+7 | PLD v5 #9: potential+gamma=0.5+q_clip=20+v3_sae (71K) | 🔄 运行中 |
-| 8+9 | PLD v5 #10: td+gamma=0.7+q_clip=20 (71K) | 🔄 运行中 |
+| 0-9 | v6 Grasp Bonus Sweep（10 configs，acp_v6_scheduler.py 调度） | ⏳ 待启动 |
 
 **AWSC+ACP Sweep v2（2026-03-12）— 运行中**：
 
@@ -585,7 +600,8 @@ logs/vlaw/               ← 子 Agent RESULT_FILE 输出
 | ADR-045 | **BUG-D Fix2：pd_ee_pose 迁移（消除 WM-Policy 动作空间鸿沟）— ❌ 方案失败**：根本原因：pd_ee_pose PD 控制器不会在 1 步内到达目标（stiffness=1000, 1cm 需 ~5 步收敛），从 delta_pose 轨迹 env_states 提取 `action[t]=EE(state[t+1])` 的转换方式产生持续滞后；demo replay 0/20 成功。euler_rx 2π 偏移进一步恶化（控制器收到 3.15 但实际需 -3.13）。ManiSkill 官方也声明不支持 env_states + 控制模式转换。两轮 IL 训练均 0% 成功。Imagination loop 代码修改（`ee_pose_base_to_world`）逻辑正确但被阻塞。需要新方案：方向 A（pd_joint_delta_pos → pd_ee_pose 两步转换）/ 方向 B（motion planner 直接生成）/ 方向 C（1-step sim-in-loop）/ 方向 D（delta→ee MLP）。 | ❌ 方案失败，需重新设计 |
 | ADR-044 | **ACP v3 数据多样化 + success_at_end 支持**：(1) ManiSkill early-termination 导致 v2 数据 success_once≈success_at_end（0% mismatch），ACP 无法学习"保持"语义。(2) `ignore_terminations=True` 强制 episode 运行到 max_episode_steps。(3) 改用 PLD-SAC s42（SO=100%,SAE=86%）替代 AWSC s42。(4) config 新增 `success_mode` 支持 `success_once`/`success_at_end` 两种标签。v3 数据 mismatch=14.2%（192/1350 条）。v3_so/v3_sae 两版 ACP 训练完成（4000 steps each）。 | ✅ 数据+训练完成 |
 | ADR-046 | **ACP v4 Pipeline 修复 + 通用诊断工具**：基于 v3 内科诊断报告处方。(1) `train_rlpd.py` 新增 early stopping（AWSC 专用）+ SAE-aware `best_sae.pt`；(2) `train_pld.py`/`train_dsrl.py` 新增 SAE checkpoint；(3) `scripts/analyze_training_internals.py` — 通用五维诊断脚本；(4) `/training-internals` skill；(5) `scripts/run_acp_v4_experiments.sh` — 4 组实验。v4 结果：AWSC 稳定（critic_loss=4.0, Q_mean=3.9）但 PLD/DSRL critic 仍爆炸（critic_loss=800/1904）。根因：gamma↓+scale↑ 自相矛盾 + 缺 Q-target clipping。 | ✅ 完成，结果→ADR-047 |
-| ADR-047 | **ACP v5 Sweep：Critic 稳定化 + Potential Reward**（2026-03-16）：基于 v4 二次分析设计 15 组 sweep（5 AWSC + 5 PLD + 5 DSRL）。核心修复：(1) PLD/DSRL 新增 `q_target_clip=20`（对齐 AWSC clip=100）；(2) `reward_shaping=potential`: `r=V(s')*scale`（解决"保持"状态信号缺失）；(3) `reward_clip=5`（限幅异常 TD）；(4) scale 保持 100（不再与 gamma 修复冲突）；(5) v3_sae checkpoint 测试。代码新增：`acp_reward_wrapper.py` reward_shaping/reward_clip，`pld_sac.py`/`dsrl_sac.py` q_target_clip，三个训练脚本同步支持。Wave 1（PLD #6-10）已于 2026-03-16 启动。 | 🔄 Wave 1 运行中 |
+| ADR-047 | **ACP v5 Sweep：Critic 稳定化 + Potential Reward**（2026-03-16~17）：15 组 sweep 全部完成。关键结果：(1) Q-target clipping 彻底修复 PLD/DSRL critic（loss 800-1900→3-40）；(2) Potential reward 提升 SO 到 96%（历史新高）；(3) Reward clipping 提升 AWSC SAE 到 70%（历史新高）；(4) v3_sae checkpoint 无显著优势；(5) PLD/DSRL SAE 仍≤8%（结构性瓶颈：无 BC 锚定+ACP value 无"hold"语义）。AWSC track 已归档，最佳配置 `awsc_td_clip` 已写入 pipeline 默认值。报告：`docs/vlaw/acp_v5_rlpd_report.md`。 | ✅ 完成，AWSC 归档 |
+| ADR-048 | **ACP v6 Sweep：Grasp Bonus + PLD/DSRL SAE 突破**（2026-03-17）：基于 v5 分析，PLD/DSRL SAE≤8% 的根因是 ACP value 无法区分"holding"与"about to drop"。核心创新：(1) 显式 `grasp_bonus` 字段（`r += c * is_grasping`，ManiSkill `agent.is_grasping(peg)` API）；(2) PLD entropy 修复（target_entropy=-2.0, init_temp=1.0 解决 entropy_min=-55 collapse）；(3) DSRL 200K 长训练测试。代码新增：`acp_reward_wrapper.py` grasp_bonus，`train_pld.py`/`train_dsrl.py` acp_grasp_bonus。Pipeline 默认值更新：acp_ckpt→v3_so, q_clip→20, r_clip→5, bc_weight→4.0。调度器：`scripts/acp_v6_scheduler.py`（10 configs）。 | 🔄 准备启动 |
 
 完整决策记录：`.github/knowledge/decisions.md`（45 条 ADR）
 

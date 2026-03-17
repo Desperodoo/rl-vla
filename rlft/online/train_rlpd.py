@@ -141,9 +141,9 @@ class Args:
     awsc_beta: float = 50.0
     """Temperature for advantage weighting. Sweep v2-v4: beta=50 most robust.
     Higher beta (80+) needs accurate Q-values and amplifies noise with low K."""
-    awsc_bc_weight: float = 2.0
-    """Weight for flow matching loss. Sweep v2: bc=2.0 critical for stability
-    by anchoring actor near pretrained policy."""
+    awsc_bc_weight: float = 4.0
+    """Weight for flow matching loss. v4/v5 validated: bc=4.0 optimal
+    (slight improvement over bc=2.0, significant over bc=8.0)."""
     awsc_shortcut_weight: float = 0.3
     """Weight for shortcut consistency loss"""
     awsc_self_consistency_k: float = 0.25
@@ -218,15 +218,17 @@ class Args:
     - 'sim': ManiSkill dense reward (default, no behavior change)
     - 'acp': ACP value model TD reward r(s,s') = (V(s')-V(s))*scale
     - 'acp_blend': weighted blend of ACP + sim reward"""
-    acp_checkpoint: str = "checkpoints/vlaw/acp/iter1/best.safetensors"
-    """ACP value model checkpoint path (only used when reward_mode != 'sim')"""
+    acp_checkpoint: str = "checkpoints/vlaw/acp/v3_so/best.safetensors"
+    """ACP value model checkpoint path (only used when reward_mode != 'sim').
+    v5 validated: v3_so is the best ACP checkpoint for RLPD."""
     acp_reward_scale: float = 100.0
     """Scale factor for ACP TD rewards. V values are in [-1,0], diffs are O(0.01),
     so scale ~100 brings rewards to O(1.0) comparable to sim dense reward."""
     acp_reward_shaping: str = "td"
     """ACP reward shaping: 'td' = V(s')-V(s), 'potential' = V(s')."""
-    acp_reward_clip: float = 0.0
-    """Clip ACP reward to [-clip, +clip]. 0 = no clipping."""
+    acp_reward_clip: float = 5.0
+    """Clip ACP reward to [-clip, +clip]. 0 = no clipping.
+    v5 validated: clip=5 yields SAE=70% (best AWSC config)."""
     acp_blend_weight: float = 0.5
     """Weight for ACP reward in blend mode: total = w*r_acp + (1-w)*r_sim"""
     acp_device: Optional[str] = None

@@ -176,22 +176,27 @@ class Args:
     # ----- ACP reward mode -----
     acp_reward: bool = False
     """Replace sim dense reward with ACP reward."""
-    acp_checkpoint: str = "checkpoints/vlaw/acp/v2_combined/best.safetensors"
+    acp_checkpoint: str = "checkpoints/vlaw/acp/v3_so/best.safetensors"
     """ACP value model checkpoint (safetensors format)."""
     acp_reward_scale: float = 100.0
     """Scale for ACP rewards."""
     acp_reward_shaping: str = "td"
     """ACP reward shaping: 'td' = V(s')-V(s), 'potential' = V(s')."""
-    acp_reward_clip: float = 0.0
-    """Clip ACP reward to [-clip, +clip]. 0 = no clipping."""
+    acp_reward_clip: float = 5.0
+    """Clip ACP reward to [-clip, +clip]. 0 = no clipping.
+    v5 validated: clip=5 prevents TD outliers from destabilizing critic."""
+    acp_grasp_bonus: float = 0.0
+    """Per-step bonus when gripper is grasping the object. 0=disabled.
+    Recommended: 1.0-5.0 for SAE improvement. Requires ManiSkill env with is_grasping() API."""
     acp_device: Optional[str] = None
     """Device for ACP model. Defaults to cuda:1."""
     acp_task_instruction: str = "Pick up the peg and lift it upright."
     """Task instruction for the ACP Gemma encoder."""
 
     # ----- critic stabilization -----
-    q_target_clip: float = 0.0
-    """Clip TD target to [-clip, +clip]. 0 = no clipping. Stabilizes critic."""
+    q_target_clip: float = 20.0
+    """Clip TD target to [-clip, +clip]. 0 = no clipping.
+    v5 validated: clip=20 fixes PLD critic instability (loss 800→3-17)."""
 
     # ----- logging / eval / saving -----
     log_freq: int = 100
@@ -229,6 +234,7 @@ def _make_train_envs_with_acp(args: Args):
         reward_scale=args.acp_reward_scale,
         reward_shaping=args.acp_reward_shaping,
         reward_clip=args.acp_reward_clip,
+        grasp_bonus=args.acp_grasp_bonus,
         device=args.acp_device or "cuda:1",
     )
 

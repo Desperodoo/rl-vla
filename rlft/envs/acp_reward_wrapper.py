@@ -116,7 +116,7 @@ def _extract_base_camera(
 class ACPRewardConfig:
     """Configuration for ACP reward wrapper."""
 
-    checkpoint_path: str = "checkpoints/vlaw/acp/iter1/best.safetensors"
+    checkpoint_path: str = "checkpoints/vlaw/acp/v3_so/best.safetensors"
     """ACP value model checkpoint (safetensors format)."""
 
     camera_height: int = 128
@@ -138,8 +138,13 @@ class ACPRewardConfig:
     - 'potential': r = V(s') * scale  (absolute value, continuous signal at success)
     """
 
-    reward_clip: float = 0.0
-    """Clip ACP reward to [-clip, +clip]. 0 = no clipping."""
+    reward_clip: float = 5.0
+    """Clip ACP reward to [-clip, +clip]. 0 = no clipping.
+    v5 validated: clip=5 yields SAE=70% (AWSC best)."""
+
+    grasp_bonus: float = 0.0
+    """Per-step bonus when gripper is grasping the target object. 0=disabled.
+    Added for v6 PLD/DSRL SAE experiments. Requires sim env with is_grasping() API."""
 
     use_sim_reward_bonus: bool = False
     """When True, blend sim reward with ACP reward."""
@@ -319,6 +324,9 @@ class DualCameraRewardWrapper(gym.Wrapper):
         self.acp_computer = ACPRewardComputer(config)
         self._step_count = 0
         self._num_envs: int = 0
+        # Cache unwrapped env for grasp detection
+        if config.grasp_bonus > 0:
+            self._unwrapped_env = env.unwrapped
 
     def reset(
         self, *, seed: Optional[int] = None, options: Optional[dict] = None
@@ -363,6 +371,13 @@ class DualCameraRewardWrapper(gym.Wrapper):
         # Extract dual-camera images and compute ACP reward
         rgb_base, rgb_render = self._extract_cameras(obs)
         acp_reward = self.acp_computer.compute_reward(rgb_base, rgb_render)
+
+        # Add grasp bonus if configured
+        if self.config.grasp_bonus > 0:
+            is_grasped = self._unwrapped_env.agent.is_grasping(
+                self._unwrapped_env.peg
+            ).cpu().numpy().astype(np.float32)
+            acp_reward = acp_reward + self.config.grasp_bonus * is_grasped
 
         # Optionally blend with sim reward
         if self.config.use_sim_reward_bonus:
