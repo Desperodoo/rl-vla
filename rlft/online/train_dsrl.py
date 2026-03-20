@@ -596,15 +596,38 @@ def main():
         buffer.add(obs, noise, rew, next_obs, done.astype(np.float32))
 
         # episode stats
+        grasp_rates: list[float] = []
+        reward_base_means: list[float] = []
+        reward_grasp_means: list[float] = []
+        reward_total_means: list[float] = []
         for i in range(train_adapter.num_envs):
             ep_rews[i] += rew[i]
             if done[i]:
                 ep_rews[i] = 0.0
 
+        if isinstance(info, dict):
+            if "is_grasping" in info:
+                grasp_rates.append(float(np.mean(info["is_grasping"])))
+            if "acp_base_reward" in info:
+                reward_base_means.append(float(np.mean(info["acp_base_reward"])))
+            if "acp_grasp_bonus" in info:
+                reward_grasp_means.append(float(np.mean(info["acp_grasp_bonus"])))
+            if "acp_total_reward" in info:
+                reward_total_means.append(float(np.mean(info["acp_total_reward"])))
+
         # Track success at episode boundaries (ManiSkillVectorEnv format)
         if done.any():
             success_vals = _extract_success(info, train_adapter.num_envs)
             ep_successes.extend(success_vals.tolist())
+
+        if grasp_rates:
+            training_metrics["reward/is_grasping_rate"].extend(grasp_rates)
+        if reward_base_means:
+            training_metrics["reward/acp_base_mean"].extend(reward_base_means)
+        if reward_grasp_means:
+            training_metrics["reward/acp_grasp_bonus_mean"].extend(reward_grasp_means)
+        if reward_total_means:
+            training_metrics["reward/acp_total_mean"].extend(reward_total_means)
 
         obs = next_obs
         total_steps += train_adapter.num_envs
@@ -680,10 +703,15 @@ def main():
                 eval_log[f"eval/{k}"] = eval_met[k]
                 print(f"  {k}: {eval_met[k]:.4f}")
 
+            sr = eval_met.get("success_once", 0)
+            sae = eval_met.get("success_at_end", 0)
+            retention = sae / max(sr, 1e-6)
+            writer.add_scalar("eval/sae_retention", retention, total_steps)
+            eval_log["eval/sae_retention"] = retention
+
             if args.track and HAS_WANDB:
                 wandb.log(eval_log, step=total_steps)
 
-            sr = eval_met.get("success_once", 0)
             if sr > best_success:
                 best_success = sr
                 save_checkpoint(

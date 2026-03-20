@@ -125,21 +125,16 @@ class TestACPRewardConfig:
         assert cfg.reward_scale == 100.0
         assert cfg.device == "cuda:1"
         assert cfg.dtype == "bfloat16"
-        assert cfg.warmup_steps == 0
-        assert cfg.use_sim_reward_bonus is False
-        assert cfg.sim_reward_weight == 0.0
 
     def test_custom_values(self) -> None:
         cfg = ACPRewardConfig(
             checkpoint_path="/tmp/test.safetensors",
             reward_scale=50.0,
             device="cpu",
-            warmup_steps=1000,
         )
         assert cfg.checkpoint_path == "/tmp/test.safetensors"
         assert cfg.reward_scale == 50.0
         assert cfg.device == "cpu"
-        assert cfg.warmup_steps == 1000
 
 
 # =========================================================================
@@ -348,17 +343,11 @@ class TestDualCameraRewardWrapper:
         self,
         num_envs: int = 4,
         reward_scale: float = 100.0,
-        warmup_steps: int = 0,
-        use_sim_reward_bonus: bool = False,
-        sim_reward_weight: float = 0.0,
     ) -> DualCameraRewardWrapper:
         env = MockEnv(num_envs=num_envs)
         config = ACPRewardConfig(
             reward_scale=reward_scale,
-            warmup_steps=warmup_steps,
             device="cpu",
-            use_sim_reward_bonus=use_sim_reward_bonus,
-            sim_reward_weight=sim_reward_weight,
         )
         wrapper = DualCameraRewardWrapper(env, config)
         # Inject mock value model
@@ -395,22 +384,6 @@ class TestDualCameraRewardWrapper:
         assert "sim_reward" in info
         np.testing.assert_allclose(info["sim_reward"], np.full(4, 0.5), rtol=1e-5)
 
-    def test_warmup_uses_sim_reward(self) -> None:
-        """During warmup_steps, sim reward should be used unchanged."""
-        wrapper = self._make_wrapper(warmup_steps=5)
-        wrapper.reset()
-
-        # Steps 1-5 are warmup
-        for _ in range(5):
-            _, reward, _, _, info = wrapper.step(np.zeros((4, 7)))
-            # During warmup, reward should be the original sim reward (0.5)
-            np.testing.assert_allclose(reward, np.full(4, 0.5), rtol=1e-5)
-
-        # Step 6: should use ACP reward
-        _, reward, _, _, _ = wrapper.step(np.zeros((4, 7)))
-        # ACP reward should not be 0.5 (sim reward)
-        assert not np.allclose(reward, np.full(4, 0.5))
-
     def test_auto_reset_handling(self) -> None:
         """When done=True, ACP reward should be zero for that env."""
         env = MockEnv(num_envs=4)
@@ -433,21 +406,6 @@ class TestDualCameraRewardWrapper:
         assert reward2[0] == 0.0
         # Other envs should have normal reward
         assert reward2[1] != 0.0
-
-    def test_blend_mode(self) -> None:
-        """acp_blend mode adds weighted sim reward to ACP reward."""
-        wrapper = self._make_wrapper(
-            reward_scale=100.0,
-            use_sim_reward_bonus=True,
-            sim_reward_weight=0.5,  # add 50% of sim reward
-        )
-        wrapper.reset()
-
-        _, reward, _, _, info = wrapper.step(np.zeros((4, 7)))
-        # ACP TD reward = 0.01 * 100 = 1.0
-        # Sim reward bonus = 0.5 * 0.5 = 0.25
-        # Total = 1.0 + 0.25 = 1.25
-        np.testing.assert_allclose(reward, np.full(4, 1.25), rtol=1e-5)
 
     def test_obs_structure_preserved(self) -> None:
         """Observation dict should pass through unchanged."""

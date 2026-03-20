@@ -213,11 +213,10 @@ class Args:
     ManiSkill environments have action space [-1, 1], so we clamp by default."""
 
     # ACP reward mode
-    reward_mode: Literal["sim", "acp", "acp_blend"] = "sim"
+    reward_mode: Literal["sim", "acp"] = "sim"
     """Reward source for online RL:
     - 'sim': ManiSkill dense reward (default, no behavior change)
-    - 'acp': ACP value model TD reward r(s,s') = (V(s')-V(s))*scale
-    - 'acp_blend': weighted blend of ACP + sim reward"""
+    - 'acp': ACP value model TD reward r(s,s') = (V(s')-V(s))*scale"""
     acp_checkpoint: str = "checkpoints/vlaw/acp/v3_so/best.safetensors"
     """ACP value model checkpoint path (only used when reward_mode != 'sim').
     v5 validated: v3_so is the best ACP checkpoint for RLPD."""
@@ -229,13 +228,9 @@ class Args:
     acp_reward_clip: float = 5.0
     """Clip ACP reward to [-clip, +clip]. 0 = no clipping.
     v5 validated: clip=5 yields SAE=70% (best AWSC config)."""
-    acp_blend_weight: float = 0.5
-    """Weight for ACP reward in blend mode: total = w*r_acp + (1-w)*r_sim"""
     acp_device: Optional[str] = None
     """Device for ACP model. Defaults to 'cuda:1' to separate from RL training GPU.
     Set explicitly when using CUDA_VISIBLE_DEVICES remapping."""
-    acp_warmup_steps: int = 0
-    """Use sim reward for first N env steps before switching to ACP reward."""
     acp_task_instruction: str = "Pick up the peg and lift it upright."
     """Task instruction text for the ACP Gemma language encoder."""
 
@@ -401,7 +396,7 @@ def make_train_envs(args):
     )
 
     # ACP reward mode requires render_mode for the second camera viewpoint
-    if args.reward_mode in ("acp", "acp_blend"):
+    if args.reward_mode == "acp":
         env_kwargs["render_mode"] = "rgb_array"
 
     if args.max_episode_steps is not None:
@@ -410,7 +405,7 @@ def make_train_envs(args):
     env = gym.make(args.env_id, **env_kwargs)
 
     # Insert ACP reward wrapper BEFORE FlattenRGBDObservationWrapper
-    if args.reward_mode in ("acp", "acp_blend"):
+    if args.reward_mode == "acp":
         from rlft.envs.acp_reward_wrapper import DualCameraRewardWrapper, ACPRewardConfig
         acp_config = ACPRewardConfig(
             checkpoint_path=args.acp_checkpoint,
@@ -419,18 +414,12 @@ def make_train_envs(args):
             reward_shaping=args.acp_reward_shaping,
             reward_clip=args.acp_reward_clip,
             device=args.acp_device or "cuda:1",
-            warmup_steps=args.acp_warmup_steps,
         )
-        if args.reward_mode == "acp_blend":
-            acp_config.use_sim_reward_bonus = True
-            acp_config.sim_reward_weight = 1.0 - args.acp_blend_weight
         env = DualCameraRewardWrapper(env, acp_config)
         print(f"ACP reward mode: {args.reward_mode}")
         print(f"  checkpoint: {args.acp_checkpoint}")
         print(f"  reward_scale: {args.acp_reward_scale}")
         print(f"  device: {acp_config.device}")
-        if args.reward_mode == "acp_blend":
-            print(f"  blend_weight: {args.acp_blend_weight} (acp) / {1 - args.acp_blend_weight} (sim)")
 
     if "rgb" in args.obs_mode:
         env = FlattenRGBDObservationWrapper(env, rgb=True, depth=False, state=True)

@@ -353,7 +353,7 @@ def grade_reward(df: pd.DataFrame, algo: str) -> DimensionScore:
                 score -= 15
                 findings.append(f"ACP step reward avg={acp_avg:.4f}: signal nearly dead")
     else:
-        # For PLD/DSRL, infer reward signal from Q-value scale
+        # For PLD/DSRL, infer reward signal from Q-value scale and wrapper diagnostics
         q = safe_col(df, "train/critic/q_mean")
         if q is not None:
             q_avg = float(q.mean())
@@ -361,6 +361,20 @@ def grade_reward(df: pd.DataFrame, algo: str) -> DimensionScore:
             if q_avg > 30:
                 score -= 20
                 findings.append(f"Q-value avg={q_avg:.1f}: Q-value inflated (likely high gamma compounding ACP rewards)")
+
+        acp_base = safe_col(df, "train/reward/acp_base_mean")
+        grasp_bonus = safe_col(df, "train/reward/acp_grasp_bonus_mean")
+        grasp_rate = safe_col(df, "train/reward/is_grasping_rate")
+        if acp_base is not None:
+            evidence["acp_base_mean"] = round(float(acp_base.mean()), 4)
+        if grasp_bonus is not None:
+            evidence["acp_grasp_bonus_mean"] = round(float(grasp_bonus.mean()), 4)
+        if grasp_rate is not None:
+            grasp_rate_avg = float(grasp_rate.mean())
+            evidence["is_grasping_rate"] = round(grasp_rate_avg, 4)
+            if grasp_rate_avg < 0.02:
+                score -= 10
+                findings.append(f"is_grasping rate={grasp_rate_avg:.3f}: hold signal rarely activated")
 
     return DimensionScore(grade=score_to_grade(score), score=score, findings=findings, evidence=evidence)
 
@@ -903,9 +917,23 @@ def main() -> None:
     # Dump summary JSON
     summary: dict = {}
     for name, dims in scores.items():
+        so = safe_col(runs[name].df, "eval/success_once")
+        sae = safe_col(runs[name].df, "eval/success_at_end")
+        best_so = float(so.max()) if so is not None else None
+        final_so = float(so.iloc[-1]) if so is not None else None
+        best_sae = float(sae.max()) if sae is not None else None
+        final_sae = float(sae.iloc[-1]) if sae is not None else None
+        sae_retention = None
+        if best_so is not None and best_so > 0 and best_sae is not None:
+            sae_retention = best_sae / best_so
         summary[name] = {
             "algo": runs[name].algo,
             "overall": overall_grade(dims),
+            "best_success_once": best_so,
+            "final_success_once": final_so,
+            "best_success_at_end": best_sae,
+            "final_success_at_end": final_sae,
+            "sae_retention": sae_retention,
             "dimensions": {
                 d: {"grade": s.grade, "score": s.score, "evidence": s.evidence}
                 for d, s in dims.items()

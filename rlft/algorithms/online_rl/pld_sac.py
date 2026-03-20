@@ -271,6 +271,8 @@ class PLDSACAgent(nn.Module):
         log_std_init: float = -5.0,
         use_layer_norm: bool = True,
         q_target_clip: float = 0.0,
+        min_temperature: float = 0.0,
+        entropy_bonus_coef: float = 0.0,
         device: str = "cuda",
     ):
         super().__init__()
@@ -285,6 +287,8 @@ class PLDSACAgent(nn.Module):
         self.gamma = gamma
         self.tau = tau
         self.q_target_clip = q_target_clip
+        self.min_temperature = min_temperature
+        self.entropy_bonus_coef = entropy_bonus_coef
         self.device = device
 
         # Target entropy: PLD paper uses target_entropy = -dim(a)
@@ -324,7 +328,15 @@ class PLDSACAgent(nn.Module):
 
     @property
     def alpha(self) -> torch.Tensor:
-        return self.log_alpha.exp()
+        alpha = self.log_alpha.exp()
+        if self.min_temperature > 0:
+            floor = torch.tensor(
+                self.min_temperature,
+                device=alpha.device,
+                dtype=alpha.dtype,
+            )
+            alpha = torch.clamp(alpha, min=floor)
+        return alpha
 
     # ------------------------------------------------------------------
     # Action selection
@@ -390,12 +402,16 @@ class PLDSACAgent(nn.Module):
         """Compute actor loss (maximize Q with entropy regularization)."""
         a_delta, log_prob = self.actor.get_action(obs, deterministic=False)
         q = self.critic.get_min_q(a_delta, obs)
+        entropy = -log_prob
         actor_loss = (self.alpha.detach() * log_prob - q.squeeze(-1)).mean()
+        if self.entropy_bonus_coef > 0:
+            actor_loss = actor_loss - self.entropy_bonus_coef * entropy.mean()
 
         metrics = {
             "actor_loss": actor_loss.item(),
-            "actor_entropy": -log_prob.mean().item(),
+            "actor_entropy": entropy.mean().item(),
             "actor_q": q.mean().item(),
+            "entropy_bonus_coef": self.entropy_bonus_coef,
         }
         return actor_loss, metrics
 
@@ -409,6 +425,8 @@ class PLDSACAgent(nn.Module):
         metrics = {
             "temperature_loss": temp_loss.item(),
             "temperature": self.alpha.item(),
+            "temperature_unclamped": self.log_alpha.exp().item(),
+            "temperature_floor": self.min_temperature,
             "entropy": -log_prob.mean().item(),
         }
         return temp_loss, metrics

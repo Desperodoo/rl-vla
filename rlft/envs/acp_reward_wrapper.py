@@ -146,15 +146,6 @@ class ACPRewardConfig:
     """Per-step bonus when gripper is grasping the target object. 0=disabled.
     Added for v6 PLD/DSRL SAE experiments. Requires sim env with is_grasping() API."""
 
-    use_sim_reward_bonus: bool = False
-    """When True, blend sim reward with ACP reward."""
-
-    sim_reward_weight: float = 0.0
-    """Weight for sim reward when blending: total = acp + sim_reward_weight * sim."""
-
-    warmup_steps: int = 0
-    """Use sim reward for first N env steps before switching to ACP."""
-
     device: str = "cuda:1"
     """Device for ACP model. Default cuda:1 to separate from RL training GPU."""
 
@@ -351,13 +342,10 @@ class DualCameraRewardWrapper(gym.Wrapper):
 
         # Save original sim reward for logging
         if torch.is_tensor(reward):
-            info["sim_reward"] = reward.cpu().numpy().copy()
+            sim_reward = reward.cpu().numpy().copy()
         else:
-            info["sim_reward"] = np.asarray(reward, dtype=np.float32).copy()
-
-        # During warmup, use sim reward unchanged
-        if self._step_count <= self.config.warmup_steps:
-            return obs, reward, terminated, truncated, info
+            sim_reward = np.asarray(reward, dtype=np.float32).copy()
+        info["sim_reward"] = sim_reward
 
         # Detect auto-reset envs
         done = terminated | truncated
@@ -370,25 +358,28 @@ class DualCameraRewardWrapper(gym.Wrapper):
 
         # Extract dual-camera images and compute ACP reward
         rgb_base, rgb_render = self._extract_cameras(obs)
-        acp_reward = self.acp_computer.compute_reward(rgb_base, rgb_render)
+        base_reward = self.acp_computer.compute_reward(rgb_base, rgb_render).astype(np.float32, copy=True)
+        total_reward = base_reward.copy()
 
-        # Add grasp bonus if configured
+        grasp_bonus = np.zeros_like(total_reward, dtype=np.float32)
+        is_grasped = np.zeros_like(total_reward, dtype=np.float32)
         if self.config.grasp_bonus > 0:
             is_grasped = self._unwrapped_env.agent.is_grasping(
                 self._unwrapped_env.peg
             ).cpu().numpy().astype(np.float32)
-            acp_reward = acp_reward + self.config.grasp_bonus * is_grasped
+            grasp_bonus = self.config.grasp_bonus * is_grasped
+            total_reward = total_reward + grasp_bonus
 
-        # Optionally blend with sim reward
-        if self.config.use_sim_reward_bonus:
-            sim_r = info["sim_reward"]
-            acp_reward = acp_reward + self.config.sim_reward_weight * sim_r
+        info["acp_base_reward"] = base_reward
+        info["acp_grasp_bonus"] = grasp_bonus
+        info["acp_total_reward"] = total_reward.copy()
+        info["is_grasping"] = is_grasped
 
         # Return ACP reward in the same format as original
         if torch.is_tensor(reward):
-            reward = torch.from_numpy(acp_reward).to(reward.device, dtype=reward.dtype)
+            reward = torch.from_numpy(total_reward).to(reward.device, dtype=reward.dtype)
         else:
-            reward = acp_reward
+            reward = total_reward
 
         return obs, reward, terminated, truncated, info
 
