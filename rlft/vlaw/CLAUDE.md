@@ -15,7 +15,7 @@
 | `state_predictor.py` | P4.1 — State Predictor MLP | ✅ |
 | `imagination.py` | P4.2 — Policy-in-Loop 引擎 | ✅（待 WM 审查）|
 | `policy_updater.py` | P5.1 — Weighted FM 策略更新 | 🔜 阻塞 |
-| `acp/` | P6 — ACP 稠密 advantage（Pistar06 value model） | ✅ 代码+GPU验证完成 |
+| `acp/` | P6 — ACP 稠密 advantage（Pistar06 value model，已迁移到 `rlft/acp`，此处保留兼容 shim） | ✅ 代码+GPU验证完成 |
 
 ## 子包结构（必须维护）
 
@@ -26,14 +26,7 @@ rlft/vlaw/
 ├── world_model/         ← WM 子包
 ├── reward/              ← 奖励模型子包
 ├── policy/              ← 策略更新子包
-├── acp/                 ← ACP 稠密 advantage 子包（P6，从 Evo-RL 移植）
-│   ├── config.py        ← ValueModelConfig, AdvantageConfig, ACPTrainConfig, ACPInferConfig
-│   ├── value_targets.py ← compute_value_targets_from_hdf5() — per-frame GT value target
-│   ├── value_model.py   ← ManiSkillValueModel — Pistar06 (SigLIP+Gemma+201-bin value head)
-│   ├── advantage.py     ← N-step advantage, 量化阈值, 二值化, 权重归一化
-│   ├── hdf5_dataset.py  ← ACPValueDataset — HDF5→PyTorch Dataset
-│   ├── train_value_model.py ← ACPValueTrainer 训练循环
-│   └── infer_values.py  ← ACPAnnotator 批量推理+HDF5 标注
+├── acp/                 ← ACP 兼容 shim（实际实现位于 `rlft/acp/`）
 ├── utils/               ← 工具函数
 └── scripts/             ← 执行脚本
     ├── run_acp_train.py ← CLI: ACP value model 训练

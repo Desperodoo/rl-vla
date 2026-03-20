@@ -34,8 +34,8 @@ import torch
 PROJECT_ROOT = Path("/home/wjz/rl-vla")
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from rlft.vlaw.acp.config import ValueTargetConfig
-from rlft.vlaw.acp.value_targets import compute_value_targets
+from rlft.acp.config import ValueTargetConfig
+from rlft.acp.value_targets import compute_value_targets
 
 FIG_DIR = PROJECT_ROOT / "docs" / "vlaw" / "figures" / "v3_comparison"
 FIG_DIR.mkdir(parents=True, exist_ok=True)
@@ -164,8 +164,8 @@ def run_model_comparison(all_trajs: list[dict], device: str = "cuda:0", max_traj
     """用 v3_so 和 v3_sae 模型分别推理，比较 value 预测。"""
     from safetensors.torch import load_file
 
-    from rlft.vlaw.acp.config import ValueModelConfig
-    from rlft.vlaw.acp.value_model import ManiSkillValueModel
+    from rlft.acp.config import ValueModelConfig
+    from rlft.acp.value_model import ManiSkillValueModel
 
     rng = np.random.RandomState(42)
     indices = rng.choice(len(all_trajs), min(max_trajs, len(all_trajs)), replace=False)

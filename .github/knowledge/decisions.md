@@ -463,7 +463,7 @@
   - **双相机处理**: rgb_base 和 rgb_render 分别输入 SigLIP（128x128 resize 到 384x384），mean-pool 合并，不做竖拼
   - **Value target**: `target = clip((-remaining_steps - c_fail*(1-success)) / (max_len+c_fail), -1, 0)`
   - **Advantage**: N-step (n=4) advantage + per-task quantile binarization (positive_ratio=0.3) + 归一化为 [0,1] 连续权重
-- **代码位置**: `rlft/vlaw/acp/`（7 个源文件）, CLI: `rlft/vlaw/scripts/run_acp_{train,infer}.py`
+- **代码位置**: `rlft/acp/`（7 个源文件）, CLI: `rlft/vlaw/scripts/run_acp_{train,infer}.py`
 - **HDF5 产出字段**: `acp_value_target`, `acp_value_pred`, `acp_advantage`, `acp_indicator`, `acp_weight` (per-frame) + 3 group attrs
 - **Policy 集成**: `PolicyUpdaterConfig.use_acp_weights=True` 时，`VLAWSuccessDataset` 从 HDF5 读取 `acp_weight` 字段，取 action 窗口内 per-frame 权重的均值作为样本权重，传入 `compute_weighted_loss()`
 - **Conda 环境**: 复用 `vlaw_reward`
@@ -479,7 +479,7 @@
 - **变更清单**:
   1. **WM 训练** (`scripts/vlaw/run/train_wm_v3_ext.sh`): `--num_workers 4→8` (CPU 余量充足); 添加 GPU 扩展文档 (4→8 GPU 时 `GRAD_ACCUM=4` 保持 eff_batch=32)
   2. **Imagination** (`rlft/vlaw/scripts/run_imagination.py`): 新增 `--num_inference_steps` CLI 参数 (默认 25, 支持 10-15 快速评估); `load_wm()` 和 `generate()` 函数签名扩展
-  3. **ACP** (`rlft/vlaw/acp/config.py`, `train_value_model.py`, `value_model.py`): dtype 默认 `float32→bfloat16`; 训练/验证/推理循环添加 `torch.cuda.amp.autocast(dtype=torch.bfloat16)`; projector+value head 保持 float32 精度
+  3. **ACP** (`rlft/acp/config.py`, `train_value_model.py`, `value_model.py`): dtype 默认 `float32→bfloat16`; 训练/验证/推理循环添加 `torch.cuda.amp.autocast(dtype=torch.bfloat16)`; projector+value head 保持 float32 精度
   4. **VLM 训练** (`rlft/vlaw/reward/train_reward_model.py`): DataLoader `num_workers=0→2, persistent_workers=True`
   5. **VLM 推理** (`rlft/vlaw/reward/reward_model.py`): `use_flash_attention` 默认 `False→True`
   6. **Policy 训练** (`rlft/vlaw/policy/policy_updater.py`): visual encoder forward 包装 `torch.cuda.amp.autocast(dtype=torch.bfloat16)`, 输出 `.float()` 回转

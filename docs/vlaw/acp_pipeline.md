@@ -1,6 +1,6 @@
 # ACP (Advantage-Conditioned Policy) 模块技术文档
 
-> **模块路径**: `rlft/vlaw/acp/`
+> **模块路径**: `rlft/acp/`
 > **移植自**: Evo-RL Pistar06 Value Model
 > **用途**: 为策略训练提供 per-frame 稠密 advantage 权重，替代 VLM 的 per-trajectory 稀疏二元标注
 
@@ -170,7 +170,7 @@ RECAP 论文（π\*₀.₆, arXiv: 2511.14759）在 Section 3.1 明确指出：
 
 ### 2.5 代码位置
 
-> `rlft/vlaw/acp/value_targets.py:17-56` — `compute_value_targets()`
+> `rlft/acp/value_targets.py:17-56` — `compute_value_targets()`
 
 ---
 
@@ -294,7 +294,7 @@ $$\mathcal{L} = -\frac{1}{B}\sum_{b=1}^{B}\sum_{i=0}^{200} p^{(b)}_i \log \text{
 
 ![Model Parameter Distribution](figures/acp_model_params.png)
 
-> 代码位置：`rlft/vlaw/acp/value_model.py:142-349`
+> 代码位置：`rlft/acp/value_model.py:142-349`
 
 ---
 
@@ -387,7 +387,7 @@ for step in range(num_steps):
             model.save("best.safetensors")  # 仅保存可训练参数
 ```
 
-> 代码位置：`rlft/vlaw/acp/train_value_model.py`
+> 代码位置：`rlft/acp/train_value_model.py`
 
 ---
 
@@ -460,7 +460,7 @@ $$w(t) = \text{clip}\left(\frac{A(t) - A_{\min}}{A_{\max} - A_{\min}},\ 0,\ 5.0\
 
 连续权重保留了 advantage 的相对大小信息，比二值化更加精细。
 
-> 代码位置：`rlft/vlaw/acp/advantage.py`, `rlft/vlaw/acp/infer_values.py`
+> 代码位置：`rlft/acp/advantage.py`, `rlft/acp/infer_values.py`
 
 ---
 
@@ -655,7 +655,7 @@ v2_combined 相比 iter1 原设备基线 MAE 提升了 **50%**（0.1675 → 0.08
 ### 9.1 核心文件
 
 ```
-rlft/vlaw/acp/
+rlft/acp/
 ├── __init__.py
 ├── config.py              ← 所有 dataclass 配置 (5个: ValueModelConfig,
 │                             ValueTargetConfig, AdvantageConfig,
@@ -786,7 +786,7 @@ bash scripts/train_acp_multi.sh --parallel  # GPU 2-6 并行
 
 ```bash
 # 生成 episode 可视化
-conda run -n rlft_ms3 python -m rlft.vlaw.acp.episode_viz \
+conda run -n rlft_ms3 python -m rlft.acp.episode_viz \
     --hdf5_paths data/vlaw/rollouts/pretrained_policy/*.h5 \
     --output_dir docs/vlaw/figures/episodes \
     --num_success 2 --num_fail 2 --num_keyframes 6 --gif_fps 4

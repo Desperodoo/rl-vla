@@ -12,18 +12,18 @@ import numpy as np
 import pytest
 import torch
 
-from rlft.vlaw.acp.config import (
+from rlft.acp.config import (
     ACPInferConfig,
     ACPTrainConfig,
     AdvantageConfig,
     ValueModelConfig,
     ValueTargetConfig,
 )
-from rlft.vlaw.acp.value_targets import (
+from rlft.acp.value_targets import (
     compute_value_targets,
     compute_value_targets_batch,
 )
-from rlft.vlaw.acp.advantage import (
+from rlft.acp.advantage import (
     binarize_advantages,
     compute_dense_rewards,
     compute_n_step_advantage,
@@ -331,7 +331,7 @@ def mock_acp_hdf5(tmp_path: Path) -> Path:
 
 class TestACPValueDataset:
     def test_dataset_length(self, mock_acp_hdf5: Path) -> None:
-        from rlft.vlaw.acp.hdf5_dataset import ACPValueDataset
+        from rlft.acp.hdf5_dataset import ACPValueDataset
 
         ds = ACPValueDataset(
             hdf5_paths=[mock_acp_hdf5],
@@ -342,7 +342,7 @@ class TestACPValueDataset:
         assert len(ds) == 24
 
     def test_sample_shapes(self, mock_acp_hdf5: Path) -> None:
-        from rlft.vlaw.acp.hdf5_dataset import ACPValueDataset
+        from rlft.acp.hdf5_dataset import ACPValueDataset
 
         ds = ACPValueDataset(
             hdf5_paths=[mock_acp_hdf5],
@@ -361,7 +361,7 @@ class TestACPValueDataset:
         assert isinstance(sample["frame_idx"], int)
 
     def test_value_targets_computed(self, mock_acp_hdf5: Path) -> None:
-        from rlft.vlaw.acp.hdf5_dataset import ACPValueDataset
+        from rlft.acp.hdf5_dataset import ACPValueDataset
 
         ds = ACPValueDataset(
             hdf5_paths=[mock_acp_hdf5],
@@ -375,7 +375,7 @@ class TestACPValueDataset:
 
     def test_missing_camera_graceful(self, mock_acp_hdf5: Path) -> None:
         """缺失相机应被零填充且 mask=False。"""
-        from rlft.vlaw.acp.hdf5_dataset import ACPValueDataset
+        from rlft.acp.hdf5_dataset import ACPValueDataset
 
         ds = ACPValueDataset(
             hdf5_paths=[mock_acp_hdf5],
@@ -387,7 +387,7 @@ class TestACPValueDataset:
         assert sample["image_mask"][1] is False or sample["image_mask"][1].item() is False
 
     def test_collate(self, mock_acp_hdf5: Path) -> None:
-        from rlft.vlaw.acp.hdf5_dataset import ACPValueDataset, collate_acp
+        from rlft.acp.hdf5_dataset import ACPValueDataset, collate_acp
 
         ds = ACPValueDataset(
             hdf5_paths=[mock_acp_hdf5],
@@ -445,7 +445,7 @@ def mock_vlm_labeled_hdf5(tmp_path: Path) -> Path:
 class TestVLMLabelMode:
     def test_vlm_dataset_length(self, mock_vlm_labeled_hdf5: Path) -> None:
         """success_key='vlm_success' 模式正确加载。"""
-        from rlft.vlaw.acp.hdf5_dataset import ACPValueDataset
+        from rlft.acp.hdf5_dataset import ACPValueDataset
 
         cfg = ValueTargetConfig(success_key="vlm_success")
         ds = ACPValueDataset(
@@ -458,7 +458,7 @@ class TestVLMLabelMode:
 
     def test_vlm_targets_in_range(self, mock_vlm_labeled_hdf5: Path) -> None:
         """VLM 模式下 value targets 应在 [-1, 0] 范围内。"""
-        from rlft.vlaw.acp.hdf5_dataset import ACPValueDataset
+        from rlft.acp.hdf5_dataset import ACPValueDataset
 
         cfg = ValueTargetConfig(success_key="vlm_success")
         ds = ACPValueDataset(
@@ -472,7 +472,7 @@ class TestVLMLabelMode:
 
     def test_vlm_success_vs_fail_targets(self, mock_vlm_labeled_hdf5: Path) -> None:
         """VLM 成功轨迹的 target 应优于失败轨迹。"""
-        from rlft.vlaw.acp.hdf5_dataset import ACPValueDataset
+        from rlft.acp.hdf5_dataset import ACPValueDataset
 
         cfg = ValueTargetConfig(success_key="vlm_success")
         ds = ACPValueDataset(
@@ -488,7 +488,7 @@ class TestVLMLabelMode:
 
     def test_vlm_consistent_with_env_success(self, mock_acp_hdf5: Path) -> None:
         """env_success 模式默认行为应不受 success_key 改动影响。"""
-        from rlft.vlaw.acp.hdf5_dataset import ACPValueDataset
+        from rlft.acp.hdf5_dataset import ACPValueDataset
 
         cfg_default = ValueTargetConfig()  # success_key="env_success"
         ds = ACPValueDataset(

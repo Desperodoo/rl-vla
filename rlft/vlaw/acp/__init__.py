@@ -1,4 +1,6 @@
-"""rlft.vlaw.acp — ACP 稠密 advantage 模块（Phase P6）
+"""Compatibility shim for ACP package.
 
-从 Evo-RL Pistar06 移植：SigLIP + Gemma value model → per-frame advantage weights。
+ACP implementation now lives in `rlft.acp`.
 """
+
+from rlft.acp import *

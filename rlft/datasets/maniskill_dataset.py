@@ -140,7 +140,11 @@ class ManiSkillDataset(Dataset):
         
         # Load demo dataset
         raw_data = load_traj_hdf5(data_path, num_traj=num_traj)
-        
+        traj_keys = sorted(
+            [key for key in raw_data.keys() if key.startswith("traj_")],
+            key=lambda x: int(x.split("_")[-1]),
+        )
+
         print("Raw trajectory loaded, beginning observation pre-processing...")
         
         # Create obs_process_fn if not provided
@@ -158,7 +162,7 @@ class ManiSkillDataset(Dataset):
             "actions": [],
         }
         
-        for traj_key in sorted(raw_data.keys(), key=lambda x: int(x.split("_")[-1])):
+        for traj_key in traj_keys:
             traj = raw_data[traj_key]
             
             # Process observations
@@ -186,7 +190,7 @@ class ManiSkillDataset(Dataset):
         # Fit action normalizer if provided
         if self.action_normalizer is not None:
             all_actions = np.concatenate([
-                traj["actions"] for traj in raw_data.values()
+                raw_data[traj_key]["actions"] for traj_key in traj_keys
             ], axis=0)
             self.action_normalizer.fit(all_actions)
             print(f"Action normalizer fitted with {len(all_actions)} samples, mode: {self.action_normalizer.mode}")
@@ -324,7 +328,11 @@ class OfflineRLDataset(Dataset):
         
         # Load demo dataset
         raw_data = load_traj_hdf5(data_path, num_traj=num_traj)
-        
+        traj_keys = sorted(
+            [key for key in raw_data.keys() if key.startswith("traj_")],
+            key=lambda x: int(x.split("_")[-1]),
+        )
+
         print("Raw trajectory loaded, beginning observation pre-processing...")
         
         # Create obs_process_fn if not provided
@@ -344,7 +352,7 @@ class OfflineRLDataset(Dataset):
             "dones": [],
         }
         
-        for traj_key in sorted(raw_data.keys(), key=lambda x: int(x.split("_")[-1])):
+        for traj_key in traj_keys:
             traj = raw_data[traj_key]
             
             # Process observations
@@ -393,7 +401,7 @@ class OfflineRLDataset(Dataset):
         # Fit action normalizer if provided
         if self.action_normalizer is not None:
             all_actions = np.concatenate([
-                traj["actions"] for traj in raw_data.values()
+                raw_data[traj_key]["actions"] for traj_key in traj_keys
             ], axis=0)
             self.action_normalizer.fit(all_actions)
             print(f"Action normalizer fitted with {len(all_actions)} samples, mode: {self.action_normalizer.mode}")

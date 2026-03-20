@@ -916,20 +916,29 @@ def main():
     # Offline dataset for RLPD (use OfflineRLDataset for SMDP formulation)
     offline_dataset = None
     if args.demo_path:
-        offline_dataset = OfflineRLDataset(
-            data_path=args.demo_path,
-            include_rgb=include_rgb,
-            num_traj=args.num_demos,
-            obs_horizon=args.obs_horizon,
-            pred_horizon=args.pred_horizon,
-            act_horizon=args.act_horizon,
-            control_mode=args.control_mode,
-            env_id=args.env_id,
-            rgb_format="NCHW",
-            gamma=args.gamma,
-            device=device,
-            action_normalizer=action_normalizer,
-        )
+        try:
+            offline_dataset = OfflineRLDataset(
+                data_path=args.demo_path,
+                include_rgb=include_rgb,
+                num_traj=args.num_demos,
+                obs_horizon=args.obs_horizon,
+                pred_horizon=args.pred_horizon,
+                act_horizon=args.act_horizon,
+                control_mode=args.control_mode,
+                env_id=args.env_id,
+                rgb_format="NCHW",
+                gamma=args.gamma,
+                device=device,
+                action_normalizer=action_normalizer,
+            )
+        except KeyError as e:
+            if str(e) == '"obs"' or str(e) == "'obs'":
+                raise KeyError(
+                    "RLPD expects a ManiSkill demo HDF5 with traj['obs'] (e.g. trajectory.rgb*.h5). "
+                    f"Got incompatible schema from demo_path={args.demo_path}. "
+                    "VLAW rollout files are not currently supported by train_rlpd."
+                ) from e
+            raise
         print(f"Offline dataset size: {len(offline_dataset)}")
         
         # Precompute cache for faster sampling (up to 50k samples)

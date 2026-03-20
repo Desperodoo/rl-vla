@@ -27,9 +27,9 @@
 
 | 文件 | 修改内容 |
 |------|---------|
-| `rlft/vlaw/acp/config.py:114-118` | `ValueTargetConfig` 新增 `success_mode: str = "success_once"` |
-| `rlft/vlaw/acp/value_targets.py:43-48` | `compute_value_targets()` 根据 `success_mode` 选择 `np.any()` 或 `[-1]` |
-| `rlft/vlaw/acp/hdf5_dataset.py:112-126` | `_read_traj_meta()` 传递 `success_mode` 参数 |
+| `rlft/acp/config.py:114-118` | `ValueTargetConfig` 新增 `success_mode: str = "success_once"` |
+| `rlft/acp/value_targets.py:43-48` | `compute_value_targets()` 根据 `success_mode` 选择 `np.any()` 或 `[-1]` |
+| `rlft/acp/hdf5_dataset.py:112-126` | `_read_traj_meta()` 传递 `success_mode` 参数 |
 
 CLI 用法：`--value-target.success-mode success_at_end`
 

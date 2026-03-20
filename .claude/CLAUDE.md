@@ -7,7 +7,7 @@
 
 ---
 
-## 当前项目状态（2026-03-19）
+## 当前项目状态（2026-03-20）
 
 > 本文件由**两台设备**共享。`原设备`运行 WM 训练；`新设备（10x RTX 4090）`运行 ACP/RLPD 支线。
 
@@ -49,6 +49,25 @@ BUG-D Fix2 详情：见 `knowledge/decisions.md` ADR-043/045
 完整 Bug 数据库：`knowledge/bugs-and-fixes.md`（27 条）
 
 ### ACP + RLPD 支线（新设备）
+
+**ACP 重构状态**：
+- ACP 已从 `rlft/vlaw/acp` 提取到 `rlft/acp`
+- 新主路径：`rlft.acp.{config,advantage,hdf5_dataset,value_model,value_targets,train_value_model,infer_values}`
+- `rlft/vlaw/acp` 仅保留兼容 shim，避免旧入口和历史脚本立刻失效
+- `rlft/envs/acp_reward_wrapper.py`、`rlft/online/train_rlpd.py`、ACP 训练/推理脚本、分析脚本、单测都已切到新路径
+
+**验证结果**：
+- ACP value 训练 smoke：通过
+- ACP value 推理 + HDF5 写回 smoke：通过
+- `rlft/tests/vlaw/test_acp.py`：通过（28/28）
+- PLD `reward_mode=acp` smoke：通过
+- DSRL `reward_mode=acp` smoke：通过
+- RLPD `reward_mode=acp` smoke：通过（仅支持 ManiSkill 原生 demo schema）
+
+**RLPD 兼容性结论**：
+- 已修复 HDF5 根组 `meta` 导致的轨迹枚举崩溃
+- 当前 `rlft.online.train_rlpd` 仅保证 ManiSkill 原生 demo schema 可用
+- 对 VLAW rollout schema 暂不兼容，按用户要求不再在 RLPD pipeline 中继续支持它
 
 **v5 sweep 结论**（15 configs 全部完成）：
 - AWSC 最佳：SAE=70%, SO=96%（`awsc_td_clip` 配置已归档为 pipeline 默认值）

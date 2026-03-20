@@ -183,8 +183,8 @@ class ACPRewardComputer:
         """Lazy-load the ACP value model on first use."""
         if self._loaded:
             return
-        from rlft.vlaw.acp.config import ValueModelConfig
-        from rlft.vlaw.acp.value_model import ManiSkillValueModel
+        from rlft.acp.config import ValueModelConfig
+        from rlft.acp.value_model import ManiSkillValueModel
 
         cfg = ValueModelConfig(
             task_instruction=self.config.task_instruction,

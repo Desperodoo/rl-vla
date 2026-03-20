@@ -28,8 +28,8 @@ import torch
 PROJECT_ROOT = Path("/home/wjz/rl-vla")
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from rlft.vlaw.acp.config import ValueTargetConfig
-from rlft.vlaw.acp.value_targets import compute_value_targets
+from rlft.acp.config import ValueTargetConfig
+from rlft.acp.value_targets import compute_value_targets
 
 FIG_DIR = PROJECT_ROOT / "docs" / "vlaw" / "figures"
 FIG_DIR.mkdir(parents=True, exist_ok=True)
@@ -149,8 +149,8 @@ def compute_target_comparison(all_trajs: list[dict]):
 # ── Part 3: Model inference comparison ────────────────────────────────────
 def run_model_comparison(all_trajs: list[dict], device: str = "cuda:0", max_trajs: int = 100):
     """用 v2 和 v3 模型分别推理，比较 value 预测。"""
-    from rlft.vlaw.acp.config import ValueModelConfig
-    from rlft.vlaw.acp.value_model import ManiSkillValueModel
+    from rlft.acp.config import ValueModelConfig
+    from rlft.acp.value_model import ManiSkillValueModel
 
     # Subsample for speed
     rng = np.random.RandomState(42)
