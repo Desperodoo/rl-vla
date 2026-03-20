@@ -11,7 +11,7 @@
 ### Step 1：读取主状态文件
 
 ```bash
-cat /home/wjz/rl-vla/.github/vlaw-status.md
+cat /home/lizh/rl-vla/.github/vlaw-status.md
 ```
 
 提取并汇总：
@@ -22,7 +22,7 @@ cat /home/wjz/rl-vla/.github/vlaw-status.md
 ### Step 2：读取任务看板
 
 ```bash
-cat /home/wjz/rl-vla/.github/VLAW_NEXT_STEPS.md
+cat /home/lizh/rl-vla/.github/VLAW_NEXT_STEPS.md
 ```
 
 提取：进行中任务、最高优先级待办项。
@@ -31,15 +31,15 @@ cat /home/wjz/rl-vla/.github/VLAW_NEXT_STEPS.md
 
 ```bash
 # Checkpoint 时间戳
-ls -lt /home/wjz/rl-vla/checkpoints/vlaw/world_model/ 2>/dev/null | head -5
-ls -lt /home/wjz/rl-vla/checkpoints/vlaw/reward_model/ 2>/dev/null | head -3
-ls -lt /home/wjz/rl-vla/checkpoints/vlaw/policy/ 2>/dev/null | head -3
+ls -lt /home/lizh/rl-vla/checkpoints/vlaw/world_model/ 2>/dev/null | head -5
+ls -lt /home/lizh/rl-vla/checkpoints/vlaw/reward_model/ 2>/dev/null | head -3
+ls -lt /home/lizh/rl-vla/checkpoints/vlaw/policy/ 2>/dev/null | head -3
 
 # 数据量
-du -sh /home/wjz/rl-vla/data/vlaw/*/ 2>/dev/null
+du -sh /home/lizh/rl-vla/data/vlaw/*/ 2>/dev/null
 
 # 最新 result 文件
-ls -lt /home/wjz/rl-vla/logs/vlaw/*-result*.md 2>/dev/null | head -5
+ls -lt /home/lizh/rl-vla/logs/vlaw/*-result*.md 2>/dev/null | head -5
 ```
 
 ### Step 4：GPU 状态（可选，如 nvidia-smi 可用）

@@ -61,7 +61,7 @@
 **三步处理**：
 ```
 T1: 读取最新结果文件
-    ls -lt /home/wjz/rl-vla/logs/vlaw/*-result*.md | head -5
+    ls -lt /home/lizh/rl-vla/logs/vlaw/*-result*.md | head -5
     cat <最新文件>
 
 T2: 更新状态文件

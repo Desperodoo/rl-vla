@@ -27,6 +27,9 @@
 
 import threading
 import time
+import sys
+import atexit
+import signal
 import numpy as np
 from typing import Optional, Tuple, Dict, Any
 from collections import deque
@@ -98,6 +101,10 @@ class KeyboardInterventionHandler:
         self._running = False
         self._thread = None
         self._lock = threading.Lock()
+
+        # 终端设置保存（用于恢复）
+        self._old_terminal_settings = None
+        self._original_sigint = None
         
         # 当前按下的键 (用于持续移动)
         self._pressed_keys = set()
@@ -121,16 +128,42 @@ class KeyboardInterventionHandler:
     def set_quit_callback(self, callback):
         """设置退出回调"""
         self._quit_callback = callback
-    
+
+    def _restore_terminal(self):
+        """恢复终端设置（确保任何退出方式都能恢复）"""
+        if self._old_terminal_settings is not None:
+            try:
+                import termios
+                termios.tcsetattr(sys.stdin, termios.TCSADRAIN, self._old_terminal_settings)
+            except Exception:
+                pass
+            self._old_terminal_settings = None
+
+    def _setup_signal_handlers(self):
+        """设置信号处理器，确保 Ctrl+C 时恢复终端"""
+        self._original_sigint = signal.signal(signal.SIGINT, self._sigint_handler)
+        atexit.register(self._restore_terminal)
+
+    def _sigint_handler(self, signum, frame):
+        """Ctrl+C 信号处理器"""
+        self._restore_terminal()
+        if self._quit_callback:
+            self._quit_callback()
+        # 恢复原始 SIGINT 处理器
+        if self._original_sigint is not None:
+            signal.signal(signal.SIGINT, self._original_sigint)
+        raise KeyboardInterrupt
+
     def start(self):
         """启动键盘监听线程"""
         if self._running:
             return
-        
+
         self._running = True
+        self._setup_signal_handlers()
         self._thread = threading.Thread(target=self._keyboard_loop, daemon=True)
         self._thread.start()
-        
+
         if HAS_ROSPY:
             rospy.loginfo("KeyboardInterventionHandler started")
             rospy.loginfo("Controls: WS=X, AD=Y, QE=Z, G=Open, H=Close, R=Record, Y/N=Save/Discard")
@@ -150,32 +183,33 @@ class KeyboardInterventionHandler:
     def _keyboard_loop(self):
         """键盘监听主循环"""
         try:
-            import sys
             import tty
             import termios
             import select
-            
-            old_settings = termios.tcgetattr(sys.stdin)
+
+            # 保存终端设置到实例变量，用于 atexit/signal 恢复
+            self._old_terminal_settings = termios.tcgetattr(sys.stdin)
             try:
                 tty.setcbreak(sys.stdin.fileno())
-                
+
                 while self._running:
                     # 使用 select 实现非阻塞读取
                     if select.select([sys.stdin], [], [], 0.05)[0]:
                         key = sys.stdin.read(1)
                         self._handle_key(key)
-                    
+
                     # 更新持续移动状态
                     self._update_continuous_movement()
-                    
+
             finally:
-                termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
-                
+                self._restore_terminal()
+
         except Exception as e:
             if HAS_ROSPY:
                 rospy.logwarn(f"Keyboard listener error: {e}")
             else:
                 print(f"Keyboard listener error: {e}")
+            self._restore_terminal()
     
     def _handle_key(self, key: str):
         """处理按键事件"""

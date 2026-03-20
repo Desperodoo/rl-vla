@@ -1,4 +1,4 @@
-"""Tests for inference.inference_ros.InferenceNode — mock ROS, test pure computation."""
+"""Tests for InferenceNode — mock ROS, test pure computation."""
 
 import sys
 import os
@@ -78,7 +78,7 @@ sys.modules["utils.keyboard_intervention"] = _ki_mock
 # ---------------------------------------------------------------------------
 # NOW import InferenceNode
 # ---------------------------------------------------------------------------
-from inference.inference_ros import InferenceNode
+from inference.inference_node import InferenceNode
 import cv2
 
 
@@ -103,7 +103,7 @@ def _make_node(config_overrides=None, fake_checkpoint_dir=None):
         "pos_lookahead_step": 1,
         "control_freq": 50,
         "execution_mode": "temporal_ensemble",
-        "timeline_enabled": False,
+        "timeline_disabled": True,
         "record_inference": False,
         "intervention": False,
     }
@@ -111,7 +111,7 @@ def _make_node(config_overrides=None, fake_checkpoint_dir=None):
         config.update(config_overrides)
 
     # Patch heavy subsystems
-    with mock.patch("inference.inference_ros.RealEnvironment") as MockEnv, \
+    with mock.patch("inference.inference_node.RealEnvironment") as MockEnv, \
          mock.patch.object(InferenceNode, "_create_policy") as mock_policy, \
          mock.patch.object(InferenceNode, "_create_safety_controller") as mock_safety, \
          mock.patch.object(InferenceNode, "_create_logger") as mock_logger, \
@@ -134,8 +134,10 @@ def _make_node(config_overrides=None, fake_checkpoint_dir=None):
         from core.safety_controller import SafetyController
         mock_safety.return_value = SafetyController()
 
-        from inference.inference_logger import InferenceLogger
-        mock_logger.return_value = InferenceLogger(log_dir=config["log_dir"])
+        fake_logger = mock.MagicMock()
+        fake_logger.log_dir = config["log_dir"]
+        fake_logger.current_file_path = None
+        mock_logger.return_value = fake_logger
 
         node = InferenceNode(config)
     
@@ -143,42 +145,10 @@ def _make_node(config_overrides=None, fake_checkpoint_dir=None):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# _preprocess_image
+# _preprocess_image and _normalize_images removed (BUG-1 fix):
+# Image preprocessing is now fully handled by RealPolicy.
+# See tests/test_policy_loader.py for image preprocessing tests.
 # ═══════════════════════════════════════════════════════════════════════════
-
-class TestNodePreprocessImage:
-    def test_resize(self):
-        node = _make_node()
-        img = np.random.randint(0, 256, (480, 640, 3), dtype=np.uint8)
-        result = node._preprocess_image(img, target_size=(128, 128))
-        assert result.shape == (128, 128, 3)
-
-    def test_preserves_dtype(self):
-        node = _make_node()
-        img = np.zeros((64, 64, 3), dtype=np.uint8)
-        result = node._preprocess_image(img, target_size=(32, 32))
-        assert result.dtype == np.uint8
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# _normalize_images
-# ═══════════════════════════════════════════════════════════════════════════
-
-class TestNodeNormalizeImages:
-    def test_output_shape(self):
-        node = _make_node()
-        obs = {"images": [np.random.randint(0, 256, (480, 640, 3), dtype=np.uint8)]}
-        result = node._normalize_images(obs, target_size=(128, 128))
-        assert result.shape == (3, 128, 128)
-
-    def test_hwc_to_chw(self):
-        node = _make_node()
-        img = np.zeros((64, 64, 3), dtype=np.uint8)
-        img[:, :, 0] = 255  # R channel
-        obs = {"images": [img]}
-        result = node._normalize_images(obs, target_size=(64, 64))
-        # First channel should be 255
-        assert result[0, 0, 0] == 255
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -208,9 +178,10 @@ class TestNodeConfigPropagation:
         node = _make_node({"control_freq": 100})
         assert node.control_freq == 100
 
-    def test_teleop_scale(self):
+    def test_teleop_scale_fixed(self):
+        """teleop_scale is fixed to 1.0 per GAP-2 fix, ignores config input."""
         node = _make_node({"teleop_scale": 0.6})
-        assert node.teleop_scale == 0.6
+        assert node.teleop_scale == 1.0
 
     def test_pred_horizon_from_policy(self):
         node = _make_node()

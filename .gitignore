@@ -64,3 +64,7 @@ results/vlaw/_archive/
 results/vlaw/imagination_eval/*.png
 results/vlaw/imagination_eval/**/*.png
 .hf_token_tmp
+
+
+# 其他临时文件和目录
+backend/

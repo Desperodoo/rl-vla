@@ -72,7 +72,7 @@ Each experiment is diagnosed on 5 dimensions with A/B/C/D/F grading:
 ```bash
 http_proxy=http://10.20.93.149:7890 https_proxy=http://10.20.93.149:7890 \
 conda run -n rlft_ms3 --no-capture-output \
-env PYTHONPATH=/home/wjz/rl-vla \
+env PYTHONPATH=/home/lizh/rl-vla \
 python scripts/sweep_acp/fetch_wandb.py \
     --project {WANDB_PROJECT} \
     --run_ids {RUN_IDS} \
@@ -83,7 +83,7 @@ python scripts/sweep_acp/fetch_wandb.py \
 ### Step 2: Run Automated Diagnosis
 
 ```bash
-PYTHONPATH=/home/wjz/rl-vla python scripts/analyze_training_internals.py \
+PYTHONPATH=/home/lizh/rl-vla python scripts/analyze_training_internals.py \
     --project {WANDB_PROJECT} \
     --data_dir logs/vlaw/wandb_analysis/{PROJECT} \
     --output_dir docs/vlaw/figures/{PROJECT}_internals \
