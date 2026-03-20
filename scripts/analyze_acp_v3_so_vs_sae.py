@@ -768,11 +768,11 @@ def main():
     if infer_so:
         print(f"  v3_so: MAE={infer_so['mae']:.4f}, pos_ratio={infer_so['positive_ratio']:.3f}, r={infer_so['pearson_r']:.4f}")
     else:
-        print("  v3_so: 无标注数据 (需先运行 run_acp_infer.py)")
+        print("  v3_so: 无标注数据 (需先运行 `python -m rlft.acp.infer_values`)")
     if infer_sae:
         print(f"  v3_sae: MAE={infer_sae['mae']:.4f}, pos_ratio={infer_sae['positive_ratio']:.3f}, r={infer_sae['pearson_r']:.4f}")
     else:
-        print("  v3_sae: 无标注数据 (需先运行 run_acp_infer.py)")
+        print("  v3_sae: 无标注数据 (需先运行 `python -m rlft.acp.infer_values`)")
 
     # Step 5: Parse training logs
     print("\n[Step 5/7] 解析训练日志...")

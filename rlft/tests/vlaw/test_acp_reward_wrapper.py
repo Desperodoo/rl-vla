@@ -119,7 +119,7 @@ class MockEnv(gym.Env):
 class TestACPRewardConfig:
     def test_defaults(self) -> None:
         cfg = ACPRewardConfig()
-        assert cfg.checkpoint_path == "checkpoints/vlaw/acp/iter1/best.safetensors"
+        assert cfg.checkpoint_path == "checkpoints/vlaw/acp/v3_so/best.safetensors"
         assert cfg.camera_height == 128
         assert cfg.camera_width == 128
         assert cfg.reward_scale == 100.0

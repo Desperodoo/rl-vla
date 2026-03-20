@@ -668,9 +668,9 @@ rlft/acp/
 ├── infer_values.py        ← ACPAnnotator 推理+标注写回
 └── visualize.py           ← 5种诊断可视化图表
 
-rlft/vlaw/scripts/
-├── run_acp_train.py       ← 训练入口 (tyro CLI)
-└── run_acp_infer.py       ← 推理入口 (tyro CLI)
+rlft/acp/
+├── train_value_model.py   ← 训练入口 (tyro CLI)
+└── infer_values.py        ← 推理入口 (tyro CLI)
 
 rlft/vlaw/data/
 └── noisy_policy.py        ← OUNoisePolicyWrapper + GaussianNoisePolicyWrapper
@@ -714,11 +714,11 @@ value_model.py ────────────┘               infer_value
 
 ```bash
 # ACP value model 训练
-CUDA_VISIBLE_DEVICES=6,7 conda run -n vlaw_reward python rlft/vlaw/scripts/run_acp_train.py \
+CUDA_VISIBLE_DEVICES=6,7 conda run -n vlaw_reward python -m rlft.acp.train_value_model \
     --num_steps 8000 --batch_size 32
 
 # ACP 推理 + advantage 标注
-CUDA_VISIBLE_DEVICES=6 conda run -n vlaw_reward python rlft/vlaw/scripts/run_acp_infer.py \
+CUDA_VISIBLE_DEVICES=6 conda run -n vlaw_reward python -m rlft.acp.infer_values \
     --checkpoint_path checkpoints/vlaw/acp/v2_combined/best.safetensors
 
 # RLPD + ACP reward (SAC)
@@ -799,6 +799,6 @@ conda run -n rlft_ms3 python -m rlft.acp.episode_viz \
 conda run -n rlft_ms3 python docs/vlaw/gen_acp_figures.py
 
 # 从 ACP 推理结果生成诊断图表（需要先运行推理）
-CUDA_VISIBLE_DEVICES=6 conda run -n vlaw_reward python rlft/vlaw/scripts/run_acp_infer.py \
+CUDA_VISIBLE_DEVICES=6 conda run -n vlaw_reward python -m rlft.acp.infer_values \
     --checkpoint_path checkpoints/vlaw/acp/v2_combined/best.safetensors
 ```

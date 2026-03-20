@@ -15,7 +15,7 @@
 | `state_predictor.py` | P4.1 — State Predictor MLP | ✅ |
 | `imagination.py` | P4.2 — Policy-in-Loop 引擎 | ✅（待 WM 审查）|
 | `policy_updater.py` | P5.1 — Weighted FM 策略更新 | 🔜 阻塞 |
-| `acp/` | P6 — ACP 稠密 advantage（Pistar06 value model，已迁移到 `rlft/acp`，此处保留兼容 shim） | ✅ 代码+GPU验证完成 |
+| `acp/` | P6 — ACP 稠密 advantage（Pistar06 value model，已迁移到 `rlft/acp`；旧兼容层已移除） | ✅ 代码+GPU验证完成 |
 
 ## 子包结构（必须维护）
 
@@ -26,14 +26,12 @@ rlft/vlaw/
 ├── world_model/         ← WM 子包
 ├── reward/              ← 奖励模型子包
 ├── policy/              ← 策略更新子包
-├── acp/                 ← ACP 兼容 shim（实际实现位于 `rlft/acp/`）
+├── acp/                 ← 已移除，ACP 主实现位于 `rlft/acp/`
 ├── utils/               ← 工具函数
-└── scripts/             ← 执行脚本
-    ├── run_acp_train.py ← CLI: ACP value model 训练
-    └── run_acp_infer.py ← CLI: ACP advantage 标注
+└── scripts/             ← 执行脚本（ACP 入口已迁移到 `rlft/acp/`）
 ```
 
-根目录 `.py` 文件应 ≤20 行（shim 转发到子包），超过则迁移。
+根目录 `.py` 文件应 ≤20 行；超过则迁移。
 
 ## 编码规范（此目录专属）
 

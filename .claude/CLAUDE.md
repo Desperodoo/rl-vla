@@ -53,7 +53,7 @@ BUG-D Fix2 详情：见 `knowledge/decisions.md` ADR-043/045
 **ACP 重构状态**：
 - ACP 已从 `rlft/vlaw/acp` 提取到 `rlft/acp`
 - 新主路径：`rlft.acp.{config,advantage,hdf5_dataset,value_model,value_targets,train_value_model,infer_values}`
-- `rlft/vlaw/acp` 仅保留兼容 shim，避免旧入口和历史脚本立刻失效
+- `rlft/vlaw/acp` 已移除，统一使用 `rlft/acp`
 - `rlft/envs/acp_reward_wrapper.py`、`rlft/online/train_rlpd.py`、ACP 训练/推理脚本、分析脚本、单测都已切到新路径
 
 **验证结果**：

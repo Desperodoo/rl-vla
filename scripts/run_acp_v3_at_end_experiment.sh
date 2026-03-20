@@ -36,7 +36,7 @@ echo "  GPU: 0"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
 CUDA_VISIBLE_DEVICES=0 conda run -n rlft_ms3 \
-    python rlft/vlaw/scripts/run_acp_train.py \
+    python -m rlft.acp.train_value_model \
     --data_dirs "${DIR_DEMO}" "${DIR_POL}" "${DIR_TELE}" "${DIR_RL}" \
     --output_dir "${ACP_OUT}" \
     --num_steps 12000 \

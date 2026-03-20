@@ -67,7 +67,7 @@ train_acp() {
     echo "            GPU=${gpu}  steps=${steps}  data=${data_dirs[*]}"
 
     CUDA_VISIBLE_DEVICES=${gpu} conda run -n rlft_ms3 \
-        python rlft/vlaw/scripts/run_acp_train.py \
+        python -m rlft.acp.train_value_model \
         --data_dirs "${data_dirs[@]}" \
         --output_dir "${outdir}" \
         --num_steps "${steps}" \
