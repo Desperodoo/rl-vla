@@ -18,9 +18,9 @@
 | Phase 0 数据 | ✅ | v3 mixed=1200, high_suc=552, VAE 编码就绪 |
 | Phase 1 WM | ✅ | v5 训练完成（BUG-A/B/C/H 已修复），4000 steps |
 | Phase 2 VLM | ✅ | LoRA v3 300步, FP=0%, Recall=61.2% |
-| Phase 3 Imagination | ⛔ | **BUG-D 阻塞** |
-| Phase 4 策略更新 | ⛔ | 等 BUG-D |
-| Phase 5 评估 | ⛔ | 等 Phase 4 |
+| Phase 3 Imagination | 🔄 | BUG-D 已由 Dynamics Adapter V1 部分修复（+0.92 dB），待全量验证 |
+| Phase 4 策略更新 | ⏳ | 等 Phase 3 全量结果 |
+| Phase 5 评估 | ⏳ | 等 Phase 4 |
 
 ### ⛔ 关键阻塞：BUG-D（WM-Policy 动作空间鸿沟）
 
@@ -36,6 +36,17 @@ Imagination 推理时 future actions 使用 tiled 当前 EE pose（告诉 WM "�
 
 详细诊断：`results/vlaw/wm_diagnostic/DIAGNOSTIC_REPORT.md`、`BUG_D_EXPLAINED.md`
 BUG-D Fix2 详情：见 `knowledge/decisions.md` ADR-043/045
+
+### ⚠️ 主线关键点：BUG-D 已从“阻塞”转为“验证中”
+
+Imagination 退化的唯一显著根因仍是 BUG-D（future actions tiling），但当前已完成 Fix4（Dynamics Adapter V1）并得到端到端增益。
+
+已尝试修复：
+- Fix1（delta 积分）❌
+- Fix2（pd_ee_pose 迁移）❌
+- Fix4（Dynamics Adapter V1）✅：PSNR 29.59→30.51 dB（+0.92 dB，恢复约 42% gap）
+
+当前焦点：用 V1 adapter 跑全量 Imagination（50-200 条）并做 VLM 标注，对比 D_syn+ 产出率。
 
 ### 已修复的关键 Bug（摘要）
 

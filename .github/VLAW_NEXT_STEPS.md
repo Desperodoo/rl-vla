@@ -1,6 +1,6 @@
 # VLAW 下一步推进计划
 
-> **最后更新**: 2026-03-19 | **状态面板**: [vlaw-status.md](vlaw-status.md) | **高层计划**: [VLAW_REPRODUCTION_PLAN.md](VLAW_REPRODUCTION_PLAN.md)
+> **最后更新**: 2026-03-20 | **状态面板**: [vlaw-status.md](vlaw-status.md) | **高层计划**: [VLAW_REPRODUCTION_PLAN.md](VLAW_REPRODUCTION_PLAN.md)
 > **归档**: `_archive/v3/VLAW_NEXT_STEPS_v3.md`（2026-03-05 版本）
 
 ---
@@ -19,13 +19,21 @@ WM 需要 absolute EE pose，Policy 输出 delta action。Fix1（积分）和 Fi
 
 ---
 
+## 主线状态更新：BUG-D 已有 Adapter 修复，进入全量验证
+
+Fix4（Dynamics Adapter V1）已在端到端验证中带来 +0.92 dB（29.59→30.51）。
+当前主线任务从“寻找修复方向”切换为“全量验证与产出评估”：
+- P0：运行 V1 adapter imagination 全量（50-200 条）
+- P1：VLM 标注并对比 adapter vs tiled 的 D_syn+ 产出率
+
+---
+
 ## ACP + RLPD 支线
 
 | 优先级 | 任务 | 状态 |
 |--------|------|------|
-| P0 | v6 Grasp Bonus Sweep（10 configs, PLD/DSRL） | ⏳ 待启动 |
-| P1 | v6 结果分析 → 确定 PLD/DSRL SAE 是否突破 8% | ⛔ 等 v6 |
-| P2 | 最终 ACP 配置固化 + 集成到主 pipeline | ⛔ 等 v6 分析 |
+| P0 | v6 结果分析（已完成）与配置固化 | ✅ 完成 |
+| P1 | 最终 ACP 配置集成到主 pipeline | ⏳ 进行中 |
 
 AWSC 已归档：最佳 SAE=70%（`awsc_td_clip`），默认参数已写入 pipeline。
 
