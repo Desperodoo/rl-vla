@@ -619,10 +619,20 @@ class ImaginationRLEnv(gym.Env):
             (wm_act_steps, 7) future EE poses in world frame.
         """
         if self._dynamics_adapter is not None:
-            # Normalize state before feeding to adapter
             norm = self._adapter_norm
-            state_n = (state - norm["state_mean"]) / norm["state_std"]
-            return self._dynamics_adapter.predict(state_n, action_chunk)
+            # V3: optionally encode euler → sin/cos before normalization
+            if norm.get("sincos_input", False):
+                from rlft.vlaw.world_model.dynamics_adapter import DynamicsAdapterTrainer
+                state_enc = DynamicsAdapterTrainer.encode_state_sincos(state)
+            else:
+                state_enc = state
+            state_n = (state_enc - norm["state_mean"]) / norm["state_std"]
+            pred = self._dynamics_adapter.predict(state_n, action_chunk)
+            # V3: delta_target → add current_ee back
+            if norm.get("delta_target", False):
+                current_ee = state_to_ee_pose_7d(state[None, :])[0]  # (7,)
+                pred = pred + current_ee[None, :]  # (K, 7)
+            return pred
         # Fallback: treat action_chunk as base-frame EE pose
         return ee_pose_base_to_world(action_chunk)
 

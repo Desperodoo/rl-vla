@@ -1,0 +1,11 @@
+{
+  "task_id": "LiftPegUpright-v1",
+  "num_target": 5,
+  "num_generated": 0,
+  "sapien_errors": 0,
+  "other_errors": 0,
+  "total_time_min": 0.0,
+  "final_file": "",
+  "wm_ckpt": "checkpoints/vlaw/world_model/iter1_v5/checkpoint-4000.pt",
+  "policy_ckpt": "/home/wjz/rl-vla/checkpoints/il/best_eval_success_once.pt"
+}

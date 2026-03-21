@@ -1,0 +1,11 @@
+{
+  "task_id": "LiftPegUpright-v1",
+  "num_target": 2,
+  "num_generated": 2,
+  "sapien_errors": 0,
+  "other_errors": 0,
+  "total_time_min": 5.6,
+  "final_file": "results/vlaw/imagination_v1_adapter_test/synthetic_final_1773765700.h5",
+  "wm_ckpt": "checkpoints/vlaw/world_model/iter1_v5/checkpoint-4000.pt",
+  "policy_ckpt": "/home/wjz/rl-vla/checkpoints/il/best_eval_success_once.pt"
+}

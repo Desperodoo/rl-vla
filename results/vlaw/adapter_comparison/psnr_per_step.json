@@ -1,0 +1,58 @@
+{
+  "adapter_ckpt": "checkpoints/vlaw/dynamics_adapter/best.pt",
+  "wm_checkpoint": "checkpoints/vlaw/world_model/iter1_v5/checkpoint-4000.pt",
+  "num_samples": 30,
+  "aggregate": {
+    "psnr_gt": {
+      "mean": 34.326399045633146,
+      "std": 3.1334566863044997
+    },
+    "psnr_tiled": {
+      "mean": 31.75818078580048,
+      "std": 3.232865379858502
+    },
+    "psnr_adapter": {
+      "mean": 32.00029364938126,
+      "std": 2.7700428345305843
+    },
+    "pos_mae_mm": 13.69441032409668,
+    "euler_mae_rad": 0.06924741715192795
+  },
+  "per_step": {
+    "step_1": {
+      "pos_mae_mm": 7.724875450134277,
+      "euler_mae_rad": 0.00884936098009348,
+      "psnr_gt": 33.7903082629614,
+      "psnr_tiled": 33.79556289921924,
+      "psnr_adapter": 33.78503444088251
+    },
+    "step_2": {
+      "pos_mae_mm": 12.630839347839355,
+      "euler_mae_rad": 0.01258905790746212,
+      "psnr_gt": 34.101304022973665,
+      "psnr_tiled": 32.899821556431746,
+      "psnr_adapter": 32.87731618562157
+    },
+    "step_3": {
+      "pos_mae_mm": 15.237637519836426,
+      "euler_mae_rad": 0.15066932141780853,
+      "psnr_gt": 33.793391970315284,
+      "psnr_tiled": 31.190179162533404,
+      "psnr_adapter": 31.014150166412456
+    },
+    "step_4": {
+      "pos_mae_mm": 16.32175636291504,
+      "euler_mae_rad": 0.08655620366334915,
+      "psnr_gt": 33.372050179189614,
+      "psnr_tiled": 29.869167736939684,
+      "psnr_adapter": 30.20540958218908
+    },
+    "step_5": {
+      "pos_mae_mm": 16.55695152282715,
+      "euler_mae_rad": 0.08757307380437851,
+      "psnr_gt": 33.6683832437469,
+      "psnr_tiled": 29.20310756003649,
+      "psnr_adapter": 30.273115216937114
+    }
+  }
+}

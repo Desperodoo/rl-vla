@@ -229,13 +229,15 @@ def generate(*, num_trajs: int, num_interact: int, act_steps: int, gpu_id: int,
              save_every: int = 50, seed: int = 42,
              num_inference_steps: int = 25,
              guidance_scale: float | None = None,
-             motion_bucket_id: int | None = None) -> dict:
+             motion_bucket_id: int | None = None,
+             dynamics_adapter_ckpt: str | None = None) -> dict:
     device = f"cuda:{gpu_id}"
     print(f"\n{'='*60}")
     print(f"[IMAGINATION] 生成 {num_trajs} 条 | task={task_id}")
     print(f"  WM={wm_ckpt}  Policy={policy_ckpt}")
     print(f"  num_interact={num_interact}, act_steps={act_steps}")
     print(f"  num_inference_steps={num_inference_steps}, guidance_scale={guidance_scale}, motion_bucket_id={motion_bucket_id}")
+    print(f"  dynamics_adapter={dynamics_adapter_ckpt or 'None (tiled EE)'}")
     print(f"{'='*60}\n")
 
     t0 = time.time()
@@ -266,6 +268,7 @@ def generate(*, num_trajs: int, num_interact: int, act_steps: int, gpu_id: int,
         task_id=task_id, tasks=[task_id], decode_for_policy=use_real_policy,
         dry_run=False, gpu_id=gpu_id, sim_backend="physx_cuda",
         camera_width=192, camera_height=192, output_dir=output_dir,
+        dynamics_adapter_ckpt=dynamics_adapter_ckpt or "",
     )
     engine = ImaginationEnvEngine(wm_adapter=wm_adapter, policy=policy, config=cfg)
 
@@ -353,6 +356,8 @@ def main() -> None:
                         help="CFG max guidance scale (default: 2.0 from config)")
     parser.add_argument("--motion_bucket_id", type=int, default=None,
                         help="SVD motion conditioning (default: 127)")
+    parser.add_argument("--dynamics_adapter_ckpt", type=str, default=None,
+                        help="Dynamics Adapter checkpoint for BUG-D fix (default: None = tiled EE)")
     args = parser.parse_args()
 
     if args.dry_run:
@@ -372,6 +377,7 @@ def main() -> None:
         num_inference_steps=args.num_inference_steps,
         guidance_scale=args.guidance_scale,
         motion_bucket_id=args.motion_bucket_id,
+        dynamics_adapter_ckpt=args.dynamics_adapter_ckpt,
     )
 
     if args.visualize and summary.get("final_file"):
