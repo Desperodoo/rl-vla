@@ -1,12 +1,12 @@
-"""Generalized RLPD/ACP training internals diagnosis.
+"""Canonical training internals diagnosis for ACP v7 minimal mirror experiments.
 
-Analyzes ANY set of RLPD/ACP experiments from WandB data with a five-dimension
-diagnostic framework: Critic health, Actor drift, Exploration, Reward signal,
-and Advantage weighting.
+Analyzes RLPD/ACP experiments with a five-dimension diagnostic framework:
+critic health, actor drift, exploration, reward signal, and advantage weighting.
 
-Auto-detects algorithm type (AWSC/PLD/DSRL) per run from available metrics,
-generates algorithm-appropriate diagnostic figures, and produces a graded
-markdown report with prescriptions.
+The script remains generalized, but is now the canonical analyzer for the
+retained minimal comparison surface:
+- AWSC / PLD / DSRL
+- sim / acp mirror comparison
 
 Usage:
     # Analyze from pre-downloaded CSV data

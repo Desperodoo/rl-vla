@@ -1,12 +1,15 @@
-# ACP v7 Drift Regression 分析报告
+# [ARCHIVE] ACP v7 Drift Regression 分析报告
 
-**日期**：2026-03-23
+**定位**：本文件是中间阶段归档，回答“共享 drift 是否主要来自 q-target clipping，以及 sim baseline 如何恢复”。当前最终结论请优先参考：
+- `docs/vlaw/archive/acp_v7_qclip0_acp_analysis.md`
+- `docs/vlaw/archive/acp_v7_failure_analysis.md`
+- `docs/vlaw/archive/acp_v7_diagnosis_progress.md`
 
 ## 依据
 - 回归正式报告：`docs/vlaw/figures/rlpd_acp_v7_drift_reg/diagnosis_report.md`
 - 回归汇总：`docs/vlaw/figures/rlpd_acp_v7_drift_reg/diagnosis_summary.json`
 - 历史 fair replay 报告：`docs/vlaw/figures/rlpd_acp_v7_fair_replay/diagnosis_report.md`
-- 提交级 drift 审计：`.claude/acp_v7_codepath_drift_audit.md`
+- 提交级 drift 审计：`docs/vlaw/archive/acp_v7_codepath_drift_audit.md`
 
 ---
 

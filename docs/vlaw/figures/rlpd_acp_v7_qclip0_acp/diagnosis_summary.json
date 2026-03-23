@@ -1,0 +1,208 @@
+{
+  "pld_v7_qclip0_sim_baseline_s42": {
+    "algo": "pld",
+    "overall": "B",
+    "best_success_once": 0.9800000190734864,
+    "final_success_once": 0.9800000190734864,
+    "best_success_at_end": 0.8199999928474426,
+    "final_success_at_end": 0.8199999928474426,
+    "sae_retention": 0.8367346702938727,
+    "dimensions": {
+      "critic": {
+        "grade": "F",
+        "score": 10.0,
+        "evidence": {
+          "q_mean_avg": 197.58,
+          "q_range": 334.0,
+          "critic_loss_final": 515.82,
+          "td_target_std": 40.802
+        }
+      },
+      "actor": {
+        "grade": "A",
+        "score": 100.0,
+        "evidence": {
+          "entropy_min": -37.91,
+          "entropy_final": -4.08
+        }
+      },
+      "exploration": {
+        "grade": "A",
+        "score": 100.0,
+        "evidence": {
+          "temperature_avg": 0.3351,
+          "temperature_final": 0.4701,
+          "entropy_min": -37.91
+        }
+      },
+      "reward": {
+        "grade": "B",
+        "score": 80.0,
+        "evidence": {
+          "q_mean_avg": 197.58
+        }
+      },
+      "advantage": {
+        "grade": "N/A",
+        "score": 100,
+        "evidence": {}
+      }
+    }
+  },
+  "dsrl_v7_qclip0_sim_baseline_s42": {
+    "algo": "dsrl",
+    "overall": "B",
+    "best_success_once": 0.9399999976158142,
+    "final_success_once": 0.9399999976158142,
+    "best_success_at_end": 0.6600000262260437,
+    "final_success_at_end": 0.6600000262260437,
+    "sae_retention": 0.7021276892553687,
+    "dimensions": {
+      "critic": {
+        "grade": "F",
+        "score": 10.0,
+        "evidence": {
+          "q_mean_avg": 152.43,
+          "q_range": 193.7,
+          "critic_loss_final": 537.62,
+          "td_target_std": 17.63
+        }
+      },
+      "actor": {
+        "grade": "A",
+        "score": 100.0,
+        "evidence": {
+          "entropy_min": -8.59,
+          "entropy_final": -3.65
+        }
+      },
+      "exploration": {
+        "grade": "A",
+        "score": 100.0,
+        "evidence": {
+          "temperature_avg": 0.2813,
+          "temperature_final": 0.3099,
+          "entropy_min": -8.59
+        }
+      },
+      "reward": {
+        "grade": "B",
+        "score": 80.0,
+        "evidence": {
+          "q_mean_avg": 152.43
+        }
+      },
+      "advantage": {
+        "grade": "N/A",
+        "score": 100,
+        "evidence": {}
+      }
+    }
+  },
+  "pld_v7_qclip0_acp_mirror_s42": {
+    "algo": "pld",
+    "overall": "C",
+    "best_success_once": 0.699999988079071,
+    "final_success_once": 0.2199999988079071,
+    "best_success_at_end": 0.0199999995529651,
+    "final_success_at_end": 0.0,
+    "sae_retention": 0.028571428419375815,
+    "dimensions": {
+      "critic": {
+        "grade": "F",
+        "score": 25.0,
+        "evidence": {
+          "q_mean_avg": 47.92,
+          "q_range": 138.3,
+          "critic_loss_final": 37.8,
+          "td_target_std": 10.823
+        }
+      },
+      "actor": {
+        "grade": "B",
+        "score": 70.0,
+        "evidence": {
+          "entropy_min": -51.45,
+          "entropy_final": -3.67
+        }
+      },
+      "exploration": {
+        "grade": "B",
+        "score": 70.0,
+        "evidence": {
+          "temperature_avg": 0.2152,
+          "temperature_final": 0.2169,
+          "entropy_min": -51.45
+        }
+      },
+      "reward": {
+        "grade": "B",
+        "score": 80.0,
+        "evidence": {
+          "q_mean_avg": 47.92,
+          "acp_base_mean": 0.0201,
+          "acp_grasp_bonus_mean": 0.8629,
+          "is_grasping_rate": 0.8629
+        }
+      },
+      "advantage": {
+        "grade": "N/A",
+        "score": 100,
+        "evidence": {}
+      }
+    }
+  },
+  "dsrl_v7_qclip0_acp_mirror_s42": {
+    "algo": "dsrl",
+    "overall": "B",
+    "best_success_once": 0.9399999976158142,
+    "final_success_once": 0.8999999761581421,
+    "best_success_at_end": 0.0599999986588954,
+    "final_success_at_end": 0.0,
+    "sae_retention": 0.06382978596923135,
+    "dimensions": {
+      "critic": {
+        "grade": "F",
+        "score": 10.0,
+        "evidence": {
+          "q_mean_avg": 56.87,
+          "q_range": 107.9,
+          "critic_loss_final": 104.11,
+          "td_target_std": 12.408
+        }
+      },
+      "actor": {
+        "grade": "A",
+        "score": 100.0,
+        "evidence": {
+          "entropy_min": -9.14,
+          "entropy_final": -1.74
+        }
+      },
+      "exploration": {
+        "grade": "A",
+        "score": 100.0,
+        "evidence": {
+          "temperature_avg": 0.2543,
+          "temperature_final": 0.2373,
+          "entropy_min": -9.14
+        }
+      },
+      "reward": {
+        "grade": "B",
+        "score": 80.0,
+        "evidence": {
+          "q_mean_avg": 56.87,
+          "acp_base_mean": 0.0009,
+          "acp_grasp_bonus_mean": 0.7726,
+          "is_grasping_rate": 0.7726
+        }
+      },
+      "advantage": {
+        "grade": "N/A",
+        "score": 100,
+        "evidence": {}
+      }
+    }
+  }
+}

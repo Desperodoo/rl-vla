@@ -1,6 +1,9 @@
-# Code-path Drift Audit vs 54faf40 (`更新pld参数`)
+# [ARCHIVE] Code-path Drift Audit vs 54faf40 (`更新pld参数`)
 
-**日期**：2026-03-23
+**定位**：本文件是中间阶段归档，回答“与历史提交/代码路径相比，shared drift 具体来自哪里”。当前最终结论请优先参考：
+- `docs/vlaw/archive/acp_v7_qclip0_acp_analysis.md`
+- `docs/vlaw/archive/acp_v7_failure_analysis.md`
+- `docs/vlaw/archive/acp_v7_diagnosis_progress.md`
 
 ## 目标
 围绕提交 `54faf40` 做定向 drift audit，解释为什么当前代码路径下，即便使用 `runs/fair_comparison` 的 exact recipe，也没有复现历史高 SAE `PLD/DSRL + sim_reward` baseline。

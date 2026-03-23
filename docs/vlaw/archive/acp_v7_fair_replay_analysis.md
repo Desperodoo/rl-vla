@@ -1,6 +1,9 @@
-# ACP v7 Fair Replay 分析：为什么 exact recipe 也没有复现历史高 SAE
+# [ARCHIVE] ACP v7 Fair Replay 分析：为什么 exact recipe 也没有复现历史高 SAE
 
-**日期**：2026-03-22
+**定位**：本文件是中间阶段归档，回答“为什么 exact historical replay 在当前代码下没有复现高 SAE sim baseline”。当前最终结论请优先参考：
+- `docs/vlaw/archive/acp_v7_qclip0_acp_analysis.md`
+- `docs/vlaw/archive/acp_v7_failure_analysis.md`
+- `docs/vlaw/archive/acp_v7_diagnosis_progress.md`
 
 ## 依据
 - 历史 fair-comparison recipe：

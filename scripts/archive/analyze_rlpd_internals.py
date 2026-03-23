@@ -1,4 +1,4 @@
-"""ACP v3 RLPD 训练内科分析（Internal Diagnosis）。
+"""[LEGACY] ACP v3 RLPD 训练内科分析（Internal Diagnosis）。
 
 从 WandB CSV 数据出发，分析 6 组实验的训练内部指标：
 - Critic health: Q-value dynamics, loss convergence, td-target stability
