@@ -1,0 +1,313 @@
+{
+  "dsrl_v7_diag_sim_s42": {
+    "algo": "dsrl",
+    "overall": "B",
+    "best_success_once": 0.9200000166893004,
+    "final_success_once": 0.8999999761581421,
+    "best_success_at_end": 0.0799999982118606,
+    "final_success_at_end": 0.0,
+    "sae_retention": 0.08695651821806212,
+    "dimensions": {
+      "critic": {
+        "grade": "C",
+        "score": 65.0,
+        "evidence": {
+          "q_mean_avg": 16.74,
+          "q_range": 13.8,
+          "critic_loss_final": 1.86,
+          "td_target_std": 0.292
+        }
+      },
+      "actor": {
+        "grade": "A",
+        "score": 100.0,
+        "evidence": {
+          "entropy_min": -32.89,
+          "entropy_final": -0.93
+        }
+      },
+      "exploration": {
+        "grade": "B",
+        "score": 75.0,
+        "evidence": {
+          "temperature_avg": 0.0134,
+          "temperature_final": 0.0103,
+          "entropy_min": -32.89
+        }
+      },
+      "reward": {
+        "grade": "A",
+        "score": 100.0,
+        "evidence": {
+          "q_mean_avg": 16.74
+        }
+      },
+      "advantage": {
+        "grade": "N/A",
+        "score": 100,
+        "evidence": {}
+      }
+    }
+  },
+  "pld_v7_diag_sim_s42": {
+    "algo": "pld",
+    "overall": "B",
+    "best_success_once": 0.800000011920929,
+    "final_success_once": 0.4000000059604645,
+    "best_success_at_end": 0.0399999991059303,
+    "final_success_at_end": 0.0,
+    "sae_retention": 0.04999999813735485,
+    "dimensions": {
+      "critic": {
+        "grade": "B",
+        "score": 70.0,
+        "evidence": {
+          "q_mean_avg": 16.4,
+          "q_range": 39.3,
+          "critic_loss_final": 0.31,
+          "td_target_std": 1.106
+        }
+      },
+      "actor": {
+        "grade": "B",
+        "score": 70.0,
+        "evidence": {
+          "entropy_min": -54.55,
+          "entropy_final": -3.67
+        }
+      },
+      "exploration": {
+        "grade": "D",
+        "score": 45.0,
+        "evidence": {
+          "temperature_avg": 0.0278,
+          "temperature_final": 0.0032,
+          "entropy_min": -54.55
+        }
+      },
+      "reward": {
+        "grade": "A",
+        "score": 100.0,
+        "evidence": {
+          "q_mean_avg": 16.4
+        }
+      },
+      "advantage": {
+        "grade": "N/A",
+        "score": 100,
+        "evidence": {}
+      }
+    }
+  },
+  "awsc_v7_diag_sim_s42": {
+    "algo": "awsc",
+    "overall": "A",
+    "best_success_once": 0.8999999761581421,
+    "final_success_once": 0.8399999737739563,
+    "best_success_at_end": 0.7599999904632568,
+    "final_success_at_end": 0.7400000095367432,
+    "sae_retention": 0.8444444562182017,
+    "dimensions": {
+      "critic": {
+        "grade": "A",
+        "score": 100.0,
+        "evidence": {
+          "q_mean_avg": 3.96,
+          "q_range": 4.1,
+          "critic_loss_final": 0.07,
+          "td_target_std": 0.043
+        }
+      },
+      "actor": {
+        "grade": "A",
+        "score": 100.0,
+        "evidence": {
+          "flow_loss_first": 0.1307,
+          "flow_loss_last": 0.0422,
+          "flow_loss_ratio": 0.323
+        }
+      },
+      "exploration": {
+        "grade": "N/A",
+        "score": 100,
+        "evidence": {}
+      },
+      "reward": {
+        "grade": "A",
+        "score": 100.0,
+        "evidence": {
+          "online_cum_reward_avg": 0.6698,
+          "offline_cum_reward_avg": 4.3366,
+          "reward_gap_ratio": 6.5
+        }
+      },
+      "advantage": {
+        "grade": "C",
+        "score": 65.0,
+        "evidence": {
+          "advantage_mean_avg": 0.537,
+          "weight_max_peak": 61.2
+        }
+      }
+    }
+  },
+  "awsc_v7_diag_acp_s42": {
+    "algo": "awsc",
+    "overall": "B",
+    "best_success_once": 0.8999999761581421,
+    "final_success_once": 0.6200000047683716,
+    "best_success_at_end": 0.699999988079071,
+    "final_success_at_end": 0.5199999809265137,
+    "sae_retention": 0.7777777851363761,
+    "dimensions": {
+      "critic": {
+        "grade": "A",
+        "score": 100.0,
+        "evidence": {
+          "q_mean_avg": 3.81,
+          "q_range": 3.8,
+          "critic_loss_final": 0.13,
+          "td_target_std": 0.036
+        }
+      },
+      "actor": {
+        "grade": "A",
+        "score": 100.0,
+        "evidence": {
+          "flow_loss_first": 0.1398,
+          "flow_loss_last": 0.0331,
+          "flow_loss_ratio": 0.237
+        }
+      },
+      "exploration": {
+        "grade": "N/A",
+        "score": 100,
+        "evidence": {}
+      },
+      "reward": {
+        "grade": "D",
+        "score": 45.0,
+        "evidence": {
+          "online_cum_reward_avg": 0.0041,
+          "offline_cum_reward_avg": 4.3349,
+          "reward_gap_ratio": 1048.9,
+          "acp_step_mean": 0.0001
+        }
+      },
+      "advantage": {
+        "grade": "D",
+        "score": 50.0,
+        "evidence": {
+          "advantage_mean_avg": 1.025,
+          "weight_max_peak": 21.9
+        }
+      }
+    }
+  },
+  "dsrl_v7_diag_acp_s42": {
+    "algo": "dsrl",
+    "overall": "A",
+    "best_success_once": 0.9200000166893004,
+    "final_success_once": 0.9200000166893004,
+    "best_success_at_end": 0.1400000005960464,
+    "final_success_at_end": 0.0199999995529651,
+    "sae_retention": 0.15217391093083726,
+    "dimensions": {
+      "critic": {
+        "grade": "C",
+        "score": 55.0,
+        "evidence": {
+          "q_mean_avg": 10.6,
+          "q_range": 13.6,
+          "critic_loss_final": 16.33,
+          "td_target_std": 1.192
+        }
+      },
+      "actor": {
+        "grade": "A",
+        "score": 100.0,
+        "evidence": {
+          "entropy_min": -8.56,
+          "entropy_final": -1.9
+        }
+      },
+      "exploration": {
+        "grade": "A",
+        "score": 100.0,
+        "evidence": {
+          "temperature_avg": 0.1411,
+          "temperature_final": 0.1329,
+          "entropy_min": -8.56
+        }
+      },
+      "reward": {
+        "grade": "A",
+        "score": 100.0,
+        "evidence": {
+          "q_mean_avg": 10.6,
+          "acp_base_mean": 0.0344,
+          "acp_grasp_bonus_mean": 0.7778,
+          "is_grasping_rate": 0.7778
+        }
+      },
+      "advantage": {
+        "grade": "N/A",
+        "score": 100,
+        "evidence": {}
+      }
+    }
+  },
+  "pld_v7_diag_acp_s42": {
+    "algo": "pld",
+    "overall": "B",
+    "best_success_once": 0.8199999928474426,
+    "final_success_once": 0.8199999928474426,
+    "best_success_at_end": 0.0599999986588954,
+    "final_success_at_end": 0.0,
+    "sae_retention": 0.07317073071006494,
+    "dimensions": {
+      "critic": {
+        "grade": "C",
+        "score": 55.0,
+        "evidence": {
+          "q_mean_avg": 9.17,
+          "q_range": 41.8,
+          "critic_loss_final": 7.24,
+          "td_target_std": 1.327
+        }
+      },
+      "actor": {
+        "grade": "B",
+        "score": 70.0,
+        "evidence": {
+          "entropy_min": -55.53,
+          "entropy_final": -3.86
+        }
+      },
+      "exploration": {
+        "grade": "B",
+        "score": 70.0,
+        "evidence": {
+          "temperature_avg": 0.1353,
+          "temperature_final": 0.1286,
+          "entropy_min": -55.53
+        }
+      },
+      "reward": {
+        "grade": "A",
+        "score": 100.0,
+        "evidence": {
+          "q_mean_avg": 9.17,
+          "acp_base_mean": 0.1099,
+          "acp_grasp_bonus_mean": 0.627,
+          "is_grasping_rate": 0.627
+        }
+      },
+      "advantage": {
+        "grade": "N/A",
+        "score": 100,
+        "evidence": {}
+      }
+    }
+  }
+}

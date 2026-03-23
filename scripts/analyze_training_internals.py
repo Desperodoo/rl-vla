@@ -83,6 +83,31 @@ class RunInfo:
     color: str = "#666666"
 
 
+def infer_reward_source(config: dict) -> str:
+    """Infer reward source from run config.
+
+    Returns one of: acp, sim, unknown.
+    """
+    reward_mode = str(config.get("reward_mode", "")).lower()
+    if reward_mode == "acp":
+        return "acp"
+    if reward_mode == "sim":
+        return "sim"
+
+    if bool(config.get("acp_reward", False)):
+        return "acp"
+
+    if reward_mode in {"dense", "sparse"}:
+        return "sim"
+
+    exp_name = str(config.get("exp_name", "")).lower()
+    if "_acp_" in exp_name or exp_name.endswith("_acp") or "diag_acp" in exp_name:
+        return "acp"
+    if "_sim_" in exp_name or exp_name.endswith("_sim") or "diag_sim" in exp_name:
+        return "sim"
+    return "unknown"
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # CLI Args
 # ═══════════════════════════════════════════════════════════════════════════
@@ -697,7 +722,126 @@ def generate_figures(runs: dict[str, RunInfo], fig_dir: Path) -> list[str]:
     if sac_runs:
         generated.append(plot_entropy_temperature(sac_runs, fig_dir))
 
+    generated.append(plot_controlled_comparison(runs, fig_dir))
+
     return [p for p in generated if p is not None]
+
+
+def build_run_summary(runs: dict[str, RunInfo], scores: dict[str, dict[str, DimensionScore]]) -> dict:
+    """Build machine-readable per-run summary."""
+    summary: dict = {}
+    for name, dims in scores.items():
+        so = safe_col(runs[name].df, "eval/success_once")
+        sae = safe_col(runs[name].df, "eval/success_at_end")
+        best_so = float(so.max()) if so is not None else None
+        final_so = float(so.iloc[-1]) if so is not None else None
+        best_sae = float(sae.max()) if sae is not None else None
+        final_sae = float(sae.iloc[-1]) if sae is not None else None
+        sae_retention = None
+        if best_so is not None and best_so > 0 and best_sae is not None:
+            sae_retention = best_sae / best_so
+        reward_source = infer_reward_source(runs[name].config)
+        summary[name] = {
+            "algo": runs[name].algo,
+            "reward_source": reward_source,
+            "overall": overall_grade(dims),
+            "best_success_once": best_so,
+            "final_success_once": final_so,
+            "best_success_at_end": best_sae,
+            "final_success_at_end": final_sae,
+            "so_minus_sae_gap": (best_so - best_sae) if best_so is not None and best_sae is not None else None,
+            "sae_retention": sae_retention,
+            "dimensions": {
+                d: {"grade": s.grade, "score": s.score, "evidence": s.evidence}
+                for d, s in dims.items()
+            },
+        }
+    return summary
+
+
+def build_controlled_comparison(summary: dict) -> list[dict]:
+    """Aggregate per-run summary into algorithm × reward-source rows."""
+    rows: list[dict] = []
+    grouped: dict[tuple[str, str], list[dict]] = {}
+    for run_name, item in summary.items():
+        algo = item.get("algo", "unknown")
+        reward_source = item.get("reward_source", "unknown")
+        grouped.setdefault((algo, reward_source), []).append({"name": run_name, **item})
+
+    for (algo, reward_source), items in sorted(grouped.items()):
+        best_so_vals = [x["best_success_once"] for x in items if x["best_success_once"] is not None]
+        best_sae_vals = [x["best_success_at_end"] for x in items if x["best_success_at_end"] is not None]
+        final_sae_vals = [x["final_success_at_end"] for x in items if x["final_success_at_end"] is not None]
+        retention_vals = [x["sae_retention"] for x in items if x["sae_retention"] is not None]
+        gap_vals = [x["so_minus_sae_gap"] for x in items if x["so_minus_sae_gap"] is not None]
+        rows.append({
+            "algo": algo,
+            "reward_source": reward_source,
+            "num_runs": len(items),
+            "runs": [x["name"] for x in items],
+            "best_success_once_mean": float(np.mean(best_so_vals)) if best_so_vals else None,
+            "best_success_at_end_mean": float(np.mean(best_sae_vals)) if best_sae_vals else None,
+            "final_success_at_end_mean": float(np.mean(final_sae_vals)) if final_sae_vals else None,
+            "sae_retention_mean": float(np.mean(retention_vals)) if retention_vals else None,
+            "so_minus_sae_gap_mean": float(np.mean(gap_vals)) if gap_vals else None,
+        })
+    return rows
+
+
+def plot_controlled_comparison(runs: dict[str, RunInfo], fig_dir: Path) -> str | None:
+    """Plot 6-cell comparison for best SO / SAE and retention gap."""
+    rows = build_controlled_comparison(build_run_summary(runs, diagnose_all(runs)))
+    if not rows:
+        return None
+
+    valid_rows = [r for r in rows if r["reward_source"] in {"acp", "sim"} and r["algo"] in {"awsc", "pld", "dsrl"}]
+    if not valid_rows:
+        return None
+
+    algos = ["awsc", "pld", "dsrl"]
+    sources = ["sim", "acp"]
+    x = np.arange(len(algos))
+    width = 0.35
+
+    def get_metric(algo: str, source: str, key: str) -> float:
+        for row in valid_rows:
+            if row["algo"] == algo and row["reward_source"] == source:
+                val = row.get(key)
+                return 0.0 if val is None else float(val)
+        return 0.0
+
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+    for idx, metric in enumerate([
+        "best_success_once_mean",
+        "best_success_at_end_mean",
+        "so_minus_sae_gap_mean",
+    ]):
+        ax = axes[idx]
+        sim_vals = [get_metric(algo, "sim", metric) for algo in algos]
+        acp_vals = [get_metric(algo, "acp", metric) for algo in algos]
+        ax.bar(x - width / 2, sim_vals, width, label="sim", color="#4CAF50")
+        ax.bar(x + width / 2, acp_vals, width, label="acp", color="#FF5722")
+        ax.set_xticks(x)
+        ax.set_xticklabels([a.upper() for a in algos])
+        ax.grid(True, axis="y", alpha=0.3)
+        ax.legend()
+        if metric == "best_success_once_mean":
+            ax.set_title("Best SO")
+            ax.set_ylim(0, 1.0)
+        elif metric == "best_success_at_end_mean":
+            ax.set_title("Best SAE")
+            ax.set_ylim(0, 1.0)
+        else:
+            ax.set_title("SO - SAE Gap")
+            ax.set_ylim(0, 1.0)
+
+    fig.suptitle("Controlled Comparison — Algorithm × Reward Source", fontsize=14, fontweight="bold")
+    fig.tight_layout()
+    out = fig_dir / "fig_controlled_comparison.png"
+    fig.savefig(out, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  [Fig] {out}")
+    return str(out)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -785,6 +929,9 @@ def generate_report(
     report_path: Path,
 ) -> None:
     """Generate markdown diagnostic report."""
+    summary = build_run_summary(runs, scores)
+    comparison_rows = build_controlled_comparison(summary)
+
     lines = [
         "# Training Internals Diagnosis Report",
         "",
@@ -794,24 +941,39 @@ def generate_report(
         "",
         "---",
         "",
-        "## Five-Dimension Scorecard",
+        "## Controlled Comparison Summary",
         "",
-        "| Experiment | Algo | Critic | Actor | Exploration | Reward | Advantage | Overall |",
-        "|---|---|---|---|---|---|---|---|",
+        "| Algo | Reward | Runs | Best SO | Best SAE | Final SAE | SAE Retention | SO-SAE Gap |",
+        "|---|---|---:|---:|---:|---:|---:|---:|",
     ]
+
+    for row in comparison_rows:
+        best_so = "" if row["best_success_once_mean"] is None else f"{row['best_success_once_mean']:.3f}"
+        best_sae = "" if row["best_success_at_end_mean"] is None else f"{row['best_success_at_end_mean']:.3f}"
+        final_sae = "" if row["final_success_at_end_mean"] is None else f"{row['final_success_at_end_mean']:.3f}"
+        retention = "" if row["sae_retention_mean"] is None else f"{row['sae_retention_mean']:.3f}"
+        gap = "" if row["so_minus_sae_gap_mean"] is None else f"{row['so_minus_sae_gap_mean']:.3f}"
+        lines.append(
+            f"| {row['algo'].upper()} | {row['reward_source']} | {row['num_runs']} | "
+            f"{best_so} | {best_sae} | {final_sae} | {retention} | {gap} |"
+        )
+
+    lines.extend(["", "---", "", "## Five-Dimension Scorecard", "", "| Experiment | Algo | Reward | Critic | Actor | Exploration | Reward | Advantage | Overall |", "|---|---|---|---|---|---|---|---|---|"])
 
     for name in scores:
         dims = scores[name]
         algo = runs[name].algo.upper()
+        reward_source = infer_reward_source(runs[name].config)
         grades = [dims[d].grade for d in ["critic", "actor", "exploration", "reward", "advantage"]]
         og = overall_grade(dims)
-        lines.append(f"| {name} | {algo} | {' | '.join(grades)} | **{og}** |")
+        lines.append(f"| {name} | {algo} | {reward_source} | {' | '.join(grades)} | **{og}** |")
 
     lines.extend(["", "---", "", "## Detailed Findings", ""])
 
     for name, dims in scores.items():
         algo = runs[name].algo.upper()
-        lines.append(f"### {name} ({algo})")
+        reward_source = infer_reward_source(runs[name].config)
+        lines.append(f"### {name} ({algo}, {reward_source})")
         lines.append("")
         for dim_name in ["critic", "actor", "exploration", "reward", "advantage"]:
             ds = dims[dim_name]
@@ -828,7 +990,6 @@ def generate_report(
                 lines.append(f"- Evidence: {ev_str}")
             lines.append("")
 
-    # Prescriptions
     lines.extend(["---", "", "## Auto-Generated Prescriptions", ""])
     prescriptions = generate_prescriptions(scores)
     for p in prescriptions:

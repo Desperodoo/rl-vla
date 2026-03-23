@@ -169,6 +169,7 @@ class ACPRewardComputer:
         self._prev_values: Optional[np.ndarray] = None
         self._num_envs: int = 0
         self._loaded = False
+        self._last_details: dict[str, np.ndarray | float | str] = {}
 
     def _ensure_loaded(self) -> None:
         """Lazy-load the ACP value model on first use."""
@@ -255,42 +256,57 @@ class ACPRewardComputer:
         """
         N = rgb_base.shape[0]
         current_values = self._predict_values(rgb_base, rgb_render)
-
-        if self.config.reward_shaping == "potential":
-            # Potential-based: r = V(s') * scale
-            # V(s') ∈ [-1, 0], so reward ∈ [-scale, 0]
-            reward = current_values * self.config.reward_scale
-
-            # First call or reset envs: return zeros and prime cache
-            if self._prev_values is None:
-                self._prev_values = current_values.copy()
-                return np.zeros(N, dtype=np.float32)
-
-            # Zero out reward for envs that were reset
-            nan_mask = np.isnan(self._prev_values)
-            if nan_mask.any():
-                reward[nan_mask] = 0.0
-
-            self._prev_values = current_values.copy()
+        prev_values = None if self._prev_values is None else self._prev_values.copy()
+        if prev_values is None:
+            prev_for_delta = np.full(N, np.nan, dtype=np.float32)
         else:
-            # TD-shaped: r = (V(s') - V(s)) * scale
-            if self._prev_values is None:
+            prev_for_delta = prev_values.copy()
+        nan_mask = np.isnan(prev_for_delta)
+        if self.config.reward_shaping == "potential":
+            raw_reward = current_values * self.config.reward_scale
+            if prev_values is None:
                 self._prev_values = current_values.copy()
-                return np.zeros(N, dtype=np.float32)
+                reward = np.zeros(N, dtype=np.float32)
+            else:
+                reward = raw_reward.copy()
+                if nan_mask.any():
+                    reward[nan_mask] = 0.0
+                self._prev_values = current_values.copy()
+        else:
+            if prev_values is None:
+                self._prev_values = current_values.copy()
+                reward = np.zeros(N, dtype=np.float32)
+                raw_reward = np.zeros(N, dtype=np.float32)
+            else:
+                raw_reward = (current_values - prev_for_delta) * self.config.reward_scale
+                reward = raw_reward.copy()
+                if nan_mask.any():
+                    reward[nan_mask] = 0.0
+                self._prev_values = current_values.copy()
 
-            reward = (current_values - self._prev_values) * self.config.reward_scale
-
-            nan_mask = np.isnan(self._prev_values)
-            if nan_mask.any():
-                reward[nan_mask] = 0.0
-
-            self._prev_values = current_values.copy()
-
-        # Apply reward clipping if configured
+        clipped_reward = reward.copy()
         if self.config.reward_clip > 0:
-            reward = np.clip(reward, -self.config.reward_clip, self.config.reward_clip)
+            clipped_reward = np.clip(clipped_reward, -self.config.reward_clip, self.config.reward_clip)
 
-        return reward
+        td_delta = np.zeros(N, dtype=np.float32)
+        valid_prev = ~nan_mask
+        if prev_values is not None and valid_prev.any():
+            td_delta[valid_prev] = current_values[valid_prev] - prev_for_delta[valid_prev]
+
+        self._last_details = {
+            "current_values": current_values.astype(np.float32, copy=True),
+            "prev_values": prev_for_delta.astype(np.float32, copy=True),
+            "td_delta": td_delta,
+            "raw_reward": raw_reward.astype(np.float32, copy=True),
+            "reward_before_clip": reward.astype(np.float32, copy=True),
+            "reward_after_clip": clipped_reward.astype(np.float32, copy=True),
+            "clipped_mask": (np.abs(clipped_reward - reward) > 1e-6).astype(np.float32),
+            "reset_mask": nan_mask.astype(np.float32),
+            "reward_shaping": self.config.reward_shaping,
+            "reward_scale": float(self.config.reward_scale),
+            "reward_clip": float(self.config.reward_clip),
+        }
+        return clipped_reward.astype(np.float32, copy=False)
 
 
 class DualCameraRewardWrapper(gym.Wrapper):
@@ -331,6 +347,11 @@ class DualCameraRewardWrapper(gym.Wrapper):
         # Prime ACP value cache with initial observation
         rgb_base, rgb_render = self._extract_cameras(obs)
         self.acp_computer.compute_reward(rgb_base, rgb_render)  # returns zeros, primes cache
+        details = self.acp_computer._last_details
+        info["acp_reset_mask"] = np.ones(self._num_envs, dtype=np.float32)
+        if details:
+            info["acp_current_value"] = details["current_values"].copy()
+            info["acp_prev_value"] = details["prev_values"].copy()
 
         return obs, info
 
@@ -374,6 +395,16 @@ class DualCameraRewardWrapper(gym.Wrapper):
         info["acp_grasp_bonus"] = grasp_bonus
         info["acp_total_reward"] = total_reward.copy()
         info["is_grasping"] = is_grasped
+        details = self.acp_computer._last_details
+        if details:
+            info["acp_current_value"] = details["current_values"].copy()
+            info["acp_prev_value"] = details["prev_values"].copy()
+            info["acp_td_delta"] = details["td_delta"].copy()
+            info["acp_raw_reward"] = details["raw_reward"].copy()
+            info["acp_reward_before_clip"] = details["reward_before_clip"].copy()
+            info["acp_reward_after_clip"] = details["reward_after_clip"].copy()
+            info["acp_reward_clipped"] = details["clipped_mask"].copy()
+            info["acp_reset_mask"] = details["reset_mask"].copy()
 
         # Return ACP reward in the same format as original
         if torch.is_tensor(reward):

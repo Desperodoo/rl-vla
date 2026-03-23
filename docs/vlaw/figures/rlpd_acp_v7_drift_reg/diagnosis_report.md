@@ -1,0 +1,163 @@
+# Training Internals Diagnosis Report
+
+> Generated: 2026-03-23 11:22
+> Experiments: 6
+> Algorithms: dsrl, pld
+
+---
+
+## Controlled Comparison Summary
+
+| Algo | Reward | Runs | Best SO | Best SAE | Final SAE | SAE Retention | SO-SAE Gap |
+|---|---|---:|---:|---:|---:|---:|---:|
+| DSRL | acp | 1 | 0.940 | 0.060 | 0.000 | 0.064 | 0.880 |
+| DSRL | sim | 2 | 0.940 | 0.350 | 0.340 | 0.372 | 0.590 |
+| PLD | acp | 1 | 0.700 | 0.020 | 0.000 | 0.029 | 0.680 |
+| PLD | sim | 2 | 0.970 | 0.810 | 0.810 | 0.835 | 0.160 |
+
+---
+
+## Five-Dimension Scorecard
+
+| Experiment | Algo | Reward | Critic | Actor | Exploration | Reward | Advantage | Overall |
+|---|---|---|---|---|---|---|---|---|
+| pld_v7_reg_54faf40_sim_s42 | PLD | sim | F | A | A | B | N/A | **B** |
+| dsrl_v7_reg_qclip0_acp_s42 | DSRL | acp | F | A | A | B | N/A | **B** |
+| pld_v7_reg_qclip0_sim_s42 | PLD | sim | F | A | A | B | N/A | **B** |
+| dsrl_v7_reg_pre592df92_sim_s42 | DSRL | sim | F | A | A | B | N/A | **B** |
+| pld_v7_reg_qclip0_acp_s42 | PLD | acp | F | B | B | B | N/A | **C** |
+| dsrl_v7_reg_qclip0_sim_s42 | DSRL | sim | F | A | A | B | N/A | **B** |
+
+---
+
+## Detailed Findings
+
+### pld_v7_reg_54faf40_sim_s42 (PLD, sim)
+
+**Critic** (F, score=10):
+- Q-value range 221.8 >> 50: critic oscillating severely
+- Critic loss final 20%=445.0: not converging
+- TD target std=40.2: value estimation unstable
+- Evidence: q_mean_avg=160.55, q_range=221.8, critic_loss_final=445.02, td_target_std=40.179
+
+**Actor** (A, score=100):
+- Healthy
+- Evidence: entropy_min=-19.93, entropy_final=-4.33
+
+**Exploration** (A, score=100):
+- Healthy
+- Evidence: temperature_avg=0.3372, temperature_final=0.3988, entropy_min=-19.93
+
+**Reward** (B, score=80):
+- Q-value avg=160.6: Q-value inflated (likely high gamma compounding ACP rewards)
+- Evidence: q_mean_avg=160.55
+
+### dsrl_v7_reg_qclip0_acp_s42 (DSRL, acp)
+
+**Critic** (F, score=10):
+- Q-value range 107.9 >> 50: critic oscillating severely
+- Critic loss final 20%=104.1: not converging
+- TD target std=12.4: value estimation unstable
+- Evidence: q_mean_avg=56.87, q_range=107.9, critic_loss_final=104.11, td_target_std=12.408
+
+**Actor** (A, score=100):
+- Healthy
+- Evidence: entropy_min=-9.14, entropy_final=-1.74
+
+**Exploration** (A, score=100):
+- Healthy
+- Evidence: temperature_avg=0.2543, temperature_final=0.2373, entropy_min=-9.14
+
+**Reward** (B, score=80):
+- Q-value avg=56.9: Q-value inflated (likely high gamma compounding ACP rewards)
+- Evidence: q_mean_avg=56.87, acp_base_mean=0.0009, acp_grasp_bonus_mean=0.7726, is_grasping_rate=0.7726
+
+### pld_v7_reg_qclip0_sim_s42 (PLD, sim)
+
+**Critic** (F, score=10):
+- Q-value range 334.0 >> 50: critic oscillating severely
+- Critic loss final 20%=515.8: not converging
+- TD target std=40.8: value estimation unstable
+- Evidence: q_mean_avg=197.58, q_range=334.0, critic_loss_final=515.82, td_target_std=40.802
+
+**Actor** (A, score=100):
+- Healthy
+- Evidence: entropy_min=-37.91, entropy_final=-4.08
+
+**Exploration** (A, score=100):
+- Healthy
+- Evidence: temperature_avg=0.3351, temperature_final=0.4701, entropy_min=-37.91
+
+**Reward** (B, score=80):
+- Q-value avg=197.6: Q-value inflated (likely high gamma compounding ACP rewards)
+- Evidence: q_mean_avg=197.58
+
+### dsrl_v7_reg_pre592df92_sim_s42 (DSRL, sim)
+
+**Critic** (F, score=10):
+- Q-value range 1106.1 >> 50: critic oscillating severely
+- Critic loss final 20%=3860.3: not converging
+- TD target std=299.8: value estimation unstable
+- Evidence: q_mean_avg=769.05, q_range=1106.1, critic_loss_final=3860.27, td_target_std=299.846
+
+**Actor** (A, score=100):
+- Healthy
+- Evidence: entropy_min=-27.8, entropy_final=1.1
+
+**Exploration** (A, score=100):
+- Healthy
+- Evidence: temperature_avg=0.1937, temperature_final=0.319, entropy_min=-27.8
+
+**Reward** (B, score=80):
+- Q-value avg=769.0: Q-value inflated (likely high gamma compounding ACP rewards)
+- Evidence: q_mean_avg=769.05
+
+### pld_v7_reg_qclip0_acp_s42 (PLD, acp)
+
+**Critic** (F, score=25):
+- Q-value range 138.3 >> 50: critic oscillating severely
+- Critic loss final 20%=37.80: slow convergence
+- TD target std=10.8: value estimation unstable
+- Evidence: q_mean_avg=47.92, q_range=138.3, critic_loss_final=37.8, td_target_std=10.823
+
+**Actor** (B, score=70):
+- Entropy min=-51: policy collapsed at some point
+- Evidence: entropy_min=-51.45, entropy_final=-3.67
+
+**Exploration** (B, score=70):
+- Entropy min=-51: historical policy collapse
+- Evidence: temperature_avg=0.2152, temperature_final=0.2169, entropy_min=-51.45
+
+**Reward** (B, score=80):
+- Q-value avg=47.9: Q-value inflated (likely high gamma compounding ACP rewards)
+- Evidence: q_mean_avg=47.92, acp_base_mean=0.0201, acp_grasp_bonus_mean=0.8629, is_grasping_rate=0.8629
+
+### dsrl_v7_reg_qclip0_sim_s42 (DSRL, sim)
+
+**Critic** (F, score=10):
+- Q-value range 193.7 >> 50: critic oscillating severely
+- Critic loss final 20%=537.6: not converging
+- TD target std=17.6: value estimation unstable
+- Evidence: q_mean_avg=152.43, q_range=193.7, critic_loss_final=537.62, td_target_std=17.63
+
+**Actor** (A, score=100):
+- Healthy
+- Evidence: entropy_min=-8.59, entropy_final=-3.65
+
+**Exploration** (A, score=100):
+- Healthy
+- Evidence: temperature_avg=0.2813, temperature_final=0.3099, entropy_min=-8.59
+
+**Reward** (B, score=80):
+- Q-value avg=152.4: Q-value inflated (likely high gamma compounding ACP rewards)
+- Evidence: q_mean_avg=152.43
+
+---
+
+## Auto-Generated Prescriptions
+
+- **Lower gamma**: Reduce discount factor to shrink Q-value scale and improve critic stability.
+
+---
+
+*Report generated by `scripts/analyze_training_internals.py`*
