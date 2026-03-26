@@ -51,13 +51,13 @@ DATA_DIRS = {
 V3_SO_CKPT = PROJECT_ROOT / "checkpoints/vlaw/acp/v3_so/best.safetensors"
 V3_SAE_CKPT = PROJECT_ROOT / "checkpoints/vlaw/acp/v3_sae/best.safetensors"
 
-# 训练日志
-V3_SO_LOG = PROJECT_ROOT / "logs/vlaw/acp_v3_so_retrain.log"
-V3_SAE_LOG = PROJECT_ROOT / "logs/vlaw/acp_v3_sae_retrain.log"
+# 训练日志（实际保留的 v3 ACP 训练输出）
+V3_SO_LOG = PROJECT_ROOT / "logs/vlaw/acp_exp_aligned.log"
+V3_SAE_LOG = PROJECT_ROOT / "logs/vlaw/acp_exp_aligned.log"
 
-# 推理标注后的隔离数据目录
-EVAL_DIR_SO = PROJECT_ROOT / "data/vlaw/rollouts_eval/v3_so"
-EVAL_DIR_SAE = PROJECT_ROOT / "data/vlaw/rollouts_eval/v3_sae"
+# 推理标注后的 HDF5（当前已写回 ACP 结果的实际目录）
+EVAL_DIR_SO = PROJECT_ROOT / "data/vlaw/encoded/train_v4/LiftPegUpright-v1"
+EVAL_DIR_SAE = PROJECT_ROOT / "data/vlaw/encoded/train_v5/LiftPegUpright-v1"
 
 plt.rcParams.update({
     "figure.dpi": 150,
@@ -289,31 +289,251 @@ def read_infer_annotations(eval_dir: Path) -> dict:
     }
 
 
-# ── Part 5: Parse training logs ──────────────────────────────────────────
-def parse_training_log(log_path: Path) -> dict:
-    """解析 ACP 训练日志，提取 step/loss/mae/lr。"""
-    train_data = {"steps": [], "loss": [], "mae": [], "lr": []}
-    val_data = {"steps": [], "loss": [], "mae": []}
+def load_infer_records(eval_dir: Path) -> list[dict]:
+    """读取带 ACP 标注的 HDF5，并按轨迹返回明细记录。"""
+    records: list[dict] = []
+    h5_files = sorted(eval_dir.rglob("*.h5"))
 
+    for hp in h5_files:
+        with h5py.File(str(hp), "r") as f:
+            for key in sorted(f.keys()):
+                if not key.startswith("traj_"):
+                    continue
+                grp = f[key]
+                required = [
+                    "acp_value_target",
+                    "acp_value_pred",
+                    "acp_advantage",
+                    "acp_indicator",
+                    "acp_weight",
+                ]
+                if any(name not in grp for name in required):
+                    continue
+                if "env_success" not in grp:
+                    continue
+
+                env_success = np.asarray(grp["env_success"], dtype=bool)
+                records.append({
+                    "file": hp.name,
+                    "traj": key,
+                    "length": int(len(env_success)),
+                    "success_once": bool(env_success.any()),
+                    "success_at_end": bool(env_success[-1]),
+                    "targets": np.asarray(grp["acp_value_target"], dtype=np.float32),
+                    "preds": np.asarray(grp["acp_value_pred"], dtype=np.float32),
+                    "advantages": np.asarray(grp["acp_advantage"], dtype=np.float32),
+                    "indicators": np.asarray(grp["acp_indicator"], dtype=np.float32),
+                    "weights": np.asarray(grp["acp_weight"], dtype=np.float32),
+                    "threshold": float(grp.attrs.get("acp_threshold", np.nan)),
+                    "positive_ratio": float(grp.attrs.get("acp_positive_ratio", np.nan)),
+                })
+
+    return records
+
+
+def _split_records(records: list[dict]) -> dict[str, list[dict]]:
+    return {
+        "stable": [r for r in records if r["success_once"] and r["success_at_end"]],
+        "drop": [r for r in records if r["success_once"] and not r["success_at_end"]],
+        "fail": [r for r in records if not r["success_once"] and not r["success_at_end"]],
+    }
+
+
+def _cohen_d(a: np.ndarray, b: np.ndarray) -> float:
+    a = np.asarray(a, dtype=np.float64)
+    b = np.asarray(b, dtype=np.float64)
+    if len(a) < 2 or len(b) < 2:
+        return 0.0
+    a_var = float(np.var(a, ddof=1))
+    b_var = float(np.var(b, ddof=1))
+    pooled = ((len(a) - 1) * a_var + (len(b) - 1) * b_var) / (len(a) + len(b) - 2)
+    if pooled <= 1e-12:
+        return 0.0
+    return float((np.mean(a) - np.mean(b)) / np.sqrt(pooled))
+
+
+def summarize_layerwise_effects(records: list[dict]) -> dict[str, dict[str, float]]:
+    """按轨迹统计 target/pred/advantage/weight 的 hold-vs-drop 效应量。"""
+    groups = _split_records(records)
+    layer_map = {
+        "target": "targets",
+        "pred": "preds",
+        "advantage": "advantages",
+        "indicator": "indicators",
+        "weight": "weights",
+    }
+    summary: dict[str, dict[str, float]] = {}
+
+    for layer_name, key in layer_map.items():
+        stable = np.array([float(np.mean(r[key])) for r in groups["stable"]], dtype=np.float64)
+        drop = np.array([float(np.mean(r[key])) for r in groups["drop"]], dtype=np.float64)
+        fail = np.array([float(np.mean(r[key])) for r in groups["fail"]], dtype=np.float64)
+
+        summary[layer_name] = {
+            "stable_mean": float(np.mean(stable)) if len(stable) else 0.0,
+            "drop_mean": float(np.mean(drop)) if len(drop) else 0.0,
+            "fail_mean": float(np.mean(fail)) if len(fail) else 0.0,
+            "stable_minus_drop": float(np.mean(stable) - np.mean(drop)) if len(stable) and len(drop) else 0.0,
+            "stable_vs_drop_d": _cohen_d(stable, drop),
+            "stable_vs_fail_d": _cohen_d(stable, fail),
+            "drop_vs_fail_d": _cohen_d(drop, fail),
+            "stable_count": float(len(stable)),
+            "drop_count": float(len(drop)),
+            "fail_count": float(len(fail)),
+        }
+
+    return summary
+
+
+def compare_threshold_scopes(records: list[dict]) -> dict[str, object]:
+    """比较全局阈值和 per-trajectory 阈值的正样本覆盖情况。"""
+    groups = _split_records(records)
+    valid_ratios = [r["positive_ratio"] for r in records if np.isfinite(r["positive_ratio"])]
+    positive_ratio = float(np.mean(valid_ratios)) if valid_ratios else 0.3
+    valid_thresholds = [r["threshold"] for r in records if np.isfinite(r["threshold"])]
+    if valid_thresholds:
+        global_threshold = float(np.median(valid_thresholds))
+    else:
+        all_adv = np.concatenate([r["advantages"] for r in records]) if records else np.array([], dtype=np.float32)
+        global_threshold = float(np.quantile(all_adv, 1.0 - positive_ratio)) if len(all_adv) else 0.0
+
+    def _mean_positive_rate(recs: list[dict], threshold_fn) -> float:
+        if not recs:
+            return 0.0
+        rates = []
+        for r in recs:
+            threshold = threshold_fn(r)
+            rates.append(float(np.mean(r["advantages"] >= threshold)))
+        return float(np.mean(rates))
+
+    global_rates = {
+        name: _mean_positive_rate(recs, lambda _r: global_threshold)
+        for name, recs in groups.items()
+    }
+    local_rates = {
+        name: _mean_positive_rate(recs, lambda r: float(np.quantile(r["advantages"], 1.0 - positive_ratio)))
+        for name, recs in groups.items()
+    }
+
+    return {
+        "positive_ratio_target": positive_ratio,
+        "global_threshold": global_threshold,
+        "threshold_spread": float(np.max(valid_thresholds) - np.min(valid_thresholds)) if valid_thresholds else 0.0,
+        "global_positive_rates": global_rates,
+        "local_positive_rates": local_rates,
+        "global_gap_stable_drop": float(global_rates["stable"] - global_rates["drop"]),
+        "local_gap_stable_drop": float(local_rates["stable"] - local_rates["drop"]),
+        "gap_gain_from_local": float(
+            (local_rates["stable"] - local_rates["drop"]) - (global_rates["stable"] - global_rates["drop"])
+        ),
+        "local_minus_global": {
+            name: float(local_rates[name] - global_rates[name])
+            for name in groups.keys()
+        },
+    }
+
+
+def parse_training_log(log_path: Path) -> dict[str, dict[str, list[float]]]:
+    """解析训练日志中的 train/val 曲线；缺失日志时返回空序列。"""
+    series: dict[str, dict[str, list[float]]] = {
+        "train": {"steps": [], "mae": [], "loss": []},
+        "val": {"steps": [], "mae": [], "loss": []},
+    }
     if not log_path.exists():
-        return {"train": train_data, "val": val_data}
+        return series
 
-    for line in log_path.read_text().splitlines():
-        # Train: [ACP] step=200/12000 loss=4.2350 mae=0.1722 lr=4.35e-05
-        m = re.search(r"\[ACP\] step=(\d+)/\d+ loss=([\d.]+) mae=([\d.]+) lr=([\d.e+-]+)", line)
-        if m and "[val]" not in line:
-            train_data["steps"].append(int(m.group(1)))
-            train_data["loss"].append(float(m.group(2)))
-            train_data["mae"].append(float(m.group(3)))
-            train_data["lr"].append(float(m.group(4)))
-        # Val: [ACP] [val] step=200 loss=4.1234 mae=0.1700
-        m_val = re.search(r"\[ACP\] \[val\] step=(\d+) loss=([\d.]+) mae=([\d.]+)", line)
-        if m_val:
-            val_data["steps"].append(int(m_val.group(1)))
-            val_data["loss"].append(float(m_val.group(2)))
-            val_data["mae"].append(float(m_val.group(3)))
+    num = r"-?(?:\d+(?:\.\d+)?|\.\d+)(?:[eE][-+]?\d+)?"
+    generic_step_re = re.compile(r"(?:global_step|step|steps)\D*(\d+)", re.IGNORECASE)
+    generic_metric_re = re.compile(
+        r"(?:wandb:\s*)?(?P<key>(?:train|val|eval)/(?:mae|loss|critic_loss|actor_loss))\s+"
+        rf"(?P<value>{num})"
+    )
+    acp_train_re = re.compile(
+        rf"^\[ACP\]\s+step=(?P<step>\d+)/\d+\s+loss=(?P<loss>{num})\s+mae=(?P<mae>{num})",
+        re.IGNORECASE,
+    )
+    acp_val_re = re.compile(
+        rf"^\[ACP\]\s+\[val\]\s+step=(?P<step>\d+)\s+loss=(?P<loss>{num})\s+mae=(?P<mae>{num})",
+        re.IGNORECASE,
+    )
 
-    return {"train": train_data, "val": val_data}
+    records: dict[str, dict[int, dict[str, float]]] = {"train": {}, "val": {}}
+    last_step: dict[str, int | None] = {"train": None, "val": None}
+    fallback_step: dict[str, int] = {"train": 0, "val": 0}
+
+    for line in log_path.read_text(errors="ignore").splitlines():
+        acp_match = acp_val_re.search(line)
+        if acp_match:
+            step = int(acp_match.group("step"))
+            records["val"].setdefault(step, {})["loss"] = float(acp_match.group("loss"))
+            records["val"].setdefault(step, {})["mae"] = float(acp_match.group("mae"))
+            last_step["val"] = step
+            continue
+
+        acp_match = acp_train_re.search(line)
+        if acp_match:
+            step = int(acp_match.group("step"))
+            records["train"].setdefault(step, {})["loss"] = float(acp_match.group("loss"))
+            records["train"].setdefault(step, {})["mae"] = float(acp_match.group("mae"))
+            last_step["train"] = step
+            continue
+
+        step_match = generic_step_re.search(line)
+        metric_matches = list(generic_metric_re.finditer(line))
+        if not metric_matches:
+            continue
+
+        for metric_match in metric_matches:
+            raw_key = metric_match.group("key").lower()
+            split, metric = raw_key.split("/", 1)
+            split = "val" if split == "eval" else split
+            if split not in records:
+                continue
+
+            value = float(metric_match.group("value"))
+            metric = "loss" if metric in {"loss", "critic_loss", "actor_loss"} else metric
+            if metric not in {"mae", "loss"}:
+                continue
+
+            step = int(step_match.group(1)) if step_match else last_step[split]
+            if step is None:
+                step = fallback_step[split]
+                fallback_step[split] += 1
+            last_step[split] = step
+            records[split].setdefault(step, {})[metric] = value
+
+    for split in ["train", "val"]:
+        step_keys = sorted(records[split].keys())
+        series[split]["steps"] = [int(step) for step in step_keys]
+        mae_vals: list[float] = []
+        loss_vals: list[float] = []
+        for step in step_keys:
+            rec = records[split][step]
+            mae = rec.get("mae")
+            loss = rec.get("loss")
+            if mae is None and loss is not None:
+                mae = loss
+            if loss is None and mae is not None:
+                loss = mae
+            mae_vals.append(float(mae) if mae is not None else float("nan"))
+            loss_vals.append(float(loss) if loss is not None else float("nan"))
+        series[split]["mae"] = mae_vals
+        series[split]["loss"] = loss_vals
+
+    return series
+
+
+def build_infer_diagnostics() -> dict[str, dict[str, object]]:
+    """汇总 v3_so / v3_sae 的逐层信号保真度诊断。"""
+    diagnostics: dict[str, dict[str, object]] = {}
+    for name, eval_dir in {"v3_so": EVAL_DIR_SO, "v3_sae": EVAL_DIR_SAE}.items():
+        records = load_infer_records(eval_dir)
+        diagnostics[name] = {
+            "num_records": len(records),
+            "layerwise_effects": summarize_layerwise_effects(records) if records else {},
+            "threshold_scope": compare_threshold_scopes(records) if records else {},
+        }
+    return diagnostics
 
 
 # ── Figures ──────────────────────────────────────────────────────────────
@@ -765,6 +985,7 @@ def main():
     print("\n[Step 4/7] 读取推理标注...")
     infer_so = read_infer_annotations(EVAL_DIR_SO)
     infer_sae = read_infer_annotations(EVAL_DIR_SAE)
+    infer_diag = build_infer_diagnostics()
     if infer_so:
         print(f"  v3_so: MAE={infer_so['mae']:.4f}, pos_ratio={infer_so['positive_ratio']:.3f}, r={infer_so['pearson_r']:.4f}")
     else:
@@ -773,6 +994,28 @@ def main():
         print(f"  v3_sae: MAE={infer_sae['mae']:.4f}, pos_ratio={infer_sae['positive_ratio']:.3f}, r={infer_sae['pearson_r']:.4f}")
     else:
         print("  v3_sae: 无标注数据 (需先运行 `python -m rlft.acp.infer_values`)")
+
+    for name, diag in infer_diag.items():
+        layerwise = diag.get("layerwise_effects", {})
+        threshold_scope = diag.get("threshold_scope", {})
+        print(f"  {name}: records={diag.get('num_records', 0)}")
+        for layer_name in ["target", "pred", "advantage", "indicator", "weight"]:
+            layer = layerwise.get(layer_name, {})
+            if not layer:
+                continue
+            print(
+                "    "
+                f"{layer_name}: stable-drop={layer['stable_minus_drop']:.4f}, "
+                f"d={layer['stable_vs_drop_d']:.3f}, "
+                f"stable={layer['stable_mean']:.4f}, drop={layer['drop_mean']:.4f}"
+            )
+        if threshold_scope:
+            print(
+                "    threshold: "
+                f"global_gap={threshold_scope.get('global_gap_stable_drop', 0.0):.4f}, "
+                f"local_gap={threshold_scope.get('local_gap_stable_drop', 0.0):.4f}, "
+                f"gain={threshold_scope.get('gap_gain_from_local', 0.0):.4f}"
+            )
 
     # Step 5: Parse training logs
     print("\n[Step 5/7] 解析训练日志...")
@@ -804,6 +1047,7 @@ def main():
             "v3_sae": {"best_mae": 0.0463, "final_val_mae": 0.0466, "steps": 12000, "batch_size": 128},
         },
         "inference": {"v3_so": infer_so, "v3_sae": infer_sae},
+        "diagnostics": infer_diag,
     }
     if model_results:
         summary["model_comparison"] = {

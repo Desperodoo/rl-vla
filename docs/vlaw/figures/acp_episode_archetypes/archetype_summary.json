@@ -1,0 +1,42 @@
+{
+  "dsrl_sim_best_sae": {
+    "status": "ok",
+    "num_episodes": 12,
+    "stable": {
+      "so": 1.0,
+      "sae": 1.0
+    },
+    "drop": {
+      "so": 1.0,
+      "sae": 0.0
+    }
+  },
+  "dsrl_acp_best_so": {
+    "status": "ok",
+    "num_episodes": 12,
+    "stable": {
+      "so": 1.0,
+      "sae": 1.0
+    },
+    "drop": {
+      "so": 1.0,
+      "sae": 0.0
+    }
+  },
+  "pld_sim_best_sae": {
+    "status": "ok",
+    "num_episodes": 12,
+    "stable": {
+      "so": 1.0,
+      "sae": 1.0
+    },
+    "drop": {
+      "so": 1.0,
+      "sae": 0.0
+    }
+  },
+  "pld_acp_best_so": {
+    "status": "no_stable_or_drop_pair_found",
+    "num_episodes": 12
+  }
+}

@@ -1,0 +1,137 @@
+{
+  "corrected_v7": [
+    {
+      "name": "dsrl_acp",
+      "algo": "dsrl",
+      "reward": "acp",
+      "run_dir": "/home/wjz/rl-vla/runs/dsrl_v7_qclip0_acp_mirror_s42__1774237641",
+      "best_so": 0.9399999976158142,
+      "final_so": 0.8999999761581421,
+      "best_sae": 0.05999999865889549,
+      "final_sae": 0.0,
+      "retention": 0.06382978596923145,
+      "gap": 0.8799999989569187,
+      "q_final": 48.84364318847656,
+      "critic_loss_final": 114.37861633300781,
+      "temp_final": 0.23732389509677887,
+      "grasp_rate_final": 0.7599999904632568,
+      "acp_base_final": -0.6026105880737305,
+      "acp_bonus_final": 0.7599999904632568
+    },
+    {
+      "name": "dsrl_sim",
+      "algo": "dsrl",
+      "reward": "sim",
+      "run_dir": "/home/wjz/rl-vla/runs/dsrl_v7_reg_qclip0_sim_s42__1774197495",
+      "best_so": 0.9399999976158142,
+      "final_so": 0.9399999976158142,
+      "best_sae": 0.6600000262260437,
+      "final_sae": 0.6600000262260437,
+      "retention": 0.7021276892553687,
+      "gap": 0.2799999713897705,
+      "q_final": 136.630126953125,
+      "critic_loss_final": 514.1602783203125,
+      "temp_final": 0.30987703800201416,
+      "grasp_rate_final": null,
+      "acp_base_final": null,
+      "acp_bonus_final": null
+    },
+    {
+      "name": "pld_acp",
+      "algo": "pld",
+      "reward": "acp",
+      "run_dir": "/home/wjz/rl-vla/runs/pld_v7_qclip0_acp_mirror_s42__1774237641",
+      "best_so": 0.8199999928474426,
+      "final_so": 0.2199999988079071,
+      "best_sae": 0.019999999552965164,
+      "final_sae": 0.0,
+      "retention": 0.024390243570021685,
+      "gap": 0.7999999932944775,
+      "q_final": 46.03015899658203,
+      "critic_loss_final": 38.53126525878906,
+      "temp_final": 0.21686384081840515,
+      "grasp_rate_final": 0.8299999833106995,
+      "acp_base_final": 0.1464722454547882,
+      "acp_bonus_final": 0.8299999833106995
+    },
+    {
+      "name": "pld_sim",
+      "algo": "pld",
+      "reward": "sim",
+      "run_dir": "/home/wjz/rl-vla/runs/pld_v7_reg_qclip0_sim_s42__1774197493",
+      "best_so": 0.9800000190734863,
+      "final_so": 0.9800000190734863,
+      "best_sae": 0.8199999928474426,
+      "final_sae": 0.8199999928474426,
+      "retention": 0.8367346702938728,
+      "gap": 0.1600000262260437,
+      "q_final": 183.6131591796875,
+      "critic_loss_final": 424.9397888183594,
+      "temp_final": 0.4700666069984436,
+      "grasp_rate_final": null,
+      "acp_base_final": null,
+      "acp_bonus_final": null
+    }
+  ],
+  "v3_mismatch": {
+    "rate": 15.36,
+    "total_mismatch": 192,
+    "total_trajs": 1250,
+    "scan_results": {
+      "A: Demo": {
+        "total": 50,
+        "success_once": 50,
+        "success_at_end": 48,
+        "mismatch": 2
+      },
+      "B: PLD-Pretrained": {
+        "total": 400,
+        "success_once": 234,
+        "success_at_end": 121,
+        "mismatch": 113
+      },
+      "C: PLD-Teleop": {
+        "total": 400,
+        "success_once": 58,
+        "success_at_end": 1,
+        "mismatch": 57
+      },
+      "D: PLD-RL Prior": {
+        "total": 400,
+        "success_once": 21,
+        "success_at_end": 1,
+        "mismatch": 20
+      }
+    },
+    "inference": {
+      "v3_so": {
+        "num_frames": 40974,
+        "num_trajs": 1250,
+        "mae": 0.07139966636896133,
+        "rmse": 0.12308934330940247,
+        "pearson_r": 0.8851439731176464,
+        "positive_ratio": 0.29999511885585983,
+        "advantage_mean": 0.0013038442702963948,
+        "advantage_std": 0.0978584736585617,
+        "weight_mean": 0.45379638671875,
+        "weight_max": 1.0,
+        "target_mean": -0.5955961346626282,
+        "pred_mean": -0.5979819893836975
+      },
+      "v3_sae": {
+        "num_frames": 40974,
+        "num_trajs": 1250,
+        "mae": 0.045160457491874695,
+        "rmse": 0.08334475755691528,
+        "pearson_r": 0.921896334613206,
+        "positive_ratio": 0.29999511885585983,
+        "advantage_mean": 0.0011228193761780858,
+        "advantage_std": 0.0654873177409172,
+        "weight_mean": 0.544325053691864,
+        "weight_max": 1.0,
+        "target_mean": -0.6745608448982239,
+        "pred_mean": -0.6766407489776611
+      }
+    }
+  }
+}

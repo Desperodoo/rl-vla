@@ -30,7 +30,7 @@ offline_results/
 # 预训练权重和checkpoint (大文件，不入 git)
 checkpoints
 data
-
+runs
 # 结果中的大型可视化图片目录
 results/vlaw/dsyn_diagnosis_frames/
 results/vlaw/wm_baseline/
@@ -65,6 +65,11 @@ results/vlaw/imagination_eval/*.png
 results/vlaw/imagination_eval/**/*.png
 .hf_token_tmp
 
+# Robo-Dopamine example / benchmark data
+rlft/Robo-Dopamine/dataset/example_raw_data/
+rlft/Robo-Dopamine/example_raw_data/
+rlft/Robo-Dopamine/Robo-Dopamine-Bench/
+rlft/Robo-Dopamine/eval_results/
 
 # 其他临时文件和目录
 backend/

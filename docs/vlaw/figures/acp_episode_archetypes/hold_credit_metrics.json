@@ -1,0 +1,80 @@
+{
+  "dsrl_acp": {
+    "drop": {
+      "first_success_idx": 10,
+      "post_len": 90,
+      "post_success_mean": 0.31111112236976624,
+      "post_grasp_mean": 0.23333333432674408,
+      "post_sim_reward_mean": 1.3998099565505981,
+      "post_acp_base_mean": -0.0047221556305885315,
+      "post_acp_bonus_mean": 0.23333333432674408,
+      "post_acp_total_mean": 0.22861115634441376,
+      "post_acp_total_sum": 20.57500457763672,
+      "post_sim_reward_sum": 125.98289489746094
+    },
+    "stable": {
+      "first_success_idx": 14,
+      "post_len": 86,
+      "post_success_mean": 0.9069767594337463,
+      "post_grasp_mean": 0.023255813866853714,
+      "post_sim_reward_mean": 2.890333652496338,
+      "post_acp_base_mean": 0.012247074395418167,
+      "post_acp_bonus_mean": 0.023255813866853714,
+      "post_acp_total_mean": 0.03550288826227188,
+      "post_acp_total_sum": 3.053248405456543,
+      "post_sim_reward_sum": 248.56869506835938
+    }
+  },
+  "dsrl_sim": {
+    "drop": {
+      "first_success_idx": 10,
+      "post_len": 90,
+      "post_success_mean": 0.6333333253860474,
+      "post_grasp_mean": 0.0,
+      "post_sim_reward_mean": 2.3259012699127197,
+      "post_acp_base_mean": 0.0,
+      "post_acp_bonus_mean": 0.0,
+      "post_acp_total_mean": 0.0,
+      "post_acp_total_sum": 0.0,
+      "post_sim_reward_sum": 209.33111572265625
+    },
+    "stable": {
+      "first_success_idx": 10,
+      "post_len": 90,
+      "post_success_mean": 0.9111111164093018,
+      "post_grasp_mean": 0.0,
+      "post_sim_reward_mean": 2.9359042644500732,
+      "post_acp_base_mean": 0.0,
+      "post_acp_bonus_mean": 0.0,
+      "post_acp_total_mean": 0.0,
+      "post_acp_total_sum": 0.0,
+      "post_sim_reward_sum": 264.23138427734375
+    }
+  },
+  "pld_sim": {
+    "drop": {
+      "first_success_idx": 11,
+      "post_len": 89,
+      "post_success_mean": 0.12359550595283508,
+      "post_grasp_mean": 0.0,
+      "post_sim_reward_mean": 2.1917355060577393,
+      "post_acp_base_mean": 0.0,
+      "post_acp_bonus_mean": 0.0,
+      "post_acp_total_mean": 0.0,
+      "post_acp_total_sum": 0.0,
+      "post_sim_reward_sum": 195.064453125
+    },
+    "stable": {
+      "first_success_idx": 11,
+      "post_len": 89,
+      "post_success_mean": 0.8764045238494873,
+      "post_grasp_mean": 0.0,
+      "post_sim_reward_mean": 2.9080348014831543,
+      "post_acp_base_mean": 0.0,
+      "post_acp_bonus_mean": 0.0,
+      "post_acp_total_mean": 0.0,
+      "post_acp_total_sum": 0.0,
+      "post_sim_reward_sum": 258.8150939941406
+    }
+  }
+}
