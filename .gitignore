@@ -70,6 +70,7 @@ rlft/Robo-Dopamine/dataset/example_raw_data/
 rlft/Robo-Dopamine/example_raw_data/
 rlft/Robo-Dopamine/Robo-Dopamine-Bench/
 rlft/Robo-Dopamine/eval_results/
+results/robo_dopamine/
 
 # 其他临时文件和目录
 backend/

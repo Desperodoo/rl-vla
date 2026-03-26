@@ -11,8 +11,8 @@ Layout produced:
       cam_right_wrist.mp4
 
 Mapping:
-- cam_high.mp4     <- rgb_base, concatenated across trajectories
-- cam_left_wrist   <- rgb_render, concatenated across trajectories
+- cam_high.mp4     <- rgb_base, one ACP traj per Robo-Dopamine episode
+- cam_left_wrist   <- rgb_render
 - cam_right_wrist  <- rgb_render (duplicate, because ACP only stores two views)
 
 The output is intentionally raw-video-only so Robo-Dopamine's own dataset scripts
@@ -94,11 +94,14 @@ def _write_episode_annotation(episode_dir: Path, num_frames: int) -> None:
     )
 
 
-def _concat_trajs(grp_list: list[h5py.Group], key: str) -> np.ndarray:
-    arrays = [np.asarray(grp[key], dtype=np.uint8) for grp in grp_list if key in grp]
-    if not arrays:
-        raise RuntimeError(f"No '{key}' arrays found")
-    return np.concatenate(arrays, axis=0)
+def _traj_groups(f: h5py.File) -> Iterable[h5py.Group]:
+    for key in sorted(f.keys()):
+        if not key.startswith("traj_"):
+            continue
+        grp = f[key]
+        if "rgb_base" not in grp or "rgb_render" not in grp:
+            continue
+        yield grp
 
 
 def convert_acp_to_raw(input_root: Path, output_root: Path, fps: int, limit: int | None) -> None:
@@ -108,35 +111,35 @@ def convert_acp_to_raw(input_root: Path, output_root: Path, fps: int, limit: int
 
     for h5_path in _iter_h5_files(input_root):
         with h5py.File(str(h5_path), "r") as f:
-            traj_keys = [key for key in sorted(f.keys()) if key.startswith("traj_")]
-            if not traj_keys:
-                continue
-
-            traj_groups = [f[key] for key in traj_keys if "rgb_base" in f[key] and "rgb_render" in f[key]]
+            traj_groups = list(_traj_groups(f))
             if not traj_groups:
                 continue
 
             task_instructions.add(_pick_task_instruction(f))
 
-            episode_dir = output_root / f"episode_{episode_idx:04d}"
-            episode_dir.mkdir(parents=True, exist_ok=True)
+            for traj_group in traj_groups:
+                episode_dir = output_root / f"episode_{episode_idx:04d}"
+                episode_dir.mkdir(parents=True, exist_ok=True)
 
-            rgb_base = _concat_trajs(traj_groups, "rgb_base")
-            rgb_render = _concat_trajs(traj_groups, "rgb_render")
+                rgb_base = np.asarray(traj_group["rgb_base"], dtype=np.uint8)
+                rgb_render = np.asarray(traj_group["rgb_render"], dtype=np.uint8)
 
-            if rgb_base.shape[0] != rgb_render.shape[0]:
-                raise RuntimeError(
-                    f"Frame count mismatch in {h5_path}: rgb_base={rgb_base.shape[0]} rgb_render={rgb_render.shape[0]}"
-                )
+                if rgb_base.shape[0] != rgb_render.shape[0]:
+                    raise RuntimeError(
+                        f"Frame count mismatch in {h5_path}:{traj_group.name}: rgb_base={rgb_base.shape[0]} rgb_render={rgb_render.shape[0]}"
+                    )
 
-            _write_mp4(rgb_base, episode_dir / "cam_high.mp4", fps=fps)
-            _write_mp4(rgb_render, episode_dir / "cam_left_wrist.mp4", fps=fps)
-            _write_mp4(rgb_render, episode_dir / "cam_right_wrist.mp4", fps=fps)
-            _write_episode_annotation(episode_dir, num_frames=int(rgb_base.shape[0]))
+                _write_mp4(rgb_base, episode_dir / "cam_high.mp4", fps=fps)
+                _write_mp4(rgb_render, episode_dir / "cam_left_wrist.mp4", fps=fps)
+                _write_mp4(rgb_render, episode_dir / "cam_right_wrist.mp4", fps=fps)
+                _write_episode_annotation(episode_dir, num_frames=int(rgb_base.shape[0]))
 
-            episode_idx += 1
-            if limit is not None and episode_idx >= limit:
-                break
+                episode_idx += 1
+                if limit is not None and episode_idx >= limit:
+                    break
+
+        if limit is not None and episode_idx >= limit:
+            break
 
     if not task_instructions:
         task_instructions.add("Pick up the peg and lift it upright.")
@@ -152,7 +155,7 @@ def main() -> None:
     parser.add_argument("--input-root", type=Path, default=DEFAULT_INPUT_ROOT)
     parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
     parser.add_argument("--fps", type=int, default=DEFAULT_FPS)
-    parser.add_argument("--limit", type=int, default=None, help="Optional limit on the number of HDF5 files to convert")
+    parser.add_argument("--limit", type=int, default=None, help="Optional limit on the number of trajectories to convert")
     args = parser.parse_args()
 
     convert_acp_to_raw(args.input_root, args.output_root, fps=args.fps, limit=args.limit)
