@@ -38,9 +38,9 @@ STEPS_COMBINED=12000
 
 # ── Data directories ─────────────────────────────────────────────────────────
 DIR_DEMO="data/vlaw/rollouts/mixed"
-DIR_POL="data/vlaw/rollouts/pretrained_policy"
-DIR_TELE="data/vlaw/rollouts/teleop_sim"
-DIR_RL="data/vlaw/rollouts/rl_prior"
+DIR_POL="data/vlaw/rollouts_acp/pretrained_policy_rawfps"
+DIR_TELE="data/vlaw/rollouts_acp/teleop_sim_rawfps"
+DIR_RL="data/vlaw/rollouts_acp/rl_prior_rawfps"
 # Note: random rollouts intentionally excluded from combined — purely negative
 # examples with near-zero value signal can hurt value estimation.
 

@@ -1,8 +1,8 @@
-"""Validate ACP v3 data collected with ignore_terminations=True.
+"""Validate ACP rollout data directories and episode statistics.
 
 Checks:
-1. Episode length distribution (should be uniform ~max_steps/frame_skip)
-2. success_once vs success_at_end mismatch rate (should be significant, not 0.16%)
+1. Episode length distribution
+2. success_once vs success_at_end mismatch rate
 3. Per-dataset statistics (total trajs, success rates, frame counts)
 4. success_at_end binary label quality (has both True and False)
 """
@@ -22,10 +22,10 @@ sys.path.insert(0, str(_ROOT))
 # Data directories (v3 = ignore_terminations)
 # ---------------------------------------------------------------------------
 DATA_DIRS = {
-    "B: PLD_pretrained": _ROOT / "data/vlaw/rollouts/v3_pld_pretrained",
-    "C: PLD_teleop": _ROOT / "data/vlaw/rollouts/v3_pld_teleop",
-    "D: PLD_rl_prior": _ROOT / "data/vlaw/rollouts/v3_pld_rl_prior",
-    "E: PLD_random": _ROOT / "data/vlaw/rollouts/v3_pld_random",
+    "B: pretrained_policy_rawfps": _ROOT / "data/vlaw/rollouts_acp/pretrained_policy_rawfps",
+    "C: teleop_sim_rawfps": _ROOT / "data/vlaw/rollouts_acp/teleop_sim_rawfps",
+    "D: rl_prior_rawfps": _ROOT / "data/vlaw/rollouts_acp/rl_prior_rawfps",
+    "E: random_rawfps": _ROOT / "data/vlaw/rollouts_acp/random_rawfps",
 }
 
 # Also scan old data for comparison

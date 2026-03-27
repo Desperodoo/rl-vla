@@ -6,7 +6,7 @@
 
 用法:
   python -m rlft.acp.episode_viz \
-    --hdf5_paths data/vlaw/rollouts/pretrained_policy/*.h5 \
+    --hdf5_paths data/vlaw/rollouts_acp/pretrained_policy_rawfps/*.h5 \
     --output_dir docs/vlaw/figures/episodes \
     --num_success 1 --num_fail 1
 

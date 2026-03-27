@@ -31,7 +31,7 @@ import h5py
 import numpy as np
 
 
-DEFAULT_INPUT_ROOT = Path("/home/wjz/rl-vla/data/vlaw/rollouts/mixed/LiftPegUpright-v1")
+DEFAULT_INPUT_ROOT = Path("/home/wjz/rl-vla/data/vlaw/rollouts_acp")
 DEFAULT_OUTPUT_ROOT = Path("/home/wjz/rl-vla/data/robo_dopamine/acp_data_raw")
 DEFAULT_FPS = 10
 

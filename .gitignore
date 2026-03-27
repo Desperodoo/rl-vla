@@ -63,6 +63,9 @@ results/vlaw/wm_eval_ckpt400_viz/
 results/vlaw/_archive/
 results/vlaw/imagination_eval/*.png
 results/vlaw/imagination_eval/**/*.png
+results/vlaw/acp_rawfps_viz/
+results/vlaw/acp_batch_eval/
+results/vlaw/acp_batch_eval_rawfps/
 .hf_token_tmp
 
 # Robo-Dopamine example / benchmark data
@@ -74,3 +77,4 @@ results/robo_dopamine/
 
 # 其他临时文件和目录
 backend/
+unsloth_compiled_cache/
