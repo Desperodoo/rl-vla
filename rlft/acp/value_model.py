@@ -164,13 +164,13 @@ class Pistar06Model(nn.Module):
 
             self.vision_encoder = SiglipVisionModel.from_pretrained(
                 cfg.vision_repo_id,
-                dtype=self.model_dtype,
+                torch_dtype=self.model_dtype,
             )
         else:
             # 已经是 vision-only config
             self.vision_encoder = AutoModel.from_pretrained(
                 cfg.vision_repo_id,
-                dtype=self.model_dtype,
+                torch_dtype=self.model_dtype,
             )
         image_processor = AutoImageProcessor.from_pretrained(
             cfg.vision_repo_id, use_fast=True,
@@ -206,12 +206,12 @@ class Pistar06Model(nn.Module):
         )
         if prefer_causal:
             lm_with_head = AutoModelForCausalLM.from_pretrained(
-                cfg.language_repo_id, dtype=self.model_dtype,
+                cfg.language_repo_id, torch_dtype=self.model_dtype,
             )
             self.language_model = lm_with_head.model
         else:
             self.language_model = AutoModel.from_pretrained(
-                cfg.language_repo_id, dtype=self.model_dtype,
+                cfg.language_repo_id, torch_dtype=self.model_dtype,
             )
 
         # ---- 推断 hidden sizes ----
