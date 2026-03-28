@@ -26,6 +26,7 @@ inference_logs/
 inference_logs_old/
 .pytest_cache/
 offline_results/
+archive/
 
 # 预训练权重和checkpoint (大文件，不入 git)
 checkpoints
