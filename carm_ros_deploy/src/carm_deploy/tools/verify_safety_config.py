@@ -355,7 +355,7 @@ def main():
     parser.add_argument('--robot_ip', type=str, default='10.42.0.101',
                         help='机械臂 IP 地址')
     parser.add_argument('--test_mode', type=str, choices=['visual', 'check'],
-                        default='check',
+                        default='visual',
                         help='测试模式: visual=拖动示教+实时验证, check=仅检查当前位置')
     
     args = parser.parse_args()

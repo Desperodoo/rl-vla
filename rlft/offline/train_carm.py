@@ -84,6 +84,8 @@ class Args:
     gripper_head_hidden_dim: int = 256
 
     # Camera settings
+    camera_name: Optional[str] = None
+    """Optional camera view key to load from multi-view CARM dataset (e.g., wrist, third_person)."""
     target_image_size: Optional[Tuple[int, int]] = (128, 128)
     include_depth: bool = False
     """Whether to include depth channel in visual observations. When True, visual input is RGBD (4 channels).
@@ -413,13 +415,20 @@ def main():
     device = torch.device("cuda" if args.cuda and torch.cuda.is_available() else "cpu")
     
     # Get data info
-    data_info = get_carm_data_info(args.demo_path, state_mode=args.state_mode)
+    data_info = get_carm_data_info(
+        args.demo_path,
+        camera_name=args.camera_name,
+        state_mode=args.state_mode,
+    )
     state_dim = data_info["state_dim"]
     
     # Determine action dimension (continuous only, gripper is discrete)
     action_dim = 13 if args.action_mode == "full" else 7
     
     print(f"State dim: {state_dim}, Action dim: {action_dim}")
+    print(f"Selected camera: {data_info.get('selected_camera', '')}")
+    if data_info.get('available_cameras'):
+        print(f"Available cameras: {data_info['available_cameras']}")
     
     # Check depth support
     if args.include_depth:

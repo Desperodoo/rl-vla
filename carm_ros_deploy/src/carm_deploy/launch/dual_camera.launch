@@ -1,0 +1,132 @@
+<?xml version="1.0"?>
+<!--
+  双相机 + 录制一体化启动文件
+
+  目标:
+    - 同时启动腕部 D405 与第三方 D455
+    - 直接对接 record.launch 的多视角录制参数
+
+  使用示例:
+    roslaunch carm_deploy dual_camera.launch \
+      output_dir:=$(env HOME)/rl-vla/recorded_data \
+      wrist_serial:=218622279840 \
+      third_serial:=<D455_SERIAL>
+-->
+<launch>
+  <!-- ==================== 双相机参数 ==================== -->
+  <arg name="wrist_serial" default="218622279840"/>          <!-- D405 (eye-in-hand) -->
+  <arg name="third_serial" default="037522250003"/>                      <!-- D455 (third-person), 建议显式传入 -->
+
+  <arg name="wrist_camera_name" default="wrist"/>
+  <arg name="third_camera_name" default="third_person"/>
+
+  <!-- 腕部 D405 参数 -->
+  <arg name="wrist_color_width" default="640"/>
+  <arg name="wrist_color_height" default="480"/>
+  <arg name="wrist_color_fps" default="60"/>
+  <arg name="wrist_depth_width" default="640"/>
+  <arg name="wrist_depth_height" default="480"/>
+  <arg name="wrist_depth_fps" default="30"/>
+
+  <!-- 第三方 D455 参数 -->
+  <arg name="third_color_width" default="640"/>
+  <arg name="third_color_height" default="480"/>
+  <arg name="third_color_fps" default="60"/>
+  <arg name="third_depth_width" default="640"/>
+  <arg name="third_depth_height" default="480"/>
+  <arg name="third_depth_fps" default="30"/>
+
+  <!-- 公共开关 -->
+  <arg name="enable_color" default="true"/>
+  <arg name="enable_depth" default="false"/>
+  <arg name="enable_infra1" default="false"/>
+  <arg name="enable_infra2" default="false"/>
+  <arg name="enable_pointcloud" default="false"/>
+  <arg name="align_depth" default="false"/>
+  <arg name="filters" default=""/>
+
+  <!-- ==================== 录制参数（透传到 record.launch） ==================== -->
+  <arg name="start_record" default="true"/>
+  <arg name="output_dir" default="$(env HOME)/maniskill_benchmark/recorded_data/test_fps"/>
+  <arg name="robot_ip" default="10.42.0.101"/>
+  <arg name="robot_mode" default="3"/>
+  <arg name="record_freq" default="47"/>
+  <arg name="max_episodes" default="100"/>
+  <arg name="max_steps" default="1000"/>
+  <arg name="sync_slop" default="0.03"/>
+  <arg name="image_width" default="320"/>
+  <arg name="image_height" default="240"/>
+  <arg name="timeline_enabled" default="true"/>
+  <arg name="timeline_log" default=""/>
+  <arg name="teleop" default="true"/>
+  <arg name="vis" default="true"/>
+
+  <!-- ==================== 启动腕部 D405 ==================== -->
+  <include file="$(find carm_deploy)/launch/camera.launch">
+    <arg name="serial_no" value="$(arg wrist_serial)"/>
+    <arg name="camera" value="$(arg wrist_camera_name)"/>
+
+    <arg name="color_width" value="$(arg wrist_color_width)"/>
+    <arg name="color_height" value="$(arg wrist_color_height)"/>
+    <arg name="color_fps" value="$(arg wrist_color_fps)"/>
+    <arg name="depth_width" value="$(arg wrist_depth_width)"/>
+    <arg name="depth_height" value="$(arg wrist_depth_height)"/>
+    <arg name="depth_fps" value="$(arg wrist_depth_fps)"/>
+
+    <arg name="enable_color" value="$(arg enable_color)"/>
+    <arg name="enable_depth" value="$(arg enable_depth)"/>
+    <arg name="enable_infra1" value="$(arg enable_infra1)"/>
+    <arg name="enable_infra2" value="$(arg enable_infra2)"/>
+    <arg name="enable_pointcloud" value="$(arg enable_pointcloud)"/>
+    <arg name="align_depth" value="$(arg align_depth)"/>
+    <arg name="filters" value="$(arg filters)"/>
+  </include>
+
+  <!-- ==================== 启动第三方 D455 ==================== -->
+  <include file="$(find carm_deploy)/launch/camera.launch">
+    <arg name="serial_no" value="$(arg third_serial)"/>
+    <arg name="camera" value="$(arg third_camera_name)"/>
+
+    <arg name="color_width" value="$(arg third_color_width)"/>
+    <arg name="color_height" value="$(arg third_color_height)"/>
+    <arg name="color_fps" value="$(arg third_color_fps)"/>
+    <arg name="depth_width" value="$(arg third_depth_width)"/>
+    <arg name="depth_height" value="$(arg third_depth_height)"/>
+    <arg name="depth_fps" value="$(arg third_depth_fps)"/>
+
+    <arg name="enable_color" value="$(arg enable_color)"/>
+    <arg name="enable_depth" value="$(arg enable_depth)"/>
+    <arg name="enable_infra1" value="$(arg enable_infra1)"/>
+    <arg name="enable_infra2" value="$(arg enable_infra2)"/>
+    <arg name="enable_pointcloud" value="$(arg enable_pointcloud)"/>
+    <arg name="align_depth" value="$(arg align_depth)"/>
+    <arg name="filters" value="$(arg filters)"/>
+  </include>
+
+  <!-- ==================== 可选：直接启动录制 ==================== -->
+  <include if="$(arg start_record)" file="$(find carm_deploy)/launch/record.launch">
+    <arg name="use_camera" value="false"/>
+
+    <arg name="output_dir" value="$(arg output_dir)"/>
+    <arg name="robot_ip" value="$(arg robot_ip)"/>
+    <arg name="robot_mode" value="$(arg robot_mode)"/>
+
+    <arg name="camera_topics" value="/$(arg wrist_camera_name)/color/image_raw,/$(arg third_camera_name)/color/image_raw"/>
+    <arg name="camera_names" value="$(arg wrist_camera_name),$(arg third_camera_name)"/>
+    <arg name="primary_camera" value="$(arg wrist_camera_name)"/>
+    <arg name="sync_slop" value="$(arg sync_slop)"/>
+
+    <arg name="record_freq" value="$(arg record_freq)"/>
+    <arg name="max_episodes" value="$(arg max_episodes)"/>
+    <arg name="max_steps" value="$(arg max_steps)"/>
+
+    <arg name="image_width" value="$(arg image_width)"/>
+    <arg name="image_height" value="$(arg image_height)"/>
+
+    <arg name="timeline_enabled" value="$(arg timeline_enabled)"/>
+    <arg name="timeline_log" value="$(arg timeline_log)"/>
+
+    <arg name="teleop" value="$(arg teleop)"/>
+    <arg name="vis" value="$(arg vis)"/>
+  </include>
+</launch>

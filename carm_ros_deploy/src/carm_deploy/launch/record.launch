@@ -22,6 +22,8 @@
   <arg name="camera_name" default="camera"/>
   <arg name="camera_serial" default="218622279840"/>
   <arg name="camera_topics" default="/$(arg camera_name)/color/image_raw"/>
+  <arg name="camera_names" default="wrist"/>
+  <arg name="primary_camera" default="wrist"/>
   <arg name="sync_slop" default="0.02"/>
 
   <!-- 相机流参数（默认关闭红外/点云） -->
@@ -83,6 +85,8 @@
     <param name="robot_mode" value="$(arg robot_mode)"/>
     
     <param name="camera_topics" value="$(arg camera_topics)"/>
+    <param name="camera_names" value="$(arg camera_names)"/>
+    <param name="primary_camera" value="$(arg primary_camera)"/>
     <param name="sync_slop" value="$(arg sync_slop)"/>
     
     <param name="record_freq" value="$(arg record_freq)"/>

@@ -40,7 +40,19 @@ try:
 except ImportError:
     HAS_ROSPY = False
 
-from utils.log_compat import log_info as _log_info, log_warn as _log_warn
+
+def _log_info(msg: str):
+    if HAS_ROSPY:
+        rospy.loginfo(msg)
+    else:
+        print(f"[INFO] {msg}")
+
+
+def _log_warn(msg: str):
+    if HAS_ROSPY:
+        rospy.logwarn(msg)
+    else:
+        print(f"[WARN] {msg}")
 
 
 class InferenceRecorder:

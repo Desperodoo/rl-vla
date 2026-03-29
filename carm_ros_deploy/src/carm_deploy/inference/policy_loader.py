@@ -35,7 +35,16 @@ from rlft.utils.model_factory import create_agent_for_inference, SUPPORTED_ALGOR
 # ---------------------------------------------------------------------------
 # 日志工具 – 兼容 ROS (rospy) 和非 ROS 环境
 # ---------------------------------------------------------------------------
-from utils.log_compat import log_info as _log_info, log_warn as _log_warn, log_err as _log_err
+try:
+    import rospy
+    _log_info = rospy.loginfo
+    _log_warn = rospy.logwarn
+    _log_err = rospy.logerr
+except ImportError:
+    _logger = logging.getLogger(__name__)
+    _log_info = _logger.info
+    _log_warn = _logger.warning
+    _log_err = _logger.error
 
 
 # ============================================================================
@@ -295,7 +304,7 @@ class RealPolicy(PolicyInterface):
 
         # 3. 加载权重 -------------------------------------------------------
         _log_info(f"Loading checkpoint from: {model_path}")
-        ckpt = torch.load(model_path, map_location=self.device, weights_only=False)
+        ckpt = torch.load(model_path, map_location=self.device)
 
         # visual encoder
         if "visual_encoder" in ckpt:
@@ -483,20 +492,8 @@ class RealPolicy(PolicyInterface):
         if image.ndim == 4:
             image = image[0]
 
-        # BUG-1 fix: always preprocess — InferenceNode no longer does it
-        if image.ndim == 3 and image.shape[-1] in (1, 3, 4):
-            # HWC input → resize + CHW
+        if image.shape[0] != 3:
             image = self._preprocess_image(image)
-        elif image.ndim == 3 and image.shape[0] == 3:
-            # Already CHW — check if resize is needed
-            _, h, w = image.shape
-            th, tw = self.target_image_size or (h, w)
-            if (h, w) != (th, tw):
-                # CHW → HWC → resize → CHW
-                from einops import rearrange as _rearrange
-                image = _rearrange(image, 'c h w -> h w c')
-                image = self._preprocess_image(image)
-        # For other shapes, pass through as-is
 
         self._update_obs_history(image, qpos)
 

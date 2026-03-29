@@ -26,6 +26,7 @@ import time
 import threading
 import signal
 import atexit
+import json
 import numpy as np
 import cv2
 import h5py
@@ -76,6 +77,45 @@ class DataRecorder:
         # 图像参数
         self.image_width = config.get('image_width', 640)
         self.image_height = config.get('image_height', 480)
+
+        # 相机参数
+        raw_camera_topics = config.get('camera_topics', ['/camera/color/image_raw'])
+        if isinstance(raw_camera_topics, str):
+            raw_camera_topics = raw_camera_topics.split(',')
+        self.camera_topics = [topic.strip() for topic in raw_camera_topics if topic.strip()]
+
+        raw_camera_names = config.get('camera_names', '')
+        if isinstance(raw_camera_names, str):
+            raw_camera_names = [name.strip() for name in raw_camera_names.split(',') if name.strip()]
+        elif raw_camera_names is None:
+            raw_camera_names = []
+
+        if len(raw_camera_names) > 0:
+            if len(raw_camera_names) != len(self.camera_topics):
+                raise ValueError(
+                    f"camera_names count ({len(raw_camera_names)}) does not match "
+                    f"camera_topics count ({len(self.camera_topics)})"
+                )
+            self.camera_names = raw_camera_names
+        else:
+            self.camera_names = [self._topic_to_camera_name(topic, idx)
+                                 for idx, topic in enumerate(self.camera_topics)]
+
+        self.camera_index = {name: idx for idx, name in enumerate(self.camera_names)}
+
+        requested_primary = str(config.get('primary_camera', self.camera_names[0])).strip()
+        if requested_primary not in self.camera_index:
+            rospy.logwarn(
+                f"primary_camera '{requested_primary}' not found in camera_names {self.camera_names}, "
+                f"fallback to '{self.camera_names[0]}'"
+            )
+            requested_primary = self.camera_names[0]
+        self.primary_camera = requested_primary
+        self.primary_camera_idx = self.camera_index[self.primary_camera]
+
+        config['camera_topics'] = self.camera_topics
+        config['camera_names'] = self.camera_names
+        config['primary_camera'] = self.primary_camera
         
         # CV Bridge
         self.bridge = CvBridge()
@@ -105,6 +145,7 @@ class DataRecorder:
         # 数据缓冲
         self.episode_data = {
             'images': [],
+            'images_by_camera': {name: [] for name in self.camera_names},
             'qpos_joint': [],
             'qpos_end': [],
             'qpos': [],           # 兼容旧版格式
@@ -120,6 +161,7 @@ class DataRecorder:
         self.step_count = 0
         self.pending_save = False  # 等待用户确认保存
         self.pending_episode_data = None  # 待确认的 episode 数据
+        self.streams_ready = False
         
         # 键盘监听
         self.keyboard_thread = None
@@ -129,6 +171,16 @@ class DataRecorder:
         rospy.loginfo("DataRecorder initialized")
         rospy.loginfo(f"Output directory: {self.output_dir}")
         rospy.loginfo(f"Record frequency: {self.record_freq} Hz")
+        rospy.loginfo(f"Camera topics: {self.camera_topics}")
+        rospy.loginfo(f"Camera names: {self.camera_names}")
+        rospy.loginfo(f"Primary camera: {self.primary_camera}")
+
+    def _topic_to_camera_name(self, topic, index):
+        """从 topic 自动生成稳定的相机名"""
+        name = topic.strip('/').replace('/', '_').replace('-', '_')
+        if not name:
+            name = f"camera_{index}"
+        return name
     
     def _restore_terminal(self):
         """恢复终端设置（确保任何退出方式都能恢复）"""
@@ -194,11 +246,33 @@ class DataRecorder:
         if self.pending_save:
             rospy.logwarn("Please confirm save first (y/n)")
             return
+
+        if not self.streams_ready:
+            rospy.logwarn("Camera streams are not ready yet. Waiting for first frames from all camera topics.")
+            return
         
         if not self.recording:
             self.start_recording()
         else:
             self.stop_recording()
+
+    def _wait_for_camera_first_frames(self):
+        """等待所有相机话题收到首帧后再允许录制。"""
+        timeout_per_topic = float(self.config.get('camera_ready_timeout', 30.0))
+        rospy.loginfo("Waiting for first frame from all camera topics before enabling recording...")
+        for topic in self.camera_topics:
+            while not rospy.is_shutdown():
+                try:
+                    rospy.loginfo(f"  waiting topic: {topic}")
+                    rospy.wait_for_message(topic, Image, timeout=timeout_per_topic)
+                    rospy.loginfo(f"  first frame received: {topic}")
+                    break
+                except rospy.ROSException:
+                    rospy.logwarn(f"  timeout waiting for topic: {topic}. Retrying...")
+
+        self.streams_ready = not rospy.is_shutdown()
+        if self.streams_ready:
+            rospy.loginfo("All camera topics are ready. Recording can be started.")
     
     def _confirm_save(self, save):
         """确认是否保存 episode"""
@@ -236,6 +310,7 @@ class DataRecorder:
         self.step_count = 0
         self.episode_data = {
             'images': [],
+            'images_by_camera': {name: [] for name in self.camera_names},
             'qpos_joint': [],
             'qpos_end': [],
             'qpos': [],           # 兼容旧版格式
@@ -297,9 +372,19 @@ class DataRecorder:
             # 创建数据组
             obs = f.create_group('observations')
             
-            # 保存图像
+            # 保存主视角图像（兼容旧版）
             images = np.array(episode_data['images'])  # [T, H, W, C]
             obs.create_dataset('images', data=images, compression='gzip')
+
+            # 保存多相机图像（新格式）
+            images_by_camera = episode_data.get('images_by_camera', {})
+            if len(images_by_camera) > 0:
+                cameras_group = obs.create_group('images_by_camera')
+                for camera_name, camera_images in images_by_camera.items():
+                    if len(camera_images) == 0:
+                        continue
+                    camera_array = np.array(camera_images)
+                    cameras_group.create_dataset(camera_name, data=camera_array, compression='gzip')
             
             # 保存状态
             qpos_joint = np.array(episode_data['qpos_joint'])  # [T, 7]
@@ -333,9 +418,12 @@ class DataRecorder:
             f.attrs['record_freq'] = self.record_freq
             f.attrs['image_width'] = self.image_width
             f.attrs['image_height'] = self.image_height
+            f.attrs['camera_topics'] = json.dumps(self.camera_topics)
+            f.attrs['camera_names'] = json.dumps(self.camera_names)
+            f.attrs['primary_camera'] = self.primary_camera
             f.attrs['robot_ip'] = self.config.get('robot_ip', '')
             f.attrs['created_at'] = timestamp
-            f.attrs['data_version'] = 'v2'  # 新格式标记
+            f.attrs['data_version'] = 'v3'  # 多视角格式标记（兼容 v2 主图像字段）
         
         rospy.loginfo(f"Episode saved: {num_steps} steps, {images.nbytes / 1e6:.1f} MB")
     
@@ -355,7 +443,22 @@ class DataRecorder:
         t_obs_ready_sys = time.time()
         
         # 记录数据
-        self.episode_data['images'].append(obs['images'][0])  # 第一个相机
+        obs_images = obs['images']
+        if len(obs_images) <= self.primary_camera_idx:
+            rospy.logwarn_throttle(
+                1.0,
+                f"Primary camera index {self.primary_camera_idx} out of range, "
+                f"fallback to index 0 (available={len(obs_images)})"
+            )
+            primary_img = obs_images[0]
+        else:
+            primary_img = obs_images[self.primary_camera_idx]
+
+        self.episode_data['images'].append(primary_img)  # 兼容字段：主视角
+
+        for camera_name, camera_idx in self.camera_index.items():
+            if camera_idx < len(obs_images):
+                self.episode_data['images_by_camera'][camera_name].append(obs_images[camera_idx])
         self.episode_data['qpos_joint'].append(obs['qpos_joint'])
         self.episode_data['qpos_end'].append(obs['qpos_end'])
         self.episode_data['qpos'].append(obs['qpos'])  # 兼容旧版格式
@@ -409,6 +512,9 @@ class DataRecorder:
     def run(self):
         """运行记录循环"""
         rate = rospy.Rate(self.record_freq)
+
+        # 启动门禁：先等待两路（或多路）相机首帧就绪。
+        self._wait_for_camera_first_frames()
         
         rospy.loginfo("=" * 50)
         rospy.loginfo("Data Recording Node Ready")
@@ -510,6 +616,10 @@ def parse_args():
     parser.add_argument('--camera_topics', type=str,
                         default='/camera/color/image_raw',
                         help='Camera topic(s), comma separated')
+    parser.add_argument('--camera_names', type=str, default='',
+                        help='Camera name(s), comma separated (must align with camera_topics order)')
+    parser.add_argument('--primary_camera', type=str, default='',
+                        help='Primary camera name used for legacy observations/images (default: first camera)')
     parser.add_argument('--sync_slop', type=float, default=0.02,
                         help='Image sync tolerance in seconds')
     
@@ -560,7 +670,7 @@ def main():
 
     # 从 ROS 参数覆盖（支持 roslaunch <param> 方式）
     for key in [
-        'output_dir', 'robot_ip', 'robot_mode', 'camera_topics', 'sync_slop',
+        'output_dir', 'robot_ip', 'robot_mode', 'camera_topics', 'camera_names', 'primary_camera', 'sync_slop',
         'record_freq', 'max_episodes', 'max_steps', 'image_width', 'image_height',
         'teleop', 'vis', 'timeline_log', 'timeline_enabled', 'timeline_disabled'
     ]:
@@ -575,7 +685,12 @@ def main():
     
     # 处理相机话题
     if isinstance(config['camera_topics'], str):
-        config['camera_topics'] = config['camera_topics'].split(',')
+        config['camera_topics'] = [topic.strip() for topic in config['camera_topics'].split(',') if topic.strip()]
+
+    if not config.get('primary_camera', '').strip() and isinstance(config.get('camera_names', ''), str):
+        camera_names = [name.strip() for name in config['camera_names'].split(',') if name.strip()]
+        if len(camera_names) > 0:
+            config['primary_camera'] = camera_names[0]
     
     rospy.loginfo("=" * 50)
     rospy.loginfo("CARM Data Recording Node")
