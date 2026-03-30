@@ -20,6 +20,7 @@ umi-arx/
 detached-umi-policy/
 eval_output/
 recorded_data/
+recorded_data_splits/
 archive/
 timeline_record/
 inference_logs/
