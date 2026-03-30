@@ -10,10 +10,12 @@ Unified utilities for:
 import os
 import glob
 import json
+import time
 import numpy as np
 import torch
 import torch.nn as nn
 import cv2
+os.environ.setdefault("HDF5_USE_FILE_LOCKING", "FALSE")
 from collections import deque
 from typing import Dict, Optional, List, Any, Tuple, Callable, Literal
 from gymnasium import spaces
@@ -284,56 +286,53 @@ def create_obs_process_fn(env_id: str, output_format: str = "NCHW") -> Callable:
 # CARM Data Loading and Processing
 # =============================================================================
 
-def load_carm_episode(
-    filepath: str,
-    camera_name: Optional[str] = None,
-) -> Dict[str, np.ndarray]:
+def load_carm_episode(filepath: str) -> Dict[str, np.ndarray]:
     """Load a single CARM episode from HDF5 file.
 
     Supports both v1 (15D action) and v2 (8D action) formats.
+    Retries a few times for transient HDF5 lock/I-O errors.
     """
-    data = {}
-    with File(filepath, 'r') as f:
-        obs = f['observations']
+    retry_errors = (
+        "unable to lock file",
+        "resource temporarily unavailable",
+        "bad object header version number",
+    )
 
-        selected_camera = None
-        if camera_name and 'images_by_camera' in obs and camera_name in obs['images_by_camera']:
-            data['images'] = np.array(obs['images_by_camera'][camera_name])
-            selected_camera = camera_name
-        else:
-            data['images'] = np.array(obs['images'])
-            selected_camera = f.attrs.get('primary_camera', '')
+    last_error = None
+    for attempt in range(6):
+        try:
+            data = {}
+            with File(filepath, 'r') as f:
+                obs = f['observations']
+                data['images'] = np.array(obs['images'])
+                data['qpos_joint'] = np.array(obs['qpos_joint'])
+                data['qpos_end'] = np.array(obs['qpos_end'])
+                data['gripper'] = np.array(obs['gripper'])
+                data['timestamps'] = np.array(obs['timestamps'])
 
-        if 'images_by_camera' in obs:
-            data['camera_names'] = list(obs['images_by_camera'].keys())
-        else:
-            camera_names_attr = f.attrs.get('camera_names', '[]')
-            try:
-                data['camera_names'] = json.loads(camera_names_attr)
-            except Exception:
-                data['camera_names'] = []
-        data['selected_camera'] = selected_camera
-        data['qpos_joint'] = np.array(obs['qpos_joint'])
-        data['qpos_end'] = np.array(obs['qpos_end'])
-        data['gripper'] = np.array(obs['gripper'])
-        data['timestamps'] = np.array(obs['timestamps'])
+                if 'action' in f:
+                    data['action'] = np.array(f['action'])
 
-        if 'action' in f:
-            data['action'] = np.array(f['action'])
+                if 'teleop_scale' in f:
+                    data['teleop_scale'] = np.array(f['teleop_scale'])
 
-        if 'teleop_scale' in f:
-            data['teleop_scale'] = np.array(f['teleop_scale'])
+                data['num_steps'] = f.attrs.get('num_steps', len(data['timestamps']))
+                data['data_version'] = f.attrs.get('data_version', 'v1')
+            return data
+        except (BlockingIOError, OSError) as e:
+            msg = str(e).lower()
+            last_error = e
+            if any(err in msg for err in retry_errors) and attempt < 5:
+                time.sleep(0.2 * (attempt + 1))
+                continue
+            raise
 
-        data['num_steps'] = f.attrs.get('num_steps', len(data['timestamps']))
-        data['data_version'] = f.attrs.get('data_version', 'v1')
-
-    return data
+    raise last_error
 
 
 def load_carm_dataset(
     data_dir: str,
     num_episodes: Optional[int] = None,
-    camera_name: Optional[str] = None,
     verbose: bool = True,
 ) -> Dict[str, List[np.ndarray]]:
     """Load CARM dataset from directory containing HDF5 files.
@@ -370,7 +369,7 @@ def load_carm_dataset(
     
     iterator = tqdm(files, desc="Loading episodes") if verbose else files
     for filepath in iterator:
-        episode = load_carm_episode(filepath, camera_name=camera_name)
+        episode = load_carm_episode(filepath)
         
         dataset['images'].append(episode['images'])
         dataset['qpos_joint'].append(episode['qpos_joint'])
@@ -453,7 +452,6 @@ def create_carm_obs_process_fn(
 
 def get_carm_data_info(
     data_dir: str,
-    camera_name: Optional[str] = None,
     state_mode: Literal["joint_only", "ee_only", "both"] = "joint_only",
 ) -> Dict[str, Any]:
     """Get information about CARM dataset."""
@@ -473,18 +471,7 @@ def get_carm_data_info(
     
     with File(files[0], 'r') as f:
         obs = f['observations']
-
-        available_cameras = []
-        if 'images_by_camera' in obs:
-            available_cameras = list(obs['images_by_camera'].keys())
-
-        if camera_name and 'images_by_camera' in obs and camera_name in obs['images_by_camera']:
-            image_shape = obs['images_by_camera'][camera_name].shape[1:]
-            selected_camera = camera_name
-        else:
-            image_shape = obs['images'].shape[1:]
-            selected_camera = f.attrs.get('primary_camera', '')
-
+        image_shape = obs['images'].shape[1:]
         qpos_joint_dim = obs['qpos_joint'].shape[-1]
         qpos_end_dim = obs['qpos_end'].shape[-1]
         action_dim = f['action'].shape[-1] if 'action' in f else 15
@@ -501,8 +488,6 @@ def get_carm_data_info(
         'ee_pose_dim': 7,
         'action_dim': action_dim,
         'gripper_dim': 1,
-        'selected_camera': selected_camera,
-        'available_cameras': available_cameras,
     }
     info.update(saved_info.get('summary', {}))
     

@@ -29,7 +29,7 @@ import tyro
 from diffusers.optimization import get_scheduler
 from diffusers.training_utils import EMAModel
 from torch.utils.data.dataloader import DataLoader
-from torch.utils.data.sampler import BatchSampler, RandomSampler
+from torch.utils.data.sampler import BatchSampler, RandomSampler, SequentialSampler
 from torch.utils.tensorboard import SummaryWriter
 
 # Import from rlft package
@@ -62,12 +62,13 @@ class Args:
 
     # Data settings
     demo_path: str = "~/rl-vla/recorded_data/mix"
+    val_demo_path: Optional[str] = None
     num_demos: Optional[int] = None
     task_name: str = "carm_teleop_pick_place"
 
     # Action space settings
-    action_mode: Literal["full", "ee_only"] = "full"
-    state_mode: Literal["joint_only", "ee_only", "both"] = "joint_only"
+    action_mode: Literal["full", "ee_only"] = "ee_only"
+    state_mode: Literal["joint_only", "ee_only", "both"] = "ee_only"
     precompute_actions: bool = False
     normalize_actions: bool = True
     action_norm_mode: Literal["standard", "minmax"] = "standard"
@@ -84,8 +85,6 @@ class Args:
     gripper_head_hidden_dim: int = 256
 
     # Camera settings
-    camera_name: Optional[str] = None
-    """Optional camera view key to load from multi-view CARM dataset (e.g., wrist, third_person)."""
     target_image_size: Optional[Tuple[int, int]] = (128, 128)
     include_depth: bool = False
     """Whether to include depth channel in visual observations. When True, visual input is RGBD (4 channels).
@@ -185,7 +184,12 @@ class Args:
     # Logging settings
     log_freq: int = 1
     save_freq: int = 2000
+    eval_freq: int = 2000
+    eval_batches: int = 50
     num_dataload_workers: int = 0
+    early_stop_patience: int = 0
+    early_stop_min_iters: int = 2000
+    early_stop_min_delta: float = 0.0
     
     # Resume training
     resume_from: Optional[str] = None
@@ -413,22 +417,23 @@ def main():
     torch.backends.cudnn.deterministic = args.torch_deterministic
     
     device = torch.device("cuda" if args.cuda and torch.cuda.is_available() else "cpu")
-    
+
+    train_demo_path = os.path.expanduser(args.demo_path)
+    val_demo_path = os.path.expanduser(args.val_demo_path) if args.val_demo_path is not None else None
+    default_train_dir = os.path.join(train_demo_path, "train")
+    default_test_dir = os.path.join(train_demo_path, "test")
+    if val_demo_path is None and os.path.isdir(default_train_dir) and os.path.isdir(default_test_dir):
+        print(f"Detected split dataset directories under {train_demo_path}")
+        train_demo_path = default_train_dir
+        val_demo_path = default_test_dir
+
     # Get data info
-    data_info = get_carm_data_info(
-        args.demo_path,
-        camera_name=args.camera_name,
-        state_mode=args.state_mode,
-    )
+    data_info = get_carm_data_info(train_demo_path, state_mode=args.state_mode)
     state_dim = data_info["state_dim"]
     
-    # Determine action dimension (continuous only, gripper is discrete)
-    action_dim = 13 if args.action_mode == "full" else 7
-    
-    print(f"State dim: {state_dim}, Action dim: {action_dim}")
-    print(f"Selected camera: {data_info.get('selected_camera', '')}")
-    if data_info.get('available_cameras'):
-        print(f"Available cameras: {data_info['available_cameras']}")
+    # Determine action dimension placeholder (final value will follow dataset schema)
+    action_dim = 7
+    print(f"State dim: {state_dim}, Initial action dim: {action_dim}")
     
     # Check depth support
     if args.include_depth:
@@ -462,11 +467,12 @@ def main():
     # Create action normalizer
     action_normalizer = ActionNormalizer(mode=args.action_norm_mode) if args.normalize_actions else None
     
-    # Create dataset
+    # Create dataset on CPU; tensors are moved to GPU later in encode_observations.
+    # This avoids CUDA initialization inside DataLoader worker subprocesses.
     dataset = CARMDataset(
-        data_path=args.demo_path,
+        data_path=train_demo_path,
         obs_process_fn=obs_process_fn,
-        device=device,
+        device=torch.device("cpu"),
         num_episodes=args.num_demos,
         obs_horizon=args.obs_horizon,
         pred_horizon=args.pred_horizon,
@@ -475,7 +481,25 @@ def main():
         action_normalizer=action_normalizer,
         gripper_threshold=args.gripper_threshold,
     )
-    
+
+    val_dataset = None
+    val_dataloader = None
+    if val_demo_path is not None:
+        print(f"Loading validation dataset from {val_demo_path}...")
+        val_dataset = CARMDataset(
+            data_path=val_demo_path,
+            obs_process_fn=obs_process_fn,
+            device=torch.device("cpu"),
+            num_episodes=None,
+            obs_horizon=args.obs_horizon,
+            pred_horizon=args.pred_horizon,
+            action_mode=args.action_mode,
+            precompute_actions=args.precompute_actions,
+            action_normalizer=action_normalizer,
+            gripper_threshold=args.gripper_threshold,
+            fit_action_normalizer=False,
+        )
+
     # Create dataloader
     sampler = RandomSampler(dataset, replacement=False)
     batch_sampler = BatchSampler(sampler, batch_size=args.batch_size, drop_last=True)
@@ -487,6 +511,21 @@ def main():
         worker_init_fn=lambda worker_id: worker_init_fn(worker_id, base_seed=args.seed),
         persistent_workers=(args.num_dataload_workers > 0),
     )
+
+    if val_dataset is not None:
+        val_sampler = SequentialSampler(val_dataset)
+        val_batch_sampler = BatchSampler(val_sampler, batch_size=args.batch_size, drop_last=False)
+        val_dataloader = DataLoader(
+            val_dataset,
+            batch_sampler=val_batch_sampler,
+            num_workers=args.num_dataload_workers,
+            worker_init_fn=lambda worker_id: worker_init_fn(worker_id, base_seed=args.seed),
+            persistent_workers=(args.num_dataload_workers > 0),
+        )
+
+    # Finalize action dimension from dataset to avoid schema mismatch (v2 data is 7D ee_only)
+    action_dim = dataset.action_dim
+    print(f"Resolved action dim from dataset: {action_dim}")
     
     # Build visual encoder
     # Compute input channels: 3 for RGB, 4 for RGBD
@@ -655,6 +694,105 @@ def main():
             include_depth=args.include_depth,
             flatten=False,
         )
+
+    def _evaluate(eval_loader):
+        if eval_loader is None:
+            return None
+
+        ema.copy_to(ema_agent.parameters())
+        ema_agent.eval()
+        visual_encoder.eval()
+        gripper_head.eval()
+        if state_encoder is not None:
+            state_encoder.eval()
+
+        metrics = defaultdict(float)
+        total_count = 0
+        with torch.no_grad():
+            for batch_idx, data_batch in enumerate(eval_loader):
+                if args.eval_batches > 0 and batch_idx >= args.eval_batches:
+                    break
+
+                obs_seq = data_batch["observations"]
+                action_seq = data_batch["actions_cont"].to(device)
+                gripper_labels = data_batch["gripper_label"].to(device)
+
+                obs_features = _encode_obs(obs_seq)
+                loss_dict = ema_agent.compute_loss(obs_features=obs_features, actions=action_seq)
+                policy_loss = loss_dict["loss"] if isinstance(loss_dict, dict) else loss_dict
+
+                obs_cond = obs_features.reshape(obs_features.shape[0], -1)
+                gripper_logits = gripper_head(obs_cond)
+                gripper_loss = gripper_criterion(
+                    gripper_logits.view(-1, 2),
+                    gripper_labels.view(-1),
+                )
+                total_loss = policy_loss + args.gripper_ce_weight * gripper_loss
+
+                gripper_pred = gripper_logits.argmax(dim=-1)
+                gripper_acc = (gripper_pred == gripper_labels).float().mean()
+
+                pred_actions = ema_agent.get_action_deterministic(obs_features, num_steps=args.num_flow_steps)
+                pred_actions = pred_actions.detach()
+
+                if action_normalizer is not None:
+                    pred_np = pred_actions.cpu().numpy()
+                    gt_np = action_seq.detach().cpu().numpy()
+                    pred_flat = pred_np.reshape(-1, pred_np.shape[-1])
+                    gt_flat = gt_np.reshape(-1, gt_np.shape[-1])
+                    pred_actions = torch.from_numpy(
+                        action_normalizer.inverse_transform(pred_flat).reshape(pred_np.shape)
+                    ).to(device).float()
+                    action_seq = torch.from_numpy(
+                        action_normalizer.inverse_transform(gt_flat).reshape(gt_np.shape)
+                    ).to(device).float()
+
+                pred_gripper_cls = gripper_logits.argmax(dim=-1)
+                pred_gripper_vals = torch.where(
+                    pred_gripper_cls == 1,
+                    torch.full_like(pred_gripper_cls, args.gripper_close_val, dtype=torch.float32),
+                    torch.full_like(pred_gripper_cls, args.gripper_open_val, dtype=torch.float32),
+                )
+                gt_gripper_vals = torch.where(
+                    gripper_labels == 1,
+                    torch.full_like(gripper_labels, args.gripper_close_val, dtype=torch.float32),
+                    torch.full_like(gripper_labels, args.gripper_open_val, dtype=torch.float32),
+                )
+
+                pred_full = torch.cat([pred_actions, pred_gripper_vals.unsqueeze(-1)], dim=-1)
+                gt_full = torch.cat([action_seq, gt_gripper_vals.unsqueeze(-1)], dim=-1)
+
+                pred_1 = pred_full[:, 0, :]
+                gt_1 = gt_full[:, 0, :]
+                mae_1 = torch.mean(torch.abs(pred_1 - gt_1))
+
+                window_len = min(8, pred_full.shape[1], gt_full.shape[1])
+                mae_8 = torch.mean(torch.abs(pred_full[:, :window_len, :] - gt_full[:, :window_len, :]))
+
+                pose_mae_1 = torch.mean(torch.abs(pred_actions[:, 0, :] - action_seq[:, 0, :]))
+                pose_mae_8 = torch.mean(torch.abs(pred_actions[:, :window_len, :] - action_seq[:, :window_len, :]))
+
+                batch_size = action_seq.shape[0]
+                total_count += batch_size
+                metrics["policy_loss"] += policy_loss.item() * batch_size
+                metrics["gripper_loss"] += gripper_loss.item() * batch_size
+                metrics["total_loss"] += total_loss.item() * batch_size
+                metrics["gripper_accuracy"] += gripper_acc.item() * batch_size
+                metrics["mae_1step"] += mae_1.item() * batch_size
+                metrics["mae_8step"] += mae_8.item() * batch_size
+                metrics["pose_mae_1step"] += pose_mae_1.item() * batch_size
+                metrics["pose_mae_8step"] += pose_mae_8.item() * batch_size
+
+        ema_agent.train()
+        visual_encoder.train()
+        gripper_head.train()
+        if state_encoder is not None:
+            state_encoder.train()
+
+        if total_count == 0:
+            return None
+
+        return {k: float(v / total_count) for k, v in metrics.items()}
     
     # Training loop
     agent.train()
@@ -664,15 +802,19 @@ def main():
         state_encoder.train()
     
     pbar = tqdm(total=args.total_iters, initial=start_iter)
+    best_val_total_loss = float("inf")
+    no_improve_eval_count = 0
+    last_iteration = start_iter
     
     for iteration, data_batch in enumerate(train_dataloader):
         iteration = iteration + start_iter
         if iteration >= args.total_iters:
             break
+        last_iteration = iteration
         obs_seq = data_batch["observations"]
-        action_seq = data_batch["actions_cont"]  # Continuous actions without gripper
-        gripper_labels = data_batch["gripper_label"]  # Discrete gripper labels
-        
+        action_seq = data_batch["actions_cont"].to(device)  # Continuous actions without gripper
+        gripper_labels = data_batch["gripper_label"].to(device)  # Discrete gripper labels
+
         obs_features = _encode_obs(obs_seq)
         
         # Policy loss (continuous actions)
@@ -745,6 +887,51 @@ def main():
                 gripper_head, action_normalizer, optimizer,
                 lr_scheduler, ema, iteration, args
             )
+
+        if val_dataloader is not None and iteration > 0 and iteration % args.eval_freq == 0:
+            eval_metrics = _evaluate(val_dataloader)
+            if eval_metrics is not None:
+                writer.add_scalar("val/policy_loss", eval_metrics["policy_loss"], iteration)
+                writer.add_scalar("val/gripper_loss", eval_metrics["gripper_loss"], iteration)
+                writer.add_scalar("val/total_loss", eval_metrics["total_loss"], iteration)
+                writer.add_scalar("val/gripper_accuracy", eval_metrics["gripper_accuracy"], iteration)
+                writer.add_scalar("val/mae_1step", eval_metrics["mae_1step"], iteration)
+                writer.add_scalar("val/mae_8step", eval_metrics["mae_8step"], iteration)
+
+                if args.track:
+                    wandb.log({
+                        "val/policy_loss": eval_metrics["policy_loss"],
+                        "val/gripper_loss": eval_metrics["gripper_loss"],
+                        "val/total_loss": eval_metrics["total_loss"],
+                        "val/gripper_accuracy": eval_metrics["gripper_accuracy"],
+                        "val/mae_1step": eval_metrics["mae_1step"],
+                        "val/mae_8step": eval_metrics["mae_8step"],
+                        "charts/iteration": iteration,
+                    }, step=iteration)
+
+                improvement = best_val_total_loss - eval_metrics["total_loss"]
+                if improvement > args.early_stop_min_delta:
+                    best_val_total_loss = eval_metrics["total_loss"]
+                    no_improve_eval_count = 0
+                    ema.copy_to(ema_agent.parameters())
+                    save_ckpt(
+                        run_name, "best",
+                        agent, ema_agent, visual_encoder, state_encoder,
+                        gripper_head, action_normalizer, optimizer,
+                        lr_scheduler, ema, iteration, args
+                    )
+                else:
+                    no_improve_eval_count += 1
+                    if (
+                        args.early_stop_patience > 0
+                        and iteration >= args.early_stop_min_iters
+                        and no_improve_eval_count >= args.early_stop_patience
+                    ):
+                        print(
+                            f"Early stopping triggered at iter {iteration} "
+                            f"(best val/total_loss={best_val_total_loss:.6f})"
+                        )
+                        break
         
         pbar.update(1)
         pbar.set_postfix({
@@ -758,9 +945,20 @@ def main():
         run_name, "final", 
         agent, ema_agent, visual_encoder, state_encoder, 
         gripper_head, action_normalizer, optimizer,
-        lr_scheduler, ema, args.total_iters, args
+        lr_scheduler, ema, last_iteration, args
     )
-    
+
+    if val_dataloader is not None:
+        final_eval_metrics = _evaluate(val_dataloader)
+        if final_eval_metrics is not None:
+            print("Final validation metrics:")
+            print(f"  total_loss: {final_eval_metrics['total_loss']:.4f}")
+            print(f"  policy_loss: {final_eval_metrics['policy_loss']:.4f}")
+            print(f"  gripper_loss: {final_eval_metrics['gripper_loss']:.4f}")
+            print(f"  gripper_accuracy: {final_eval_metrics['gripper_accuracy']:.4f}")
+            print(f"  mae_1step: {final_eval_metrics['mae_1step']:.4f}")
+            print(f"  mae_8step: {final_eval_metrics['mae_8step']:.4f}")
+
     writer.close()
     
     # Close WandB

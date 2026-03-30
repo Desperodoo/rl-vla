@@ -78,3 +78,4 @@ results/robo_dopamine/
 # 其他临时文件和目录
 backend/
 unsloth_compiled_cache/
+.claude/worktrees/

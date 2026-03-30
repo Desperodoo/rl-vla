@@ -581,27 +581,32 @@ class OfflineEvaluator:
         
         predicted_actions = []
         gt_actions = []
+        window8_metrics = []
         
         T = len(episode['qpos_joint'])
-        
-        # ======== 正确计算相对动作（对齐训练逻辑） ========
-        raw_actions = episode['action']  # [T, 15] 原始动作（包含目标位姿）
-        qpos_end = episode['qpos_end']   # [T, 8] 当前末端位姿 [x,y,z,qx,qy,qz,qw,gripper]
-        
-        # 构建相对动作：计算从当前位姿到目标位姿的相对变换（与训练一致）
+        raw_actions = episode['action']
+        qpos_end = episode['qpos_end']
+
+        # 构建相对动作：根据数据集 action 维度对齐训练逻辑
         relative_actions = np.zeros_like(raw_actions)
-        for t in range(T):
-            relative_actions[t, :6] = raw_actions[t, :6]  # 关节角度（绝对值）
-            relative_actions[t, 6] = raw_actions[t, 6]    # 夹爪状态
-            
-            # 计算相对位姿：从当前位姿到目标位姿（与训练时一致）
-            ref_pose = qpos_end[t, :7]           # 当前帧末端位姿
-            target_pose = raw_actions[t, 7:14]   # 目标位姿（来自 action）
-            relative_pose = compute_relative_pose_transform(ref_pose, target_pose)
-            relative_actions[t, 7:14] = relative_pose
-            
-            relative_actions[t, 14] = raw_actions[t, 14]  # 末端夹爪
-        
+        if raw_actions.shape[-1] == 15:
+            for t in range(T):
+                relative_actions[t, :6] = raw_actions[t, :6]
+                relative_actions[t, 6] = raw_actions[t, 6]
+
+                ref_pose = qpos_end[t, :7]
+                target_pose = raw_actions[t, 7:14]
+                relative_actions[t, 7:14] = compute_relative_pose_transform(ref_pose, target_pose)
+                relative_actions[t, 14] = raw_actions[t, 14]
+        elif raw_actions.shape[-1] == 8:
+            for t in range(T):
+                ref_pose = qpos_end[t, :7]
+                target_pose = raw_actions[t, :7]
+                relative_actions[t, :7] = compute_relative_pose_transform(ref_pose, target_pose)
+                relative_actions[t, 7] = raw_actions[t, 7]
+        else:
+            raise ValueError(f"Unsupported action shape: {raw_actions.shape}")
+
         iterator = tqdm(range(T), desc=f"Episode {ep_idx}") if verbose else range(T)
         
         # 获取 state_mode 和 action_mode
@@ -625,13 +630,13 @@ class OfflineEvaluator:
             
             # 根据 action_mode 构建 GT action
             if action_mode == 'full':
-                gt_action = relative_actions[t]  # [15]
+                gt_action = relative_actions[t]  # [15] 或 [8]，由数据集格式决定
             else:  # ee_only
-                gt_action = relative_actions[t, 7:15]  # [8] rel_pose(7) + gripper(1)
-            
+                gt_action = relative_actions[t]
+
             # 推理
             pred_actions = self.policy.predict(
-                image, qpos, 
+                image, qpos,
                 num_steps=num_steps,
                 deterministic=deterministic
             )  # [pred_horizon, action_dim_full]
@@ -639,17 +644,36 @@ class OfflineEvaluator:
             
             predicted_actions.append(pred_action)
             gt_actions.append(gt_action)
-        
+
+            horizon_len = min(8, pred_actions.shape[0], T - t)
+            if horizon_len > 0:
+                window8_metrics.append(
+                    self._compute_metrics(
+                        pred_actions[:horizon_len],
+                        relative_actions[t:t + horizon_len],
+                    )
+                )
+
         predicted_actions = np.array(predicted_actions)
         gt_actions = np.array(gt_actions)
-        
-        # 计算指标
         metrics = self._compute_metrics(predicted_actions, gt_actions)
-        
+
+        window8_metrics_avg = {}
+        if window8_metrics:
+            metric_keys = [k for k in window8_metrics[0].keys() if k != 'joint_errors']
+            window8_metrics_avg = {
+                k: float(np.mean([m[k] for m in window8_metrics]))
+                for k in metric_keys
+            }
+
+        episode_metrics = dict(metrics)
+        episode_metrics.update({f'window8_{k}': v for k, v in window8_metrics_avg.items()})
+
         return {
             'predicted_actions': predicted_actions,
             'gt_actions': gt_actions,
-            'metrics': metrics,
+            'metrics': episode_metrics,
+            'window8_metrics': window8_metrics_avg,
             'qpos_joint': episode['qpos_joint'],
             'qpos_end': episode['qpos_end'],
         }
@@ -755,11 +779,86 @@ class OfflineEvaluator:
         num_steps = len(pred)
         time_steps = np.arange(num_steps)
         
-        # 创建图形
+        # 8D action format: [dx, dy, dz, qx, qy, qz, qw, gripper]
+        # 15D action format: [6 joint, gripper, 7D ee pose, gripper]
+        if gt.shape[1] == 8:
+            fig, axes = plt.subplots(3, 4, figsize=(22, 12))
+            fig.suptitle(f'Episode {ep_idx}: Predicted vs Ground Truth', fontsize=14)
+
+            for i, label in enumerate(['X', 'Y', 'Z']):
+                ax = axes[0, i]
+                ax.plot(time_steps, gt[:, i], 'b-', label='Ground Truth', alpha=0.7)
+                ax.plot(time_steps, pred[:, i], 'r--', label='Predicted', alpha=0.7)
+                ax.set_xlabel('Time Step')
+                ax.set_ylabel(f'Rel {label}')
+                ax.legend()
+                ax.grid(True, alpha=0.3)
+                ax.set_title(f'Rel {label}')
+
+            ax = axes[0, 3]
+            ax.plot(time_steps, gt[:, 7], 'b-', label='Ground Truth', alpha=0.7)
+            ax.plot(time_steps, pred[:, 7], 'r--', label='Predicted', alpha=0.7)
+            ax.set_xlabel('Time Step')
+            ax.set_ylabel('Gripper')
+            ax.legend()
+            ax.grid(True, alpha=0.3)
+            ax.set_title('Gripper')
+
+            for i, label in enumerate(['qx', 'qy', 'qz', 'qw']):
+                ax = axes[1, i]
+                ax.plot(time_steps, gt[:, 3 + i], 'b-', label='Ground Truth', alpha=0.7)
+                ax.plot(time_steps, pred[:, 3 + i], 'r--', label='Predicted', alpha=0.7)
+                ax.set_xlabel('Time Step')
+                ax.set_ylabel(label)
+                ax.legend()
+                ax.grid(True, alpha=0.3)
+                ax.set_title(f'Rel {label}')
+
+            step_errors = np.mean(np.abs(pred - gt), axis=1)
+            cumulative_errors = np.cumsum(step_errors)
+            pose_errors = np.mean(np.abs(pred[:, :7] - gt[:, :7]), axis=1)
+
+            ax = axes[2, 0]
+            ax.plot(time_steps, step_errors, 'b-', alpha=0.7)
+            ax.set_xlabel('Time Step')
+            ax.set_ylabel('MAE')
+            ax.grid(True, alpha=0.3)
+            ax.set_title('Step-wise MAE')
+
+            ax = axes[2, 1]
+            ax.plot(time_steps, cumulative_errors, 'r-', alpha=0.7)
+            ax.set_xlabel('Time Step')
+            ax.set_ylabel('Cumulative Error')
+            ax.grid(True, alpha=0.3)
+            ax.set_title('Cumulative Error')
+
+            ax = axes[2, 2]
+            ax.plot(time_steps, pose_errors, 'k-', alpha=0.7)
+            ax.set_xlabel('Time Step')
+            ax.set_ylabel('Pose MAE')
+            ax.grid(True, alpha=0.3)
+            ax.set_title('Pose MAE per step')
+
+            ax = axes[2, 3]
+            ax.plot(time_steps, step_errors, 'k-', alpha=0.7)
+            ax.set_xlabel('Time Step')
+            ax.set_ylabel('Total MAE')
+            ax.grid(True, alpha=0.3)
+            ax.set_title('Total MAE per step')
+
+            plt.tight_layout()
+
+            if save:
+                save_path = os.path.join(self.output_dir, f'comparison_ep{ep_idx:03d}.png')
+                plt.savefig(save_path, dpi=150, bbox_inches='tight')
+                print(f"Saved: {save_path}")
+
+            plt.close()
+            return
+
         fig, axes = plt.subplots(3, 4, figsize=(22, 12))
         fig.suptitle(f'Episode {ep_idx}: Predicted vs Ground Truth', fontsize=14)
-        
-        # 1. 关节 1-3
+
         for i in range(3):
             ax = axes[0, i]
             ax.plot(time_steps, gt[:, i], 'b-', label='Ground Truth', alpha=0.7)
@@ -769,8 +868,7 @@ class OfflineEvaluator:
             ax.legend()
             ax.grid(True, alpha=0.3)
             ax.set_title(f'Joint {i+1}')
-        
-        # 2. 关节 4-6
+
         for i in range(3):
             ax = axes[1, i]
             ax.plot(time_steps, gt[:, i+3], 'b-', label='Ground Truth', alpha=0.7)
@@ -781,7 +879,6 @@ class OfflineEvaluator:
             ax.grid(True, alpha=0.3)
             ax.set_title(f'Joint {i+4}')
 
-        # 3. EE 位置 (x, y, z)
         ax = axes[0, 3]
         colors = ['r', 'g', 'b']
         labels = ['X', 'Y', 'Z']
@@ -794,7 +891,6 @@ class OfflineEvaluator:
         ax.grid(True, alpha=0.3)
         ax.set_title('EE Relative Position')
 
-        # 4. EE 四元数 (qx, qy, qz, qw)
         ax = axes[1, 3]
         q_labels = ['qx', 'qy', 'qz', 'qw']
         for i, l in enumerate(q_labels):
@@ -805,8 +901,7 @@ class OfflineEvaluator:
         ax.legend(ncol=2)
         ax.grid(True, alpha=0.3)
         ax.set_title('EE Relative Rotation')
-        
-        # 5. 夹爪（joint 通道）
+
         ax = axes[2, 0]
         ax.plot(time_steps, gt[:, 6], 'b-', label='Ground Truth', alpha=0.7)
         ax.plot(time_steps, pred[:, 6], 'r--', label='Predicted', alpha=0.7)
@@ -816,7 +911,6 @@ class OfflineEvaluator:
         ax.grid(True, alpha=0.3)
         ax.set_title('Gripper (joint channel)')
 
-        # 6. 夹爪（ee 通道）
         ax = axes[2, 1]
         ax.plot(time_steps, gt[:, 14], 'b-', label='Ground Truth', alpha=0.7)
         ax.plot(time_steps, pred[:, 14], 'r--', label='Predicted', alpha=0.7)
@@ -825,8 +919,7 @@ class OfflineEvaluator:
         ax.legend()
         ax.grid(True, alpha=0.3)
         ax.set_title('Gripper (ee channel)')
-        
-        # 7. EE MAE
+
         ax = axes[2, 2]
         ee_pred = np.concatenate([pred[:, 6:7], pred[:, 7:14]], axis=1)
         ee_gt = np.concatenate([gt[:, 6:7], gt[:, 7:14]], axis=1)
@@ -837,7 +930,6 @@ class OfflineEvaluator:
         ax.grid(True, alpha=0.3)
         ax.set_title('EE MAE per step')
 
-        # 8. Total MAE
         ax = axes[2, 3]
         total_err = np.mean(np.abs(pred - gt), axis=1)
         ax.plot(time_steps, total_err, 'k-', alpha=0.7)
@@ -845,14 +937,14 @@ class OfflineEvaluator:
         ax.set_ylabel('MAE')
         ax.grid(True, alpha=0.3)
         ax.set_title('Total MAE per step')
-        
+
         plt.tight_layout()
-        
+
         if save:
             save_path = os.path.join(self.output_dir, f'comparison_ep{ep_idx:03d}.png')
             plt.savefig(save_path, dpi=150, bbox_inches='tight')
             print(f"Saved: {save_path}")
-        
+
         plt.close()
     
     def plot_error_distribution(self, all_results: List[Dict], save: bool = True):
@@ -861,6 +953,27 @@ class OfflineEvaluator:
         all_gt = np.concatenate([r['gt_actions'] for r in all_results], axis=0)
         errors = all_pred - all_gt
         
+        if errors.shape[1] == 8:
+            fig, axes = plt.subplots(2, 4, figsize=(16, 8))
+            fig.suptitle('Prediction Error Distribution', fontsize=14)
+
+            labels = ['Rel X', 'Rel Y', 'Rel Z', 'Rel qx', 'Rel qy', 'Rel qz', 'Rel qw', 'Gripper']
+            for i, label in enumerate(labels):
+                ax = axes[i // 4, i % 4]
+                ax.hist(errors[:, i], bins=50, alpha=0.7, edgecolor='black')
+                ax.set_xlabel('Error')
+                ax.set_ylabel('Count')
+                ax.set_title(f'{label} Error')
+                ax.axvline(x=0, color='r', linestyle='--', alpha=0.5)
+
+            plt.tight_layout()
+            if save:
+                save_path = os.path.join(self.output_dir, 'error_distribution.png')
+                plt.savefig(save_path, dpi=150, bbox_inches='tight')
+                print(f"Saved: {save_path}")
+            plt.close()
+            return
+
         fig, axes = plt.subplots(2, 4, figsize=(16, 8))
         fig.suptitle('Prediction Error Distribution', fontsize=14)
         
@@ -909,6 +1022,30 @@ class OfflineEvaluator:
         step_errors = np.mean(np.abs(pred - gt), axis=1)
         cumulative_errors = np.cumsum(step_errors)
         
+        if num_steps == 8:
+            fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+            ax = axes[0]
+            ax.plot(np.arange(num_steps), step_errors, 'b-', alpha=0.7)
+            ax.set_xlabel('Time Step')
+            ax.set_ylabel('Mean Absolute Error')
+            ax.set_title(f'Episode {ep_idx}: Step-wise Error')
+            ax.grid(True, alpha=0.3)
+
+            ax = axes[1]
+            ax.plot(np.arange(num_steps), cumulative_errors, 'r-', alpha=0.7)
+            ax.set_xlabel('Time Step')
+            ax.set_ylabel('Cumulative Error')
+            ax.set_title(f'Episode {ep_idx}: Cumulative Error')
+            ax.grid(True, alpha=0.3)
+
+            plt.tight_layout()
+            if save:
+                save_path = os.path.join(self.output_dir, f'cumulative_error_ep{ep_idx:03d}.png')
+                plt.savefig(save_path, dpi=150, bbox_inches='tight')
+                print(f"Saved: {save_path}")
+            plt.close()
+            return
+
         fig, axes = plt.subplots(1, 2, figsize=(12, 4))
         
         # 每步误差
@@ -943,6 +1080,87 @@ class OfflineEvaluator:
         num_steps = len(pred)
         time_steps = np.arange(num_steps)
         
+        if gt.shape[1] == 8:
+            fig, axes = plt.subplots(2, 4, figsize=(20, 10))
+            fig.suptitle(f'Episode {ep_idx}: EE Relative Pose Detailed Comparison', fontsize=14)
+
+            pos_labels = ['Rel X', 'Rel Y', 'Rel Z']
+            for i, label in enumerate(pos_labels):
+                ax = axes[0, i]
+                gt_val = gt[:, i]
+                pred_val = pred[:, i]
+                ax.plot(time_steps, gt_val, 'b-', label='Ground Truth', alpha=0.7, linewidth=1.5)
+                ax.plot(time_steps, pred_val, 'r--', label='Predicted', alpha=0.7, linewidth=1.5)
+                ax.set_xlabel('Time Step')
+                ax.set_ylabel('Position (m)')
+                ax.legend()
+                ax.grid(True, alpha=0.3)
+                ax.set_title(f'{label}\nGT range: [{gt_val.min():.4f}, {gt_val.max():.4f}]\nPred range: [{pred_val.min():.4f}, {pred_val.max():.4f}]')
+
+            ax = axes[0, 3]
+            gt_val = gt[:, 7]
+            pred_val = pred[:, 7]
+            ax.plot(time_steps, gt_val, 'b-', label='Ground Truth', alpha=0.7, linewidth=1.5)
+            ax.plot(time_steps, pred_val, 'r--', label='Predicted', alpha=0.7, linewidth=1.5)
+            ax.set_xlabel('Time Step')
+            ax.set_ylabel('Gripper')
+            ax.legend()
+            ax.grid(True, alpha=0.3)
+            ax.set_title(f'Gripper\nGT range: [{gt_val.min():.4f}, {gt_val.max():.4f}]\nPred range: [{pred_val.min():.4f}, {pred_val.max():.4f}]')
+
+            quat_labels = ['Rel qx', 'Rel qy', 'Rel qz', 'Rel qw']
+            for i, label in enumerate(quat_labels):
+                ax = axes[1, i]
+                gt_val = gt[:, 3 + i]
+                pred_val = pred[:, 3 + i]
+                ax.plot(time_steps, gt_val, 'b-', label='Ground Truth', alpha=0.7, linewidth=1.5)
+                ax.plot(time_steps, pred_val, 'r--', label='Predicted', alpha=0.7, linewidth=1.5)
+                ax.set_xlabel('Time Step')
+                ax.set_ylabel('Quaternion')
+                ax.legend()
+                ax.grid(True, alpha=0.3)
+                ax.set_title(f'{label}\nGT range: [{gt_val.min():.4f}, {gt_val.max():.4f}]\nPred range: [{pred_val.min():.4f}, {pred_val.max():.4f}]')
+
+            step_errors = np.mean(np.abs(pred - gt), axis=1)
+            cumulative_errors = np.cumsum(step_errors)
+            pose_errors = np.mean(np.abs(pred[:, :7] - gt[:, :7]), axis=1)
+
+            ax = axes[1, 0]
+            ax.plot(time_steps, step_errors, 'b-', alpha=0.7)
+            ax.set_xlabel('Time Step')
+            ax.set_ylabel('MAE')
+            ax.grid(True, alpha=0.3)
+            ax.set_title('Step-wise MAE')
+
+            ax = axes[1, 1]
+            ax.plot(time_steps, cumulative_errors, 'r-', alpha=0.7)
+            ax.set_xlabel('Time Step')
+            ax.set_ylabel('Cumulative Error')
+            ax.grid(True, alpha=0.3)
+            ax.set_title('Cumulative Error')
+
+            ax = axes[1, 2]
+            ax.plot(time_steps, pose_errors, 'k-', alpha=0.7)
+            ax.set_xlabel('Time Step')
+            ax.set_ylabel('Pose MAE')
+            ax.grid(True, alpha=0.3)
+            ax.set_title('Pose MAE per step')
+
+            ax = axes[1, 3]
+            ax.plot(time_steps, step_errors, 'k-', alpha=0.7)
+            ax.set_xlabel('Time Step')
+            ax.set_ylabel('Total MAE')
+            ax.grid(True, alpha=0.3)
+            ax.set_title('Total MAE per step')
+
+            plt.tight_layout()
+            if save:
+                save_path = os.path.join(self.output_dir, f'ee_pose_detailed_ep{ep_idx:03d}.png')
+                plt.savefig(save_path, dpi=150, bbox_inches='tight')
+                print(f"Saved: {save_path}")
+            plt.close()
+            return
+
         # 创建 2x4 的图形：上排是位置 x,y,z + 位置MAE，下排是四元数 qx,qy,qz,qw
         fig, axes = plt.subplots(2, 4, figsize=(20, 10))
         fig.suptitle(f'Episode {ep_idx}: EE Relative Pose Detailed Comparison', fontsize=14)
@@ -1058,6 +1276,8 @@ class OfflineEvaluator:
             m = result['metrics']
             print(f"  Joint MAE: {m['joint_mae']:.4f}, Gripper MAE: {m['gripper_joint_mae']:.4f}, "
                 f"Pose MAE: {m['pose_mae']:.4f}, EE MAE: {m['ee_mae']:.4f}, Total MAE: {m['total_mae']:.4f}")
+            if 'window8_total_mae' in m:
+                print(f"  Window-8 Total MAE: {m['window8_total_mae']:.4f}, Window-8 EE MAE: {m['window8_ee_mae']:.4f}")
         
         # 计算整体指标
         avg_metrics = {
@@ -1081,6 +1301,9 @@ class OfflineEvaluator:
         print(f"Average Pose MAE:    {avg_metrics['pose_mae']:.4f}")
         print(f"Average EE MAE:      {avg_metrics['ee_mae']:.4f}")
         print(f"Average Total MAE:   {avg_metrics['total_mae']:.4f}")
+        if 'window8_total_mae' in avg_metrics:
+            print(f"Average Window-8 EE MAE:  {avg_metrics['window8_ee_mae']:.4f}")
+            print(f"Average Window-8 Total MAE: {avg_metrics['window8_total_mae']:.4f}")
         print(f"\nResults saved to: {self.output_dir}")
         print(f"{'='*60}\n")
         

@@ -147,7 +147,7 @@ class CARMDataset(Dataset):
         precompute_actions: bool = False,
         action_normalizer: Optional[ActionNormalizer] = None,
         gripper_threshold: float = 0.05,
-        camera_name: Optional[str] = None,
+        fit_action_normalizer: bool = True,
     ):
         self.obs_horizon = obs_horizon
         self.pred_horizon = pred_horizon
@@ -156,7 +156,7 @@ class CARMDataset(Dataset):
         self.precompute_actions = precompute_actions
         self.action_normalizer = action_normalizer
         self.gripper_threshold = gripper_threshold
-        self.camera_name = camera_name
+        self.fit_action_normalizer = fit_action_normalizer
 
         # Action dimension: always 7D relative end-effector pose (ee_only)
         # 'full' mode is deprecated with v2 data format
@@ -167,13 +167,7 @@ class CARMDataset(Dataset):
 
         # Load dataset
         print(f"Loading CARM dataset from {data_path}...")
-        raw_data = load_carm_dataset(
-            data_path,
-            num_episodes=num_episodes,
-            camera_name=camera_name,
-        )
-        if camera_name:
-            print(f"Using camera view: {camera_name}")
+        raw_data = load_carm_dataset(data_path, num_episodes=num_episodes)
 
         # Detect data version from first episode's action shape
         first_action = raw_data['action'][0] if raw_data['action'] else None
@@ -228,7 +222,7 @@ class CARMDataset(Dataset):
                     all_relative_actions.append(rel_action)
         
         # Compute action normalization stats
-        if self.action_normalizer is not None and len(all_relative_actions) > 0:
+        if self.action_normalizer is not None and len(all_relative_actions) > 0 and self.fit_action_normalizer:
             all_relative_actions = np.array(all_relative_actions)
             self.action_normalizer.fit(all_relative_actions)
             print(f"Action normalization stats computed on {len(all_relative_actions)} samples")
