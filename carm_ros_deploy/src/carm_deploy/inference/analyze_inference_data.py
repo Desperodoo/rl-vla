@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-推理数据分析脚本 - 分析人工干预的 inference 数据
+推理数据分析脚本 - 分析 recorder 产出的 inference_episode_*.hdf5 数据
 
 功能:
 1. 基本统计: 步数、干预率、时间分布
@@ -11,7 +11,7 @@
 
 使用方法:
     python analyze_inference_data.py --data_dir /path/to/inference_logs
-    python analyze_inference_data.py --files file1.hdf5 file2.hdf5
+    python analyze_inference_data.py --files inference_episode_0001.hdf5 inference_episode_0002.hdf5
     python analyze_inference_data.py --data_dir /path/to/logs --save_dir /path/to/output
 """
 
@@ -38,26 +38,22 @@ except ImportError:
 
 
 def load_hdf5_data(filepath: str) -> Dict[str, Any]:
-    """加载 HDF5 文件数据"""
+    """加载 recorder HDF5 数据。"""
     data = {}
     with h5py.File(filepath, 'r') as f:
-        # 加载 datasets
         data['action'] = f['action'][:]
         data['action_model'] = f['action_model'][:]
         data['action_intervened'] = f['action_intervened'][:]
         data['intervention_mask'] = f['intervention_mask'][:]
-        
-        # 加载 observations
+
         data['images'] = f['observations/images'][:]
         data['gripper'] = f['observations/gripper'][:]
         data['qpos'] = f['observations/qpos'][:]
         data['qpos_end'] = f['observations/qpos_end'][:]
         data['qpos_joint'] = f['observations/qpos_joint'][:]
         data['timestamps'] = f['observations/timestamps'][:]
-        
-        # 加载属性
         data['attrs'] = dict(f.attrs)
-    
+
     return data
 
 

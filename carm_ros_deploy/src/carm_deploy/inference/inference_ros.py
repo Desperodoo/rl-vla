@@ -219,28 +219,31 @@ class InferenceNode:
     
     def _init_intervention_and_recording(self, config):
         """初始化干预和数据采集模块"""
-        # 干预处理器
-        if self.intervention_enabled:
+        # 只要开启干预或录制任一模式，就需要键盘监听
+        if self.intervention_enabled or self.record_inference_enabled:
             self.intervention_handler = KeyboardInterventionHandler(
                 xyz_scale=config.get('intervention_xyz_scale', 0.005),
                 gripper_open=config.get('intervention_gripper_open', 1.0),
                 gripper_close=config.get('intervention_gripper_close', 0.0),
                 mode=config.get('intervention_mode', 'replace'),
             )
-            
+
             # 设置录制控制回调
             def on_record_action(action):
                 self._handle_record_action(action)
-            
+
             def on_quit():
                 rospy.loginfo("Quit requested via keyboard")
                 self.running = False
-            
+
             self.intervention_handler.set_record_callback(on_record_action)
             self.intervention_handler.set_quit_callback(on_quit)
             self.intervention_handler.start()
-            rospy.loginfo("Keyboard intervention enabled")
-        
+            if self.intervention_enabled:
+                rospy.loginfo("Keyboard intervention enabled")
+            else:
+                rospy.loginfo("Keyboard recording controls enabled")
+
         # 数据采集记录器
         if self.record_inference_enabled:
             record_dir = config.get('record_dir', '')
@@ -249,17 +252,17 @@ class InferenceNode:
             if not record_dir:
                 from utils.paths import get_inference_logs_dir
                 record_dir = get_inference_logs_dir()
-            
+
             # 获取 action_dim
             action_dim = getattr(self.policy, 'action_dim_full', 15)
-            
+
             self.inference_recorder = InferenceRecorder(
                 output_dir=record_dir,
                 pred_horizon=self._pred_horizon,
                 action_dim=action_dim,
             )
             rospy.loginfo(f"Inference recording enabled, output_dir: {record_dir}")
-            
+
             # 启动时等待按 R 开始第一个 episode
             rospy.loginfo("=" * 60)
             rospy.loginfo("Multi-episode recording mode enabled")
@@ -354,6 +357,7 @@ class InferenceNode:
             if self.inference_recorder:
                 filepath = self.inference_recorder.confirm_save()
                 if filepath:
+                    self.logger.record_episode_file(filepath)
                     rospy.loginfo(f"Episode saved to: {filepath}")
         else:
             # 丢弃
@@ -422,15 +426,14 @@ class InferenceNode:
     
     def _create_logger(self, config):
         """
-        创建推理日志记录器
+        创建推理运行信息记录器
         """
         log_dir = config.get('log_dir', '')
-        
+
         if log_dir:
             os.makedirs(log_dir, exist_ok=True)
             return InferenceLogger(log_dir=log_dir)
         else:
-            # 使用路径模块获取默认日志目录
             from utils.paths import get_inference_logs_dir, ensure_dir
             default_log_dir = ensure_dir(get_inference_logs_dir())
             return InferenceLogger(log_dir=default_log_dir)
@@ -965,11 +968,11 @@ class InferenceNode:
                 rospy.logwarn("Discarding unsaved recording data on shutdown")
                 self.inference_recorder.discard()
         
-        # 结束并保存日志
+        # 结束并保存 run_info
         if self.episode_started:
-            log_path = self.logger.end_episode()
-            if log_path:
-                rospy.loginfo(f"Inference log saved to: {log_path}")
+            run_info_path = self.logger.end_episode()
+            if run_info_path:
+                rospy.loginfo(f"Run info saved to: {run_info_path}")
 
         if self.timeline_logger is not None:
             self.timeline_logger.close()

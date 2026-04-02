@@ -22,7 +22,7 @@ Package Structure:
 __version__ = "0.1.0"
 
 # Import submodules for convenient access
-# 使用 try-except 防止在 vlaw_reward 等专用环境中因缺少依赖而崩溃
+# 使用 try-except 防止在专用环境中因可选依赖缺失或二进制不兼容而崩溃
 try:
     from . import networks
     from . import algorithms
@@ -30,12 +30,12 @@ try:
     from . import datasets
     from . import envs
     from . import utils
-except (ImportError, ModuleNotFoundError):
-    pass  # vlaw_reward / roboreward 等专用环境只需要子模块，跳过主框架依赖
+except Exception:
+    pass  # 专用环境只需要部分子模块，跳过主框架依赖
 
 try:
     from . import vlaw
-except (ImportError, ModuleNotFoundError):
+except Exception:
     pass
 
 __all__ = [

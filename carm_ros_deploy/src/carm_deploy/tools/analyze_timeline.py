@@ -149,10 +149,10 @@ def parse_events(raw_events: List[Dict]) -> Dict[str, List]:
         'obs': [],
         'unknown': [],
     }
-    
+
     for e in raw_events:
         event_type = e.get('event', 'unknown')
-        ts = e.get('timestamp', 0.0)
+        ts = e.get('timestamp', e.get('t_sys', 0.0))
         
         if event_type == 'init':
             parsed['init'].append(InitEvent(

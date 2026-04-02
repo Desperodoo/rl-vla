@@ -10,7 +10,6 @@ Provides:
 from .checkpoint import save_checkpoint, build_checkpoint
 from .ema import EMAModel
 from .schedulers import get_cosine_schedule_with_warmup
-from .model_factory import create_agent_for_inference, SUPPORTED_ALGORITHMS
 from .pose_utils import (
     pose_to_transform_matrix,
     transform_matrix_to_pose,
@@ -19,7 +18,12 @@ from .pose_utils import (
     quaternion_slerp,
     apply_teleop_scale,
 )
-from .flow_wrapper import ShortCutFlowWrapper, load_shortcut_flow_policy
+
+try:
+    from .model_factory import create_agent_for_inference, SUPPORTED_ALGORITHMS
+    from .flow_wrapper import ShortCutFlowWrapper, load_shortcut_flow_policy
+except Exception:
+    pass
 
 __all__ = [
     "save_checkpoint",
