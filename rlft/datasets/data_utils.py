@@ -304,6 +304,18 @@ def load_carm_episode(filepath: str) -> Dict[str, np.ndarray]:
             data = {}
             with File(filepath, 'r') as f:
                 obs = f['observations']
+                required_obs_keys = ['images', 'qpos_joint', 'qpos_end', 'gripper', 'timestamps']
+                missing_obs_keys = [key for key in required_obs_keys if key not in obs]
+                if missing_obs_keys:
+                    raise ValueError(
+                        f"{os.path.basename(filepath)} missing required observation keys: {missing_obs_keys}"
+                    )
+                timestamp_semantics = f.attrs.get('timestamp_semantics', None)
+                if timestamp_semantics is not None and timestamp_semantics != 'obs_stamp_ros':
+                    print(
+                        f"WARNING: {os.path.basename(filepath)} has timestamp_semantics={timestamp_semantics!r}; "
+                        "expected 'obs_stamp_ros' for current CARM contract"
+                    )
                 data['images'] = np.array(obs['images'])
                 data['qpos_joint'] = np.array(obs['qpos_joint'])
                 data['qpos_end'] = np.array(obs['qpos_end'])
@@ -365,6 +377,7 @@ def load_carm_dataset(
         'gripper': [],
         'timestamps': [],
         'action': [],
+        'teleop_scale': [],
     }
     
     iterator = tqdm(files, desc="Loading episodes") if verbose else files
@@ -377,6 +390,11 @@ def load_carm_dataset(
         dataset['gripper'].append(episode['gripper'])
         dataset['timestamps'].append(episode['timestamps'])
         
+        if 'teleop_scale' in episode:
+            dataset['teleop_scale'].append(episode['teleop_scale'])
+        else:
+            dataset['teleop_scale'].append(None)
+
         if 'action' in episode:
             dataset['action'].append(episode['action'])
     

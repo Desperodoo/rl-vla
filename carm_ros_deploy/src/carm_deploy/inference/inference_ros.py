@@ -57,6 +57,7 @@ from inference.policy_loader import PolicyInterface, RealPolicy
 from rlft.utils.model_factory import SUPPORTED_ALGORITHMS
 
 # 安全控制和日志
+from core.camera_config import resolve_camera_config
 from core.safety_controller import SafetyController
 from inference.inference_logger import InferenceLogger
 from inference.inference_recorder import InferenceRecorder
@@ -104,10 +105,13 @@ class InferenceNode:
         self.crossfade_steps = config.get('crossfade_steps', 0)  # 0 = 无 crossfade
         self.truncate_at_act_horizon = config.get('truncate_at_act_horizon', False)  # 是否截断到 act_horizon
         
+        self.camera_config = config['camera_config']
+
         # 初始化环境
         rospy.loginfo("Initializing environment...")
         self.env = RealEnvironment(config)
-        
+        self._init_camera_metadata(config)
+
         # 初始化策略
         rospy.loginfo("Initializing policy...")
         self.policy = self._create_policy(config)
@@ -217,9 +221,22 @@ class InferenceNode:
         
         rospy.loginfo("InferenceNode initialized")
     
+    def _topic_to_camera_name(self, topic, index):
+        """从 topic 自动生成稳定的相机名"""
+        name = topic.strip('/').replace('/', '_').replace('-', '_')
+        if not name:
+            name = f"camera_{index}"
+        return name
+
+    def _init_camera_metadata(self, config):
+        """初始化相机元数据，用于推理输入和录制对齐 teleop setting"""
+        self.camera_topics = list(self.camera_config.topics)
+        self.camera_names = list(self.camera_config.names)
+        self.primary_camera = self.camera_config.primary_name
+        self.primary_camera_idx = self.camera_config.primary_index
+
     def _init_intervention_and_recording(self, config):
         """初始化干预和数据采集模块"""
-        # 只要开启干预或录制任一模式，就需要键盘监听
         if self.intervention_enabled or self.record_inference_enabled:
             self.intervention_handler = KeyboardInterventionHandler(
                 xyz_scale=config.get('intervention_xyz_scale', 0.005),
@@ -260,6 +277,9 @@ class InferenceNode:
                 output_dir=record_dir,
                 pred_horizon=self._pred_horizon,
                 action_dim=action_dim,
+                camera_topics=self.camera_topics,
+                camera_names=self.camera_names,
+                primary_camera=self.primary_camera,
             )
             rospy.loginfo(f"Inference recording enabled, output_dir: {record_dir}")
 
@@ -536,8 +556,11 @@ class InferenceNode:
         Returns:
             torch.Tensor: 预处理后的图像 [C, H, W] (未归一化，RealPolicy 内部会归一化)
         """
-        # 只使用第一个相机
-        image = obs["images"][0]  # [H, W, C] RGB 格式
+        # 只使用 primary camera，与 teleop 的 primary_camera 语义对齐
+        image_idx = getattr(self, 'primary_camera_idx', 0)
+        if image_idx >= len(obs["images"]):
+            image_idx = 0
+        image = obs["images"][image_idx]  # [H, W, C] RGB 格式
         
         # Resize 到目标尺寸
         image = self._preprocess_image(image, target_size)
@@ -749,12 +772,15 @@ class InferenceNode:
                     # 记录数据（如果启用采集）
                     if self.record_inference_enabled and self.inference_recorder is not None:
                         if self.inference_recorder.is_recording:
+                            obs_stamp_ros = self.latest_obs.get('stamp', None)
+                            if obs_stamp_ros is None:
+                                obs_stamp_ros = time.time()
                             self.inference_recorder.record_step(
                                 obs=self.latest_obs,
                                 action_model=action_model,
                                 action_intervened=action_intervened,
                                 intervention_mask=intervention_mask,
-                                timestamp=time.time(),
+                                timestamp=obs_stamp_ros,
                             )
                     
                     # 记录第一个动作用于下一次参考
@@ -1000,10 +1026,15 @@ def parse_args():
     parser.add_argument('--arm_init_gripper', type=float, default=0.078,
                         help='Initial gripper position')
     
-    # 相机参数
     parser.add_argument('--camera_topics', type=str,
                         default='/camera/color/image_raw',
                         help='Camera topic(s), comma separated')
+    parser.add_argument('--camera_names', type=str,
+                        default='',
+                        help='Camera name(s), comma separated (must align with camera_topics order)')
+    parser.add_argument('--primary_camera', type=str,
+                        default='',
+                        help='Primary camera name used for legacy observations/images (default: first camera)')
     parser.add_argument('--sync_slop', type=float, default=0.02,
                         help='Image sync tolerance in seconds')
     
@@ -1121,7 +1152,7 @@ def main():
     # 从 ROS 参数覆盖（支持 roslaunch <param> 方式）
     for key in [
         'robot_ip', 'robot_mode', 'robot_tau', 'arm_init_pose', 'arm_init_gripper',
-        'camera_topics', 'sync_slop', 'timeline_log', 'timeline_enabled',
+        'camera_topics', 'camera_names', 'primary_camera', 'sync_slop', 'timeline_log', 'timeline_enabled',
         'timeline_disabled', 'timeline_control_stride', 'chunk_time_base',
         'pretrain', 'algorithm', 'desire_inference_freq', 'temporal_factor_k',
         'num_inference_steps', 'use_ema', 'pos_lookahead_step', 'pos_lookahead_duration',
@@ -1146,9 +1177,14 @@ def main():
     else:
         config['timeline_enabled'] = True
     
-    # 处理相机话题
-    if isinstance(config['camera_topics'], str):
-        config['camera_topics'] = config['camera_topics'].split(',')
+    camera_config = resolve_camera_config(
+        config,
+        ros_has_param=rospy.has_param,
+        ros_get_param=rospy.get_param,
+        logwarn=rospy.logwarn,
+    )
+    config.update(camera_config.to_runtime_dict())
+    config['camera_config'] = camera_config
 
     # 规范化 arm_init_pose / arm_init_gripper（roslaunch 传入可能是字符串）
     if isinstance(config.get('arm_init_pose'), str):

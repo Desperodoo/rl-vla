@@ -22,6 +22,7 @@ import os
 # 添加父目录到路径以访问 utils
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from utils.image_sync import ImageSynchronizer
+from core.camera_config import DEFAULT_SYNC_SLOP, normalize_camera_topics
 
 
 class RealEnvironment:
@@ -63,8 +64,8 @@ class RealEnvironment:
         # 从实际机械臂读取的初始位姿 (2026-01-13)
         self.arm_init_pose = config.get('arm_init_pose', [0.2475, 0.0014, 0.3251, 0.9996, -0.0034, 0.0255, -0.0074])
         self.arm_init_gripper = config.get('arm_init_gripper', 0.078)
-        self.camera_topics = config.get('camera_topics', ['/camera/color/image_raw'])
-        self.sync_slop = config.get('sync_slop', 0.1)
+        self.camera_topics = normalize_camera_topics(config.get('camera_topics'))
+        self.sync_slop = float(config.get('sync_slop', DEFAULT_SYNC_SLOP))
         self.vis = config.get('vis', False)
         self.passive_mode = config.get('passive_mode', False)  # 被动模式：不设置控制模式
         self.skip_init_confirm = config.get('skip_init_confirm', False)  # 跳过初始化确认
@@ -76,8 +77,11 @@ class RealEnvironment:
         if config.get('init_speed', 3.0) > MAX_SAFE_SPEED:
             rospy.logwarn(f"⚠️  速度限制: init_speed 从 {config.get('init_speed')} 降至 {MAX_SAFE_SPEED}")
         
+        # backend 请求显式禁用环境代理，避免 10.42.x.x 内网地址被 http_proxy/https_proxy 误转发
+        self._teleop_http = requests.Session()
+        self._teleop_http.trust_env = False
+
         # 初始化机械臂
-        rospy.loginfo(f"Connecting to robot at {self.robot_ip}...")
         self.arm = carm_py.CArmSingleCol(self.robot_ip)
         time.sleep(1.0)  # 等待连接稳定
         
@@ -300,7 +304,7 @@ class RealEnvironment:
         """
         url = backend_url or f"http://{self.robot_ip}:1999/api/joystick/teleop_target"
         try:
-            resp = requests.get(url, timeout=0.05)
+            resp = self._teleop_http.get(url, timeout=0.05)
             if resp.status_code == 200:
                 body = resp.json()
                 return body.get('data', {})
@@ -428,13 +432,9 @@ def create_environment_from_args(args):
         'robot_tau': getattr(args, 'robot_tau', 10.0),
         'arm_init_pose': getattr(args, 'arm_init_pose', [0.26, -0.02, 0.22, 1, 0, 0, 0]),
         'arm_init_gripper': getattr(args, 'arm_init_gripper', 0.05),
-        'camera_topics': getattr(args, 'camera_topics', ['/camera/color/image_raw']),
-        'sync_slop': getattr(args, 'sync_slop', 0.1),
+        'camera_topics': normalize_camera_topics(getattr(args, 'camera_topics', None)),
+        'sync_slop': float(getattr(args, 'sync_slop', DEFAULT_SYNC_SLOP)),
         'vis': getattr(args, 'vis', False),
     }
-    
-    # 如果 camera_topics 是字符串，转换为列表
-    if isinstance(config['camera_topics'], str):
-        config['camera_topics'] = config['camera_topics'].split(',')
-    
+
     return RealEnvironment(config)

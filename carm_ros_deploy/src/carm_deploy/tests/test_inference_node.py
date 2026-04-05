@@ -64,6 +64,27 @@ _env_ros_mock = types.ModuleType("core.env_ros")
 _env_ros_mock.RealEnvironment = mock.MagicMock()
 sys.modules["core.env_ros"] = _env_ros_mock
 
+# Mock cv_bridge/image_sync import chain pulled in by utils package
+_cv_bridge_mock = types.ModuleType("cv_bridge")
+_cv_bridge_mock.CvBridge = mock.MagicMock()
+sys.modules["cv_bridge"] = _cv_bridge_mock
+
+_image_sync_mock = types.ModuleType("utils.image_sync")
+_image_sync_mock.ImageSynchronizer = mock.MagicMock()
+_image_sync_mock.SingleImageSubscriber = mock.MagicMock()
+sys.modules["utils.image_sync"] = _image_sync_mock
+
+# Mock policy_loader to avoid importing rlft/torchvision stack
+_policy_loader_mock = types.ModuleType("inference.policy_loader")
+_policy_loader_mock.PolicyInterface = mock.MagicMock()
+_policy_loader_mock.RealPolicy = mock.MagicMock()
+sys.modules["inference.policy_loader"] = _policy_loader_mock
+
+# Mock rlft model factory used by inference_ros import
+_model_factory_mock = types.ModuleType("rlft.utils.model_factory")
+_model_factory_mock.SUPPORTED_ALGORITHMS = ["consistency_flow", "flow_matching"]
+sys.modules["rlft.utils.model_factory"] = _model_factory_mock
+
 # Mock InferenceRecorder (may have ROS deps)
 _rec_mock = types.ModuleType("inference.inference_recorder")
 _rec_mock.InferenceRecorder = mock.MagicMock()
@@ -78,7 +99,7 @@ sys.modules["utils.keyboard_intervention"] = _ki_mock
 # ---------------------------------------------------------------------------
 # NOW import InferenceNode
 # ---------------------------------------------------------------------------
-from inference.inference_node import InferenceNode
+from inference.inference_ros import InferenceNode
 import cv2
 
 
@@ -103,21 +124,27 @@ def _make_node(config_overrides=None, fake_checkpoint_dir=None):
         "pos_lookahead_step": 1,
         "control_freq": 50,
         "execution_mode": "temporal_ensemble",
-        "timeline_disabled": True,
-        "record_inference": False,
-        "intervention": False,
+        "camera_config": mock.MagicMock(
+            topics=['/camera/color/image_raw'],
+            names=['camera_color_image_raw'],
+            primary_name='camera_color_image_raw',
+            primary_index=0,
+        ),
     }
     if config_overrides:
         config.update(config_overrides)
 
     # Patch heavy subsystems
-    with mock.patch("inference.inference_node.RealEnvironment") as MockEnv, \
+    with mock.patch("inference.inference_ros.RealEnvironment") as MockEnv, \
+         mock.patch("inference.inference_ros.threading.Thread") as MockThread, \
          mock.patch.object(InferenceNode, "_create_policy") as mock_policy, \
          mock.patch.object(InferenceNode, "_create_safety_controller") as mock_safety, \
          mock.patch.object(InferenceNode, "_create_logger") as mock_logger, \
          mock.patch.object(InferenceNode, "_setup_logger_metadata"), \
          mock.patch.object(InferenceNode, "_init_intervention_and_recording", create=True):
         
+        MockThread.return_value = mock.MagicMock()
+
         # Fake policy
         fake_policy = mock.MagicMock()
         fake_policy.pred_horizon = 16

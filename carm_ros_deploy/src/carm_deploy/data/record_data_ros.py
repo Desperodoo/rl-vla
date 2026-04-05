@@ -44,6 +44,7 @@ import os
 carm_deploy_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, carm_deploy_root)
 
+from core.camera_config import resolve_camera_config
 from core.env_ros import RealEnvironment
 from utils.image_sync import ImageSynchronizer, SingleImageSubscriber
 from utils.timeline_logger import TimelineLogger
@@ -63,6 +64,8 @@ class DataRecorder:
         """
         self.config = config
         
+        self.camera_config = config['camera_config']
+
         # 输出目录（展开 ~ 和环境变量）
         raw_output_dir = config.get('output_dir', './recorded_data')
         self.output_dir = os.path.expandvars(os.path.expanduser(raw_output_dir))
@@ -79,39 +82,11 @@ class DataRecorder:
         self.image_height = config.get('image_height', 480)
 
         # 相机参数
-        raw_camera_topics = config.get('camera_topics', ['/camera/color/image_raw'])
-        if isinstance(raw_camera_topics, str):
-            raw_camera_topics = raw_camera_topics.split(',')
-        self.camera_topics = [topic.strip() for topic in raw_camera_topics if topic.strip()]
-
-        raw_camera_names = config.get('camera_names', '')
-        if isinstance(raw_camera_names, str):
-            raw_camera_names = [name.strip() for name in raw_camera_names.split(',') if name.strip()]
-        elif raw_camera_names is None:
-            raw_camera_names = []
-
-        if len(raw_camera_names) > 0:
-            if len(raw_camera_names) != len(self.camera_topics):
-                raise ValueError(
-                    f"camera_names count ({len(raw_camera_names)}) does not match "
-                    f"camera_topics count ({len(self.camera_topics)})"
-                )
-            self.camera_names = raw_camera_names
-        else:
-            self.camera_names = [self._topic_to_camera_name(topic, idx)
-                                 for idx, topic in enumerate(self.camera_topics)]
-
+        self.camera_topics = list(self.camera_config.topics)
+        self.camera_names = list(self.camera_config.names)
         self.camera_index = {name: idx for idx, name in enumerate(self.camera_names)}
-
-        requested_primary = str(config.get('primary_camera', self.camera_names[0])).strip()
-        if requested_primary not in self.camera_index:
-            rospy.logwarn(
-                f"primary_camera '{requested_primary}' not found in camera_names {self.camera_names}, "
-                f"fallback to '{self.camera_names[0]}'"
-            )
-            requested_primary = self.camera_names[0]
-        self.primary_camera = requested_primary
-        self.primary_camera_idx = self.camera_index[self.primary_camera]
+        self.primary_camera = self.camera_config.primary_name
+        self.primary_camera_idx = self.camera_config.primary_index
 
         config['camera_topics'] = self.camera_topics
         config['camera_names'] = self.camera_names
@@ -672,7 +647,8 @@ def main():
     for key in [
         'output_dir', 'robot_ip', 'robot_mode', 'camera_topics', 'camera_names', 'primary_camera', 'sync_slop',
         'record_freq', 'max_episodes', 'max_steps', 'image_width', 'image_height',
-        'teleop', 'vis', 'timeline_log', 'timeline_enabled', 'timeline_disabled'
+        'teleop', 'vis', 'timeline_log', 'timeline_enabled', 'timeline_disabled',
+        'backend_url'
     ]:
         if rospy.has_param(f'~{key}'):
             config[key] = rospy.get_param(f'~{key}')
@@ -683,15 +659,15 @@ def main():
     else:
         config['timeline_enabled'] = True
     
-    # 处理相机话题
-    if isinstance(config['camera_topics'], str):
-        config['camera_topics'] = [topic.strip() for topic in config['camera_topics'].split(',') if topic.strip()]
+    camera_config = resolve_camera_config(
+        config,
+        ros_has_param=rospy.has_param,
+        ros_get_param=rospy.get_param,
+        logwarn=rospy.logwarn,
+    )
+    config.update(camera_config.to_runtime_dict())
+    config['camera_config'] = camera_config
 
-    if not config.get('primary_camera', '').strip() and isinstance(config.get('camera_names', ''), str):
-        camera_names = [name.strip() for name in config['camera_names'].split(',') if name.strip()]
-        if len(camera_names) > 0:
-            config['primary_camera'] = camera_names[0]
-    
     rospy.loginfo("=" * 50)
     rospy.loginfo("CARM Data Recording Node")
     rospy.loginfo("=" * 50)

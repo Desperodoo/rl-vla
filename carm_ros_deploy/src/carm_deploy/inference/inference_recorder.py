@@ -6,16 +6,20 @@
 1. action 定义遵循 inference_ros 的模型输出格式（保持训练-推理一致性）
 2. 记录模型原始输出 (action_model) 和干预后输出 (action_intervened)
 3. 通过 intervention_mask 标记哪些维度被人工干预
+4. observations/images 记录 primary camera 兼容字段，images_by_camera 保存多视角
+5. observations/timestamps 记录 ROS observation stamp
 
 HDF5 文件结构:
     episode_{XXXX}_{timestamp}.hdf5
     ├── observations/
-    │   ├── images        [T, H, W, C]      # 图像
+    │   ├── images        [T, H, W, C]      # 主视角图像
+    │   ├── images_by_camera/
+    │   │   └── ...       [T, H, W, C]      # 多相机图像
     │   ├── qpos_joint    [T, 7]            # 关节角度 (6 joints + 1 gripper)
     │   ├── qpos_end      [T, 8]            # 末端位姿 (x,y,z,qx,qy,qz,qw,gripper)
     │   ├── qpos          [T, 15]           # 兼容旧版: [joints(7), end_pose(8)]
     │   ├── gripper       [T]               # 夹爪状态
-    │   └── timestamps    [T]               # 系统时间戳
+    │   └── timestamps    [T]               # ROS observation stamp
     ├── action_model      [T, pred_horizon, action_dim]  # 模型原始输出
     ├── action_intervened [T, pred_horizon, action_dim]  # 干预后 action
     ├── intervention_mask [T, pred_horizon, action_dim]  # 干预掩码 (bool)
@@ -29,6 +33,7 @@ HDF5 文件结构:
 
 import os
 import time
+import json
 import numpy as np
 import h5py
 from datetime import datetime
@@ -73,6 +78,9 @@ class InferenceRecorder:
         action_dim: int = 15,
         image_size: tuple = (128, 128),
         max_steps: int = 2000,
+        camera_topics: Optional[List[str]] = None,
+        camera_names: Optional[List[str]] = None,
+        primary_camera: Optional[str] = None,
     ):
         """
         初始化记录器
@@ -91,6 +99,15 @@ class InferenceRecorder:
         self.action_dim = action_dim
         self.image_size = image_size
         self.max_steps = max_steps
+        self.camera_topics = [str(topic) for topic in (camera_topics or [])]
+        self.camera_names = [str(name) for name in (camera_names or [])]
+        self.camera_index = {name: idx for idx, name in enumerate(self.camera_names)}
+        self.primary_camera = primary_camera or (self.camera_names[0] if self.camera_names else None)
+        if self.camera_topics and len(self.camera_names) != len(self.camera_topics):
+            raise ValueError("normalized camera_names count must match camera_topics count")
+        if self.primary_camera is not None and self.primary_camera not in self.camera_index:
+            raise ValueError(f"normalized primary_camera '{self.primary_camera}' not found in camera_names")
+        self.primary_camera_idx = self.camera_index[self.primary_camera] if self.primary_camera is not None else 0
         
         # 状态
         self.recording = False
@@ -111,12 +128,13 @@ class InferenceRecorder:
         self.episode_data = {
             # 观测
             'images': [],           # [T, H, W, C]
+            'images_by_camera': {name: [] for name in self.camera_names},
             'qpos_joint': [],       # [T, 7]
             'qpos_end': [],         # [T, 8]
             'qpos': [],             # [T, 15] 兼容旧版
             'gripper': [],          # [T]
-            'timestamps': [],       # [T] 系统时间
-            
+            'timestamps': [],       # [T] ROS observation stamp
+
             # Action
             'action_model': [],     # [T, pred_horizon, action_dim] 模型输出
             'action_intervened': [],# [T, pred_horizon, action_dim] 干预后
@@ -231,9 +249,23 @@ class InferenceRecorder:
         # 时间戳
         if timestamp is None:
             timestamp = time.time()
-        
+
+        obs_images = obs['images']
         # 观测
-        self.episode_data['images'].append(obs['images'][0])  # 第一个相机
+        if len(obs_images) == 0:
+            raise ValueError('obs["images"] is empty')
+        if self.primary_camera_idx >= len(obs_images):
+            _log_warn(
+                f"Primary camera index {self.primary_camera_idx} out of range, fallback to index 0 (available={len(obs_images)})"
+            )
+            primary_img = obs_images[0]
+        else:
+            primary_img = obs_images[self.primary_camera_idx]
+        self.episode_data['images'].append(primary_img)  # 兼容字段：主视角
+
+        for camera_name, camera_idx in self.camera_index.items():
+            if camera_idx < len(obs_images):
+                self.episode_data['images_by_camera'][camera_name].append(obs_images[camera_idx])
         self.episode_data['qpos_joint'].append(np.array(obs['qpos_joint']))
         self.episode_data['qpos_end'].append(np.array(obs['qpos_end']))
         self.episode_data['qpos'].append(np.array(obs['qpos']))
@@ -279,10 +311,18 @@ class InferenceRecorder:
             
             images = np.array(data['images'])  # [T, H, W, C]
             obs_grp.create_dataset('images', data=images, compression='gzip')
+
+            images_by_camera = data.get('images_by_camera', {})
+            if len(images_by_camera) > 0:
+                cameras_grp = obs_grp.create_group('images_by_camera')
+                for camera_name, camera_images in images_by_camera.items():
+                    if len(camera_images) == 0:
+                        continue
+                    cameras_grp.create_dataset(camera_name, data=np.array(camera_images), compression='gzip')
             
             qpos_joint = np.array(data['qpos_joint'])  # [T, 7]
             obs_grp.create_dataset('qpos_joint', data=qpos_joint)
-            
+
             qpos_end = np.array(data['qpos_end'])  # [T, 8]
             obs_grp.create_dataset('qpos_end', data=qpos_end)
             
@@ -320,6 +360,10 @@ class InferenceRecorder:
             f.attrs['image_width'] = images.shape[2] if len(images.shape) > 2 else 0
             f.attrs['created_at'] = timestamp
             f.attrs['data_source'] = 'inference_with_intervention'
+            f.attrs['timestamp_semantics'] = 'obs_stamp_ros'
+            f.attrs['camera_topics'] = json.dumps(self.camera_topics)
+            f.attrs['camera_names'] = json.dumps(self.camera_names)
+            f.attrs['primary_camera'] = self.primary_camera or ''
         
         _log_info(f"Episode saved: {num_steps} steps, "
                   f"intervention_ratio: {np.mean(intervention_mask):.2%}")
@@ -391,7 +435,15 @@ class InferenceDatasetConverter:
                 
                 # 复制观测数据
                 for key in f_in['observations'].keys():
-                    data = f_in['observations'][key][:][keep_idx]
+                    node = f_in['observations'][key]
+                    if isinstance(node, h5py.Group):
+                        out_group = obs_grp.create_group(key)
+                        for subkey in node.keys():
+                            subdata = node[subkey][:][keep_idx]
+                            out_group.create_dataset(subkey, data=subdata, compression='gzip')
+                        continue
+
+                    data = node[:][keep_idx]
                     if key == 'images':
                         obs_grp.create_dataset(key, data=data, compression='gzip')
                     else:

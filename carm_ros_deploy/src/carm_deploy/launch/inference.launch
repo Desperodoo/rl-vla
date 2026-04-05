@@ -27,6 +27,8 @@
   <!-- 相机参数 -->
   <arg name="camera_name" default="camera"/>
   <arg name="camera_topics" default="/$(arg camera_name)/color/image_raw"/>
+  <arg name="camera_names" default=""/>
+  <arg name="primary_camera" default=""/>
   <arg name="sync_slop" default="0.02"/>
   
   <!-- 策略参数 -->
@@ -53,6 +55,8 @@
     <param name="arm_init_gripper" value="$(arg arm_init_gripper)"/>
     
     <param name="camera_topics" value="$(arg camera_topics)"/>
+    <param name="camera_names" value="$(arg camera_names)"/>
+    <param name="primary_camera" value="$(arg primary_camera)"/>
     <param name="sync_slop" value="$(arg sync_slop)"/>
     
     <param name="pretrain" value="$(arg pretrain)"/>

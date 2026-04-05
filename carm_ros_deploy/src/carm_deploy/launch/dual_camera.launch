@@ -53,7 +53,7 @@
   <arg name="record_freq" default="47"/>
   <arg name="max_episodes" default="100"/>
   <arg name="max_steps" default="1000"/>
-  <arg name="sync_slop" default="0.03"/>
+  <arg name="sync_slop" default="0.02"/>
   <arg name="image_width" default="320"/>
   <arg name="image_height" default="240"/>
   <arg name="timeline_enabled" default="true"/>

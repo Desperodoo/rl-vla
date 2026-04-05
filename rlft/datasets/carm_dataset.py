@@ -148,6 +148,8 @@ class CARMDataset(Dataset):
         action_normalizer: Optional[ActionNormalizer] = None,
         gripper_threshold: float = 0.05,
         fit_action_normalizer: bool = True,
+        filter_inactive_teleop: bool = False,
+        inactive_threshold: float = 0.0,
     ):
         self.obs_horizon = obs_horizon
         self.pred_horizon = pred_horizon
@@ -157,10 +159,8 @@ class CARMDataset(Dataset):
         self.action_normalizer = action_normalizer
         self.gripper_threshold = gripper_threshold
         self.fit_action_normalizer = fit_action_normalizer
-
-        # Action dimension: always 7D relative end-effector pose (ee_only)
-        # 'full' mode is deprecated with v2 data format
-        self.action_dim = 7
+        self.filter_inactive_teleop = filter_inactive_teleop
+        self.inactive_threshold = inactive_threshold
         if action_mode == 'full':
             print("WARNING: 'full' action_mode is deprecated with v2 data format. Using 'ee_only'.")
             self.action_mode = 'ee_only'
@@ -168,6 +168,14 @@ class CARMDataset(Dataset):
         # Load dataset
         print(f"Loading CARM dataset from {data_path}...")
         raw_data = load_carm_dataset(data_path, num_episodes=num_episodes)
+
+        episode_teleop_scales = raw_data.get('teleop_scale', [None] * len(raw_data['images']))
+        num_missing_teleop_scale = sum(scale is None for scale in episode_teleop_scales)
+        if self.filter_inactive_teleop:
+            print(
+                f"Inactive teleop filtering enabled (threshold={self.inactive_threshold}). "
+                f"Episodes missing teleop_scale: {num_missing_teleop_scale}/{len(episode_teleop_scales)}"
+            )
 
         # Detect data version from first episode's action shape
         first_action = raw_data['action'][0] if raw_data['action'] else None
@@ -184,67 +192,109 @@ class CARMDataset(Dataset):
         print(f"Detected data version: {self.data_version}")
 
         print("Processing trajectories...")
-        
+
         trajectories = {
             "observations": [],
             "raw_actions": [],
             "qpos_end": [],
+            "teleop_scale": [],
         }
-        
+
         all_relative_actions = []
-        
+        total_stats_windows = 0
+        kept_stats_windows = 0
+
+        def _build_action_indices(start: int, end: int, length: int) -> List[int]:
+            act_indices = list(range(max(0, start), min(end, length)))
+            if start < 0:
+                act_indices = [0] * (-start) + act_indices
+            if end > length:
+                act_indices = act_indices + [length - 1] * (end - length)
+            return act_indices
+
         for ep_idx in tqdm(range(len(raw_data['images'])), desc="Processing episodes"):
             images = raw_data['images'][ep_idx]
             qpos_joint = raw_data['qpos_joint'][ep_idx]
             qpos_end = raw_data['qpos_end'][ep_idx]
-            
+            raw_actions = raw_data['action'][ep_idx]
+            episode_teleop_scale = episode_teleop_scales[ep_idx] if ep_idx < len(episode_teleop_scales) else None
+
+            episode_active_mask = None
+            if self.filter_inactive_teleop and episode_teleop_scale is not None:
+                episode_active_mask = np.asarray(episode_teleop_scale) > self.inactive_threshold
+
             # Process observations
             obs_dict = obs_process_fn(images, qpos_joint, qpos_end)
-            
             processed_obs = {
                 'rgb': torch.from_numpy(obs_dict['rgb']).to(device),
                 'state': torch.from_numpy(obs_dict['state']).to(device),
             }
-            
-            raw_actions = raw_data['action'][ep_idx]
-            
+
             trajectories["observations"].append(processed_obs)
             trajectories["raw_actions"].append(raw_actions)
             trajectories["qpos_end"].append(qpos_end[:, :7])
-            
+            trajectories["teleop_scale"].append(episode_teleop_scale)
+
             # Compute sample relative actions for normalization stats
-            for t in range(0, len(raw_actions) - pred_horizon, pred_horizon):
-                ref_pose = qpos_end[t, :7]
-                for k in range(pred_horizon):
-                    target_pose = raw_actions[t + k, self._target_pose_slice]
+            for start in range(0, len(raw_actions) - pred_horizon, pred_horizon):
+                total_stats_windows += 1
+                act_indices = _build_action_indices(start, start + pred_horizon, len(raw_actions))
+                if episode_active_mask is not None and not np.all(episode_active_mask[act_indices]):
+                    continue
+
+                kept_stats_windows += 1
+                ref_pose = qpos_end[start, :7]
+                for act_idx in act_indices:
+                    target_pose = raw_actions[act_idx, self._target_pose_slice]
                     relative_pose = compute_relative_pose_transform(ref_pose, target_pose)
-                    rel_action = relative_pose.astype(np.float32)
-                    all_relative_actions.append(rel_action)
-        
+                    all_relative_actions.append(relative_pose.astype(np.float32))
+
         # Compute action normalization stats
         if self.action_normalizer is not None and len(all_relative_actions) > 0 and self.fit_action_normalizer:
             all_relative_actions = np.array(all_relative_actions)
             self.action_normalizer.fit(all_relative_actions)
             print(f"Action normalization stats computed on {len(all_relative_actions)} samples")
-        
+
         self.obs_keys = list(processed_obs.keys())
         print(f"Obs keys: {self.obs_keys}")
-        
+        if self.filter_inactive_teleop:
+            print(
+                f"Normalization windows kept after inactive filtering: "
+                f"{kept_stats_windows}/{total_stats_windows}"
+            )
+
         # Compute slices
         print("Computing slice indices...")
         self.slices = []
         num_traj = len(trajectories["observations"])
         total_transitions = 0
-        
+        total_candidate_sequences = 0
+        filtered_sequences = 0
+
         for traj_idx in range(num_traj):
             L = trajectories["raw_actions"][traj_idx].shape[0]
             total_transitions += L
-            
+
+            episode_active_mask = None
+            episode_teleop_scale = trajectories["teleop_scale"][traj_idx]
+            if self.filter_inactive_teleop and episode_teleop_scale is not None:
+                episode_active_mask = np.asarray(episode_teleop_scale) > self.inactive_threshold
+
             pad_before = obs_horizon - 1
             for start in range(-pad_before, L - pred_horizon + 1):
+                total_candidate_sequences += 1
+                if episode_active_mask is not None:
+                    act_indices = _build_action_indices(start, start + pred_horizon, L)
+                    if not np.all(episode_active_mask[act_indices]):
+                        filtered_sequences += 1
+                        continue
                 self.slices.append((traj_idx, start, start + pred_horizon))
-        
+
         print(f"Total transitions: {total_transitions}, Total sequences: {len(self.slices)}")
+        if self.filter_inactive_teleop:
+            print(
+                f"Inactive filtering removed {filtered_sequences}/{total_candidate_sequences} candidate sequences"
+            )
         self.trajectories = trajectories
         
         # Precompute all relative actions if requested

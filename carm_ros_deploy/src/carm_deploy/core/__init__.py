@@ -7,7 +7,7 @@ CARM 部署核心模块
     - SafetyController: 安全控制器
 """
 
-from .env_ros import RealEnvironment
+from .camera_config import CameraConfig, resolve_camera_config, topic_to_camera_name
 from .safety_controller import SafetyController
 
-__all__ = ['RealEnvironment', 'SafetyController']
+__all__ = ['CameraConfig', 'resolve_camera_config', 'topic_to_camera_name', 'SafetyController']

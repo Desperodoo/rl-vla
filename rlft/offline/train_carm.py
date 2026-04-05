@@ -83,6 +83,8 @@ class Args:
     gripper_open_val: float = 0.078
     gripper_close_val: float = 0.04
     gripper_head_hidden_dim: int = 256
+    filter_inactive_teleop: bool = True
+    inactive_threshold: float = 0.0
 
     # Camera settings
     target_image_size: Optional[Tuple[int, int]] = (128, 128)
@@ -480,6 +482,8 @@ def main():
         precompute_actions=args.precompute_actions,
         action_normalizer=action_normalizer,
         gripper_threshold=args.gripper_threshold,
+        filter_inactive_teleop=args.filter_inactive_teleop,
+        inactive_threshold=args.inactive_threshold,
     )
 
     val_dataset = None
@@ -498,6 +502,8 @@ def main():
             action_normalizer=action_normalizer,
             gripper_threshold=args.gripper_threshold,
             fit_action_normalizer=False,
+            filter_inactive_teleop=args.filter_inactive_teleop,
+            inactive_threshold=args.inactive_threshold,
         )
 
     # Create dataloader

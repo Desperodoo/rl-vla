@@ -37,6 +37,20 @@
    - 当前架构在不做进一步重构的前提下可继续用于采样与审计
    - 仍需关注 recorder / timeline 的 1-step 边界差异，但这次样本没有暴露新的结构性问题
 
+7. **teleop 采集链路新增确认：代理污染曾导致 backend 请求假超时，现已修复**：
+   - 根因不是下位机 backend 变慢，而是采集端环境变量中的 `http_proxy/https_proxy` 把对 `10.42.0.101:1999` 的内网请求错误地送进代理
+   - 证据：下位机本机 `curl 127.0.0.1:1999/...` 可立即返回；远端默认 HTTP 请求超时；显式禁用代理后远端请求可在毫秒级返回
+   - 修复：`env_ros.py` 中 teleop backend 请求显式禁用环境代理；同时 shell 层补充 `no_proxy/NO_PROXY` 覆盖 `10.42.0.101` 与 `10.42.0.0/16`
+   - 回归结果：新 teleop 样本恢复到约 47Hz，`teleop_scale` 不再全 0，`action != qpos_end`
+   - 结论：teleop backend 网络链路恢复正常，后续无需再为该问题保留额外诊断字段
+
+8. **训练主路径与新的 teleop / inference recorder 样本契约已闭环**：
+   - `train_carm` 主路径现在默认启用 inactive teleop 过滤，`CARMDataset` 会输出过滤统计
+   - loader 现在会对缺失关键字段的样本（如旧 inference recorder 缺 `qpos_joint`）尽早报清晰错误
+   - 新的 inference recorder 样本已包含 `observations/qpos_joint`，并可被 `load_carm_episode()` 直接读取
+   - 结论：主训练链对当前新版 teleop / inference recorder 样本已具备稳定的数据契约守卫
+
+
 ### 用户批注（已吸收）
 - “P0-1: inference 数据现在不能直接进入训练主路径”：**当前阶段不是大问题**，因为此阶段还不打算让 inference 数据进入训练。
 - “P0-2: teleop 与 inference 的时间戳语义不一致”：**确实需要修改**。
@@ -508,7 +522,6 @@ relative action 构造逻辑：
 
 ## 6. 关键证据文件
 
-代码：
 - `carm_ros_deploy/src/carm_deploy/data/record_data_ros.py`
 - `carm_ros_deploy/src/carm_deploy/core/env_ros.py`
 - `carm_ros_deploy/src/carm_deploy/inference/inference_ros.py`
@@ -518,8 +531,6 @@ relative action 构造逻辑：
 - `carm_ros_deploy/src/carm_deploy/utils/trajectory_interpolator.py`
 - `rlft/datasets/data_utils.py`
 - `rlft/datasets/carm_dataset.py`
-
-时间线样本：
 - `recorded_data/fixed_dual_light/timeline_record_20260319_235212.jsonl`
 - `recorded_data/fixed_no_light/timeline_record_20260318_225939.jsonl`
 - `recorded_data/random_no_light/timeline_record_20260320_231709.jsonl`
