@@ -683,6 +683,7 @@ class InferenceNode:
                     
                     # 安全检查和裁剪
                     safety_events = []
+                    safety_reason_counts = {}
                     safety_clipped = False
                     
                     # 末端位姿模式：
@@ -711,6 +712,7 @@ class InferenceNode:
                             scale = max_trans / trans_norm
                             all_actions[i, rel_pose_start:rel_pose_start+3] *= scale
                             relative_pose = all_actions[i, rel_pose_start:rel_pose_end]  # 更新
+                            safety_reason_counts['translation_scaled'] = safety_reason_counts.get('translation_scaled', 0) + 1
                             if i == 0:
                                 safety_events.append(f"Translation scaled: {trans_norm:.3f}m -> {max_trans}m")
                                 rospy.logwarn(f"Safety: Translation scaled from {trans_norm:.3f}m to {max_trans}m")
@@ -724,6 +726,7 @@ class InferenceNode:
                         if self.check_workspace:
                             clipped_pose, ws_warnings = self.safety_controller.check_workspace(target_pose_np)
                             if ws_warnings:
+                                safety_reason_counts['workspace_clip'] = safety_reason_counts.get('workspace_clip', 0) + 1
                                 safety_clipped = True
                                 if i == 0:
                                     safety_events.extend(ws_warnings)
@@ -747,13 +750,17 @@ class InferenceNode:
                             all_actions[i, gripper_idx] = clipped_gripper[6]
                             if is_full_mode:
                                 all_actions[i, 6] = clipped_gripper[6]  # 第一个 gripper (full mode only)
+                            safety_reason_counts['gripper_clip'] = safety_reason_counts.get('gripper_clip', 0) + 1
                             if i == 0:
                                 safety_events.extend(grip_warnings)
                                 safety_clipped = True
                     
-                    # 保存模型原始输出（安全检查后，干预前）
-                    action_model = all_actions.copy()
-                    
+                    # 保存模型输出（相对位姿）用于后续日志记录
+                    raw_action_for_log = all_actions[0].copy()
+
+                    # 保存安全检查后、干预前的相对动作调试快照
+                    debug_action_model_relative = all_actions.copy()
+
                     # 应用键盘干预（如果启用）
                     intervention_mask = None
                     if self.intervention_enabled and self.intervention_handler is not None:
@@ -765,10 +772,40 @@ class InferenceNode:
                                 all_actions, intervention, action_format=action_format
                             )
                             rospy.loginfo_throttle(2.0, f"Intervention applied: mask={intervention_mask[0].sum()} dims")
-                    
-                    # 保存干预后的 action
+
+                    # 保存干预后的相对动作调试快照
+                    debug_action_intervened_relative = all_actions.copy()
+
+                    # 转换动作空间
+                    # full mode (15D): [joint(6), gripper(1), relative_end_pose(7), gripper(1)]
+                    # ee_only mode (8D): [relative_end_pose(7), gripper(1)]
+                    # 根据 action_dim_full 确定索引
+                    is_full_mode = (self._action_dim_full == 15)
+                    rel_pose_start = 7 if is_full_mode else 0
+                    rel_pose_end = 14 if is_full_mode else 7
+                    gripper_idx = 14 if is_full_mode else 7
+
+                    all_endactions = []
+                    for i in range(all_actions.shape[0]):
+                        relative_pose = all_actions[i][rel_pose_start:rel_pose_end]  # [7] 相对位姿
+                        grip = all_actions[i][gripper_idx]  # gripper
+                        # 将相对位姿变换应用到当前位姿，得到目标绝对位姿
+                        target_pose = apply_relative_transform(relative_pose, qpos_end[:7], grip)
+                        all_endactions.append(target_pose)
+                    all_actions = np.array(all_endactions)
+
+                    # 生成 absolute target pose 语义的 recorder 快照
+                    if safety_reason_counts:
+                        safety_clipped = True
                     action_intervened = all_actions.copy()
-                    
+                    if intervention_mask is not None:
+                        action_model = np.array([
+                            apply_relative_transform(step[rel_pose_start:rel_pose_end], qpos_end[:7], step[gripper_idx])
+                            for step in debug_action_model_relative
+                        ])
+                    else:
+                        action_model = action_intervened.copy()
+
                     # 记录数据（如果启用采集）
                     if self.record_inference_enabled and self.inference_recorder is not None:
                         if self.inference_recorder.is_recording:
@@ -782,30 +819,9 @@ class InferenceNode:
                                 intervention_mask=intervention_mask,
                                 timestamp=obs_stamp_ros,
                             )
-                    
+
                     # 记录第一个动作用于下一次参考
-                    self.last_action = all_actions[0].copy()
-                    
-                    # 保存 raw_action（模型输出，相对位姿）用于后续日志记录
-                    raw_action_for_log = all_actions[0].copy()
-                    
-                    # 转换动作空间
-                    # full mode (15D): [joint(6), gripper(1), relative_end_pose(7), gripper(1)]
-                    # ee_only mode (8D): [relative_end_pose(7), gripper(1)]
-                    # 根据 action_dim_full 确定索引
-                    is_full_mode = (self._action_dim_full == 15)
-                    rel_pose_start = 7 if is_full_mode else 0
-                    rel_pose_end = 14 if is_full_mode else 7
-                    gripper_idx = 14 if is_full_mode else 7
-                    
-                    all_endactions = []
-                    for i in range(all_actions.shape[0]):
-                        relative_pose = all_actions[i][rel_pose_start:rel_pose_end]  # [7] 相对位姿
-                        grip = all_actions[i][gripper_idx]  # gripper
-                        # 将相对位姿变换应用到当前位姿，得到目标绝对位姿
-                        target_pose = apply_relative_transform(relative_pose, qpos_end[:7], grip)
-                        all_endactions.append(target_pose)
-                    all_actions = np.array(all_endactions)
+                    self.last_action = action_intervened[0].copy()
                     
                     # 创建轨迹并添加到管理器
                     obs_stamp_ros = self.latest_obs.get("stamp", None)
@@ -876,6 +892,7 @@ class InferenceNode:
                         inference_time=inference_time,
                         safety_clipped=safety_clipped,
                         safety_warnings=safety_events if safety_events else None,
+                        safety_reason_counts=safety_reason_counts if safety_reason_counts else None,
                     )
                     
                     self.step_count += 1

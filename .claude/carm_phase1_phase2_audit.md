@@ -6,6 +6,76 @@
 
 ---
 
+## 0.1 2026-04-06 补充进展（基于本轮 inference 分析与回流推进）
+
+相对于本审计文件最初记录的阶段，当前又确认并落地了以下进展：
+
+1. **`gripper_max` 假阳性问题已通过最新对照实验得到验证性收敛**：
+   - 在把 safety 配置中的 `gripper_max` 与真实硬件上限重新对齐后，最新 4 组 inference 对照实验的 `run_info_*.json` 已不再出现 `gripper_clip` 假阳性
+   - 结论：先前大量 safety clip 不是策略本身突然异常，而是 gripper limit 配置与真实硬件上限不一致
+
+2. **teleop vs inference 差异分析已从“same-step gap”升级为“timing + motion”双视角**：
+   - 先前只看 same-step target-vs-state gap，会偏向衡量 target 是否贴身保守，而不等价于肉眼观察到的推进感/执行表现
+   - `scripts/analyze_carm_gap.py` 现已补充 motion-centric 指标：
+     - realized motion / velocity
+     - target motion / velocity
+     - realized-vs-target ratio
+     - future-k improvement
+     - early / middle / late window summary
+   - 结论：新的 motion 指标更接近人工对实验组优劣的观察，避免继续用单一 same-step gap 误判 inference 表现
+
+3. **inference 离线回流已从“最小可读”推进到“带准入信息的可训练 staging”**：
+   - `InferenceDatasetConverter` 现在不仅转换 `inference_episode_*.hdf5 -> episode_*.hdf5`，还会保留关键 attrs：
+     - `action_semantics_version`
+     - `action_space`
+     - `compat_action_source`
+     - `data_source`
+     - `timestamp_semantics`
+     - `has_intervention`
+     - `intervention_ratio`
+     - `camera_names` / `camera_topics` / `primary_camera`
+   - 同时新增 staging attrs：
+     - `dataset_type=inference_staging`
+     - `staging_schema_version`
+     - `kept_steps` / `dropped_steps`
+     - `intervention_ratio_raw` / `intervention_ratio_kept`
+     - `source_run_info` / `source_timeline`
+
+4. **episode-level admission 与 sidecar 审计信息已补齐**：
+   - conversion 现支持最小 episode-level admission：
+     - `admission_label`
+     - `admission_pass`
+     - `admission_reason`
+     - `policy_level=episode`
+     - `min_steps`
+     - `max_intervention_ratio`
+   - 每个 staging episode 现在都会额外生成同名 `.meta.json` sidecar，记录：
+     - source file / run_info / timeline 指针
+     - conversion 配置快照
+     - 原始 attrs 摘要
+     - admission 结果
+     - 过滤前后统计
+   - 目录级 `conversion_metadata.json` 也已补充 pass/fail 计数与 reason 分布
+
+5. **verifier 已能区分 teleop v2 与 inference staging**：
+   - `scripts/verify_hdf5_format.py` 现在支持 `--schema {auto,teleop_v2,inference_staging}`
+   - 不再对 inference staging 错误要求 `teleop_scale`
+   - 对历史样本缺失的旧字段（如早期 inference staging 缺 `action_semantics_version`）会给兼容性 warning，而不是直接误报失败
+
+6. **更真实的 inference second-training smoke 已跑通**：
+   - 基于 admission 后生成的 `/tmp/carm_staging_audit`，已经成功跑通一轮 `train_carm` second-training smoke（10 iter）
+   - 这意味着当前链路已经从：
+     ```text
+     inference raw hdf5
+     -> staging conversion + admission + sidecar
+     -> verifier
+     -> train_carm smoke
+     ```
+     形成可执行闭环
+   - 当前 blocker 已经不再是“能不能进训练”，而是“下一轮正式训练该如何定义 admission 与混合策略”
+
+---
+
 ## 1. 本阶段结论摘要
 
 ### 已确认
@@ -501,22 +571,30 @@ relative action 构造逻辑：
 - 这次样本中 recorder 571 steps、logger 572 steps，说明二者并非严格一一对应
 - 后续 audit 必须把“训练可回流数据”与“诊断日志”分开处理，避免把 logger 误当训练格式
 
-### 5.1 继续做的两块
-1. **Teleop 样本级 QA**
-   - 长度一致性
-   - timestamp 单调性 / 重复率
-   - fallback / inactive 比例
-   - action / qpos_end / quaternion 数值分布
+### 5.1 当前已闭环的主线项
+1. **Teleop 样本级 QA（关键项）**
+   - 最新 teleop 样本已验证：
+     - 采样频率恢复到约 47Hz（`dt_mean ≈ 0.021s`）
+     - `teleop_scale` active ratio 恢复到约 0.88
+     - `action != qpos_end`，说明不再是 fallback 主导
+   - 代理污染导致的 backend 假超时已确认修复
 
-2. **训练加载一致性**
-   - 真实样本走 `load_carm_episode()` / `create_carm_obs_process_fn()` / `CARMDataset`
-   - 验证 teleop / inference 数据谁能直接吃、谁吃不了、差在哪里
+2. **训练加载一致性（主链）**
+   - `load_carm_episode()` 可直接读取新的 teleop 样本
+   - `CARMDataset` 已默认启用 inactive teleop 过滤，并可输出过滤统计
+   - 新 inference recorder 样本已包含 `observations/qpos_joint`，并可被 `load_carm_episode()` 直接读取
+   - 结论：当前新版 teleop / inference recorder 样本已经满足主训练链的关键数据契约
 
-### 5.2 后续待落实的改动方向（不是本阶段立即改）
-- 统一 teleop / inference timestamp 语义
-- inference 对齐 teleop 的双视角/primary_camera 机制
-- dataset 过滤 inactive teleop 帧
-- **方案A 当前执行阻塞**：`rlft_ms3` 环境里 `cv2` 仍缺失，loader probe 不能直接跑；先补依赖，再继续全样本 QA / loader probe
+### 5.2 当前仍开放但已降级/延后的项
+- `chunk_time_base=sys_time` 的时间线优化与解释：继续保留为下一阶段的 timeline 审计主题
+- `inference_episode_*.hdf5` 直接进入训练目录扫描：当前阶段延后，不做自动纳入
+- 多视角进入 policy 输入：按用户要求延后；当前只保留 reward-model / 扩展接口
+- `pi05 bridge/export` 的 inactive 过滤对齐：按用户要求暂缓
+
+### 5.3 下一阶段建议主线
+- 聚焦 `timeline / obs→infer→chunk→control` 延迟链路分析与优化
+- 围绕离线回流模式，明确 `inference_episode_*.hdf5` 的读取/转换/二次训练闭环
+- 在离线闭环稳定后，再考虑把 inference 数据处理回路优化到内存/显存级联
 
 ---
 

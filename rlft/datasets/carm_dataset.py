@@ -161,6 +161,9 @@ class CARMDataset(Dataset):
         self.fit_action_normalizer = fit_action_normalizer
         self.filter_inactive_teleop = filter_inactive_teleop
         self.inactive_threshold = inactive_threshold
+
+        # Action dimension: always 7D relative end-effector pose (ee_only)
+        self.action_dim = 7
         if action_mode == 'full':
             print("WARNING: 'full' action_mode is deprecated with v2 data format. Using 'ee_only'.")
             self.action_mode = 'ee_only'

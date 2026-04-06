@@ -11,6 +11,7 @@ CARM 推理运行信息记录器。
 
 import json
 import os
+from collections import Counter
 from datetime import datetime
 from typing import Dict, List, Optional
 
@@ -47,6 +48,7 @@ class InferenceLogger:
         self._run_info_path: Optional[str] = None
         self._inference_times: List[float] = []
         self._safety_clips = 0
+        self._safety_reason_counts: Counter[str] = Counter()
 
         self.run_info = {
             'version': LOG_FORMAT_VERSION,
@@ -111,6 +113,7 @@ class InferenceLogger:
         self.step_count = 0
         self._inference_times = []
         self._safety_clips = 0
+        self._safety_reason_counts = Counter()
 
         self.metadata['start_time'] = datetime.now().isoformat()
         self.run_info['created_at'] = self.metadata['start_time']
@@ -147,6 +150,7 @@ class InferenceLogger:
         inference_time: float = 0.0,
         safety_clipped: bool = False,
         safety_warnings: List[str] = None,
+        safety_reason_counts: Optional[Dict[str, int]] = None,
     ):
         """记录单步摘要，保留接口兼容性但不再写 HDF5。"""
         self.step_count += 1
@@ -154,6 +158,8 @@ class InferenceLogger:
             self._inference_times.append(float(inference_time))
         if safety_clipped:
             self._safety_clips += 1
+        if safety_reason_counts:
+            self._safety_reason_counts.update(safety_reason_counts)
 
     def end_episode(self) -> str:
         """结束会话并保存 run_info.json。"""
@@ -199,6 +205,7 @@ class InferenceLogger:
             'max_inference_time': np.max(self._inference_times) if self._inference_times else 0,
             'safety_clips': self._safety_clips,
             'safety_clip_rate': self._safety_clips / self.step_count if self.step_count > 0 else 0,
+            'safety_reason_counts': dict(self._safety_reason_counts),
         }
 
 

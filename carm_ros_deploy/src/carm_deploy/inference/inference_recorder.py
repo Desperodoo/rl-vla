@@ -31,6 +31,7 @@ HDF5 文件结构:
         └── ...
 """
 
+import glob
 import os
 import time
 import json
@@ -361,6 +362,9 @@ class InferenceRecorder:
             f.attrs['created_at'] = timestamp
             f.attrs['data_source'] = 'inference_with_intervention'
             f.attrs['timestamp_semantics'] = 'obs_stamp_ros'
+            f.attrs['action_semantics_version'] = 'absolute_ee_target_pose_v2'
+            f.attrs['action_space'] = 'ee_target_pose_absolute'
+            f.attrs['compat_action_source'] = 'action_intervened[:,0,:]'
             f.attrs['camera_topics'] = json.dumps(self.camera_topics)
             f.attrs['camera_names'] = json.dumps(self.camera_names)
             f.attrs['primary_camera'] = self.primary_camera or ''
@@ -384,78 +388,366 @@ class InferenceRecorder:
 class InferenceDatasetConverter:
     """
     将推理采集的数据转换为标准训练格式
-    
+
     主要处理:
     1. action 从 chunk 格式转为单步格式
     2. 可选过滤/保留干预数据
     3. 对齐观测和 action 的时间戳
+    4. 为训练准入保留 metadata / sidecar
     """
-    
+
+    STAGING_SCHEMA_VERSION = 'inference_staging_v1'
+    ADMISSION_LABEL = 'train_admission_v1'
+
+    @staticmethod
+    def _to_serializable(value: Any) -> Any:
+        if isinstance(value, np.generic):
+            return value.item()
+        if isinstance(value, np.ndarray):
+            return value.tolist()
+        if isinstance(value, bytes):
+            return value.decode('utf-8')
+        return value
+
+    @staticmethod
+    def _normalize_attrs(attrs: Any) -> Dict[str, Any]:
+        return {
+            str(k): InferenceDatasetConverter._to_serializable(v)
+            for k, v in attrs.items()
+        }
+
+    @staticmethod
+    def _extract_run_info_summary(run_info: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            'path': run_info.get('_path'),
+            'match_status': run_info.get('_match_status', 'unknown'),
+            'timeline': run_info.get('files', {}).get('timeline'),
+            'run_info': run_info.get('files', {}).get('run_info'),
+            'model_path': run_info.get('model', {}).get('path'),
+            'algorithm': run_info.get('model', {}).get('algorithm'),
+            'pred_horizon': run_info.get('model', {}).get('pred_horizon'),
+            'action_dim': run_info.get('model', {}).get('action_dim_full', run_info.get('model', {}).get('action_dim')),
+            'avg_inference_time': run_info.get('summary', {}).get('avg_inference_time'),
+            'max_inference_time': run_info.get('summary', {}).get('max_inference_time'),
+            'safety_clips': run_info.get('summary', {}).get('safety_clips'),
+            'safety_clip_rate': run_info.get('summary', {}).get('safety_clip_rate'),
+            'desire_inference_freq': run_info.get('execution', {}).get('desire_inference_freq'),
+            'act_horizon': run_info.get('execution', {}).get('act_horizon'),
+            'control_freq': run_info.get('control', {}).get('control_freq'),
+            'truncate_at_act_horizon': run_info.get('execution', {}).get('truncate_at_act_horizon'),
+        }
+
+    @staticmethod
+    def _find_run_info(input_path: str) -> Dict[str, Any]:
+        input_dir = os.path.dirname(input_path)
+        input_name = os.path.basename(input_path)
+        run_info_paths = sorted(glob.glob(os.path.join(input_dir, 'run_info_*.json')))
+        matches: list[Dict[str, Any]] = []
+
+        for run_info_path in run_info_paths:
+            try:
+                with open(run_info_path, 'r') as f:
+                    run_info = json.load(f)
+            except Exception:
+                continue
+
+            episode_files = run_info.get('files', {}).get('episode_hdf5', []) or []
+            if input_name in episode_files:
+                run_info['_path'] = run_info_path
+                run_info['_match_status'] = 'matched_by_episode_hdf5'
+                matches.append(run_info)
+
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            chosen = matches[-1]
+            chosen['_match_status'] = 'multiple_matches_by_episode_hdf5'
+            return chosen
+
+        return {
+            '_path': None,
+            '_match_status': 'unmatched',
+            'files': {},
+            'summary': {},
+            'execution': {},
+            'control': {},
+            'model': {},
+        }
+
+    @staticmethod
+    def _evaluate_admission(
+        *,
+        policy: str,
+        kept_steps: int,
+        intervention_ratio_raw: float,
+        required_ok: bool,
+        action: np.ndarray,
+        qpos_joint: np.ndarray,
+        qpos_end: np.ndarray,
+        timestamps: np.ndarray,
+        min_steps: int,
+        max_intervention_ratio: float,
+    ) -> Dict[str, Any]:
+        reasons: list[str] = []
+        if not required_ok:
+            reasons.append('missing_required_data')
+        if kept_steps < min_steps:
+            reasons.append('too_short')
+        if intervention_ratio_raw > max_intervention_ratio:
+            reasons.append('high_intervention')
+        for name, data in (
+            ('action', action),
+            ('qpos_joint', qpos_joint),
+            ('qpos_end', qpos_end),
+            ('timestamps', timestamps),
+        ):
+            if np.isnan(data).any():
+                reasons.append(f'nan_detected:{name}')
+                break
+
+        if policy == 'none':
+            admission_pass = True if required_ok else False
+            admission_reason = 'ok' if admission_pass else '|'.join(reasons or ['missing_required_data'])
+        else:
+            admission_pass = len(reasons) == 0
+            admission_reason = 'ok' if admission_pass else '|'.join(reasons)
+
+        return {
+            'admission_label': InferenceDatasetConverter.ADMISSION_LABEL,
+            'admission_pass': bool(admission_pass),
+            'admission_reason': admission_reason,
+            'policy_level': 'episode',
+            'admission_policy': policy,
+            'min_steps': int(min_steps),
+            'max_intervention_ratio': float(max_intervention_ratio),
+        }
+
     @staticmethod
     def convert_to_training_format(
         input_path: str,
         output_path: str,
         use_intervened_action: bool = True,
         filter_intervention: bool = False,
-    ):
+        admission_policy: str = 'none',
+        min_steps: int = 32,
+        max_intervention_ratio: float = 0.4,
+        drop_failed_episode: bool = False,
+    ) -> Dict[str, Any]:
         """
-        转换为训练格式
-        
+        转换为训练格式并返回 episode-level metadata。
+
         Args:
             input_path: 输入 HDF5 文件路径
             output_path: 输出 HDF5 文件路径
             use_intervened_action: 使用干预后的 action
             filter_intervention: 是否过滤掉有干预的帧
+            admission_policy: 准入策略，'none' 或 'episode'
+            min_steps: episode-level admission 的最小步数
+            max_intervention_ratio: 原始 episode 最大允许 intervention ratio
+            drop_failed_episode: 若准入失败，是否不写出 staging HDF5
         """
+        output_path = os.path.expandvars(os.path.expanduser(output_path))
+        os.makedirs(os.path.dirname(output_path) or '.', exist_ok=True)
+        sidecar_path = os.path.splitext(output_path)[0] + '.meta.json'
+
+        run_info = InferenceDatasetConverter._find_run_info(input_path)
+        run_summary = InferenceDatasetConverter._extract_run_info_summary(run_info)
+
         with h5py.File(input_path, 'r') as f_in:
-            num_steps = f_in.attrs['num_steps']
-            
-            # 选择 action 源
+            input_attrs = InferenceDatasetConverter._normalize_attrs(f_in.attrs)
+            num_steps = int(f_in.attrs.get('num_steps', 0))
+            obs_group = f_in.get('observations')
+
             if use_intervened_action:
                 action_source = f_in['action_intervened'][:]
+                action_source_name = 'action_intervened[:,0,:]'
             else:
                 action_source = f_in['action_model'][:]
-            
-            # 取每步的第一个 action
-            action = action_source[:, 0, :]  # [T, action_dim]
-            
-            # 干预掩码
+                action_source_name = 'action_model[:,0,:]'
+
+            action = action_source[:, 0, :]
             intervention_mask = f_in['intervention_mask'][:]
-            has_intervention = intervention_mask[:, 0, :].any(axis=1)  # [T]
-            
-            # 过滤干预帧
+            has_intervention = intervention_mask[:, 0, :].any(axis=1)
+            intervention_ratio_raw = float(has_intervention.mean()) if len(has_intervention) > 0 else 0.0
+
             if filter_intervention:
                 keep_idx = ~has_intervention
                 _log_info(f"Filtering intervention frames: {has_intervention.sum()}/{num_steps}")
             else:
                 keep_idx = np.ones(num_steps, dtype=bool)
-            
-            with h5py.File(output_path, 'w') as f_out:
-                obs_grp = f_out.create_group('observations')
-                
-                # 复制观测数据
-                for key in f_in['observations'].keys():
-                    node = f_in['observations'][key]
-                    if isinstance(node, h5py.Group):
-                        out_group = obs_grp.create_group(key)
-                        for subkey in node.keys():
-                            subdata = node[subkey][:][keep_idx]
-                            out_group.create_dataset(subkey, data=subdata, compression='gzip')
-                        continue
 
-                    data = node[:][keep_idx]
-                    if key == 'images':
-                        obs_grp.create_dataset(key, data=data, compression='gzip')
-                    else:
-                        obs_grp.create_dataset(key, data=data)
-                
-                # Action
-                f_out.create_dataset('action', data=action[keep_idx])
-                
-                # 元数据
-                f_out.attrs['num_steps'] = int(keep_idx.sum())
-                f_out.attrs['filtered_intervention'] = filter_intervention
-                f_out.attrs['source_file'] = os.path.basename(input_path)
+            kept_steps = int(keep_idx.sum())
+            dropped_steps = int(num_steps - kept_steps)
+            action_kept = action[keep_idx]
+
+            required_obs_keys = ['images', 'qpos_joint', 'qpos_end', 'gripper', 'timestamps']
+            required_ok = obs_group is not None and all(key in obs_group for key in required_obs_keys) and 'intervention_mask' in f_in
+
+            if required_ok:
+                qpos_joint_kept = obs_group['qpos_joint'][:][keep_idx]
+                qpos_end_kept = obs_group['qpos_end'][:][keep_idx]
+                timestamps_kept = obs_group['timestamps'][:][keep_idx]
+            else:
+                qpos_joint_kept = np.empty((0,), dtype=np.float32)
+                qpos_end_kept = np.empty((0,), dtype=np.float32)
+                timestamps_kept = np.empty((0,), dtype=np.float64)
+
+            admission = InferenceDatasetConverter._evaluate_admission(
+                policy=admission_policy,
+                kept_steps=kept_steps,
+                intervention_ratio_raw=intervention_ratio_raw,
+                required_ok=required_ok,
+                action=action_kept,
+                qpos_joint=qpos_joint_kept,
+                qpos_end=qpos_end_kept,
+                timestamps=timestamps_kept,
+                min_steps=min_steps,
+                max_intervention_ratio=max_intervention_ratio,
+            )
+
+            converted = admission['admission_pass'] or not drop_failed_episode
+            if converted:
+                with h5py.File(output_path, 'w') as f_out:
+                    obs_grp = f_out.create_group('observations')
+
+                    for key in f_in['observations'].keys():
+                        node = f_in['observations'][key]
+                        if isinstance(node, h5py.Group):
+                            out_group = obs_grp.create_group(key)
+                            for subkey in node.keys():
+                                subdata = node[subkey][:][keep_idx]
+                                out_group.create_dataset(subkey, data=subdata, compression='gzip')
+                            continue
+
+                        data = node[:][keep_idx]
+                        if key == 'images':
+                            obs_grp.create_dataset(key, data=data, compression='gzip')
+                        else:
+                            obs_grp.create_dataset(key, data=data)
+
+                    f_out.create_dataset('action', data=action_kept)
+
+                    f_out.attrs['num_steps'] = kept_steps
+                    f_out.attrs['filtered_intervention'] = filter_intervention
+                    f_out.attrs['source_file'] = os.path.basename(input_path)
+                    f_out.attrs['dataset_type'] = 'inference_staging'
+                    f_out.attrs['staging_schema_version'] = InferenceDatasetConverter.STAGING_SCHEMA_VERSION
+                    f_out.attrs['kept_steps'] = kept_steps
+                    f_out.attrs['dropped_steps'] = dropped_steps
+                    f_out.attrs['intervention_ratio_raw'] = intervention_ratio_raw
+                    f_out.attrs['intervention_ratio_kept'] = float(np.mean(has_intervention[keep_idx])) if kept_steps > 0 else 0.0
+                    f_out.attrs['action_source_used'] = action_source_name
+                    f_out.attrs['source_run_info'] = os.path.basename(run_summary['path']) if run_summary['path'] else ''
+                    f_out.attrs['source_timeline'] = run_summary.get('timeline') or ''
+
+                    for key in [
+                        'timestamp_semantics',
+                        'camera_topics',
+                        'camera_names',
+                        'primary_camera',
+                        'action_semantics_version',
+                        'action_space',
+                        'compat_action_source',
+                        'data_source',
+                        'has_intervention',
+                        'intervention_ratio',
+                    ]:
+                        if key in f_in.attrs:
+                            f_out.attrs[key] = f_in.attrs[key]
+
+                    f_out.attrs['admission_label'] = admission['admission_label']
+                    f_out.attrs['admission_pass'] = admission['admission_pass']
+                    f_out.attrs['admission_reason'] = admission['admission_reason']
+                    f_out.attrs['policy_level'] = admission['policy_level']
+                    f_out.attrs['admission_policy'] = admission['admission_policy']
+                    f_out.attrs['min_steps'] = admission['min_steps']
+                    f_out.attrs['max_intervention_ratio'] = admission['max_intervention_ratio']
+
+                    for key in ['safety_clips', 'safety_clip_rate', 'avg_inference_time', 'desire_inference_freq', 'act_horizon', 'control_freq']:
+                        value = run_summary.get(key)
+                        if value is not None:
+                            f_out.attrs[key] = value
+
+        sidecar = {
+            'input_path': os.path.abspath(os.path.expandvars(os.path.expanduser(input_path))),
+            'output_path': os.path.abspath(output_path),
+            'sidecar_path': os.path.abspath(sidecar_path),
+            'converted': bool(converted),
+            'drop_failed_episode': bool(drop_failed_episode),
+            'conversion': {
+                'use_intervened_action': bool(use_intervened_action),
+                'filter_intervention': bool(filter_intervention),
+                'admission_policy': admission_policy,
+                'min_steps': int(min_steps),
+                'max_intervention_ratio': float(max_intervention_ratio),
+            },
+            'stats': {
+                'num_steps_raw': num_steps,
+                'kept_steps': kept_steps,
+                'dropped_steps': dropped_steps,
+                'intervention_ratio_raw': intervention_ratio_raw,
+                'intervention_ratio_kept': float(np.mean(has_intervention[keep_idx])) if kept_steps > 0 else 0.0,
+                'use_intervened_action': bool(use_intervened_action),
+                'filter_intervention': bool(filter_intervention),
+            },
+            'admission': admission,
+            'source': {
+                'file': os.path.basename(input_path),
+                'run_info': run_summary.get('run_info'),
+                'timeline': run_summary.get('timeline'),
+                'run_info_path': run_summary.get('path'),
+                'run_info_match_status': run_summary.get('match_status'),
+            },
+            'run_info_summary': run_summary,
+            'input_attrs': input_attrs,
+        }
+        with open(sidecar_path, 'w') as f:
+            json.dump(sidecar, f, indent=2, ensure_ascii=False)
+
+        return {
+            'output_path': output_path,
+            'sidecar_path': sidecar_path,
+            'converted': bool(converted),
+            'admission_pass': bool(admission['admission_pass']),
+            'admission_reason': admission['admission_reason'],
+            'source_file': os.path.basename(input_path),
+        }
+
+    @staticmethod
+    def convert_directory_to_training_format(
+        input_dir: str,
+        output_dir: str,
+        use_intervened_action: bool = True,
+        filter_intervention: bool = False,
+        admission_policy: str = 'none',
+        min_steps: int = 32,
+        max_intervention_ratio: float = 0.4,
+        drop_failed_episode: bool = False,
+    ) -> list[Dict[str, Any]]:
+        """批量将 inference_episode_*.hdf5 转换到训练 staging 目录。"""
+        input_dir = os.path.expandvars(os.path.expanduser(input_dir))
+        output_dir = os.path.expandvars(os.path.expanduser(output_dir))
+        os.makedirs(output_dir, exist_ok=True)
+
+        input_paths = sorted(
+            glob.glob(os.path.join(input_dir, 'inference_episode_*.hdf5'))
+        )
+        converted_records: list[Dict[str, Any]] = []
+        for idx, input_path in enumerate(input_paths, start=1):
+            output_name = f'episode_{idx:04d}_{os.path.basename(input_path).replace("inference_episode_", "")}'
+            output_path = os.path.join(output_dir, output_name)
+            record = InferenceDatasetConverter.convert_to_training_format(
+                input_path=input_path,
+                output_path=output_path,
+                use_intervened_action=use_intervened_action,
+                filter_intervention=filter_intervention,
+                admission_policy=admission_policy,
+                min_steps=min_steps,
+                max_intervention_ratio=max_intervention_ratio,
+                drop_failed_episode=drop_failed_episode,
+            )
+            converted_records.append(record)
+        return converted_records
 
 
 if __name__ == '__main__':

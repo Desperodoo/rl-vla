@@ -17,7 +17,7 @@
       2.304
     ],
     "gripper_min": 0.008,
-    "gripper_max": 0.07700000000000001
+    "gripper_max": 0.08
   },
   "workspace_limits": {
     "x_min": -0.020674333721399304,

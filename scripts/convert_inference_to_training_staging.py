@@ -1,0 +1,73 @@
+#!/usr/bin/env python3
+"""Convert recorded CARM inference episodes into a training staging directory."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+CARM_DEPLOY_ROOT = ROOT / 'carm_ros_deploy' / 'src' / 'carm_deploy'
+for p in (str(ROOT), str(CARM_DEPLOY_ROOT)):
+    if p not in sys.path:
+        sys.path.insert(0, p)
+
+from inference.inference_recorder import InferenceDatasetConverter
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description='Convert inference_episode files into training staging episodes')
+    parser.add_argument('--input_dir', type=str, default='inference_logs', help='Directory containing inference_episode_*.hdf5')
+    parser.add_argument('--output_dir', type=str, required=True, help='Directory to write converted episode_*.hdf5 files')
+    parser.add_argument('--use_model_action', action='store_true', help='Use action_model[:,0,:] instead of action_intervened[:,0,:]')
+    parser.add_argument('--filter_intervention', action='store_true', help='Drop steps where intervention_mask indicates intervention')
+    parser.add_argument('--admission_policy', choices=['none', 'episode'], default='none', help='Apply no admission filter or episode-level admission')
+    parser.add_argument('--min_steps', type=int, default=32, help='Minimum kept steps for episode admission')
+    parser.add_argument('--max_intervention_ratio', type=float, default=0.4, help='Maximum raw intervention ratio allowed for episode admission')
+    parser.add_argument('--drop_failed_episode', action='store_true', help='Do not write staging HDF5 for episodes that fail admission')
+    args = parser.parse_args()
+
+    converted_records = InferenceDatasetConverter.convert_directory_to_training_format(
+        input_dir=args.input_dir,
+        output_dir=args.output_dir,
+        use_intervened_action=not args.use_model_action,
+        filter_intervention=args.filter_intervention,
+        admission_policy=args.admission_policy,
+        min_steps=args.min_steps,
+        max_intervention_ratio=args.max_intervention_ratio,
+        drop_failed_episode=args.drop_failed_episode,
+    )
+
+    reason_counts: dict[str, int] = {}
+    for record in converted_records:
+        reason = str(record.get('admission_reason', 'unknown'))
+        reason_counts[reason] = reason_counts.get(reason, 0) + 1
+
+    metadata = {
+        'input_dir': os.path.expandvars(os.path.expanduser(args.input_dir)),
+        'output_dir': os.path.expandvars(os.path.expanduser(args.output_dir)),
+        'num_input_files': len(converted_records),
+        'num_written_files': sum(1 for record in converted_records if record.get('converted')),
+        'num_failed_admission': sum(1 for record in converted_records if not record.get('admission_pass')),
+        'converted_files': [os.path.basename(record['output_path']) for record in converted_records if record.get('converted')],
+        'episode_sidecars': [os.path.basename(record['sidecar_path']) for record in converted_records],
+        'use_intervened_action': not args.use_model_action,
+        'filter_intervention': args.filter_intervention,
+        'admission_policy': args.admission_policy,
+        'min_steps': args.min_steps,
+        'max_intervention_ratio': args.max_intervention_ratio,
+        'drop_failed_episode': args.drop_failed_episode,
+        'admission_reason_counts': reason_counts,
+        'episodes': converted_records,
+    }
+    metadata_path = Path(args.output_dir).expanduser() / 'conversion_metadata.json'
+    metadata_path.write_text(json.dumps(metadata, indent=2, ensure_ascii=False))
+    print(f"Processed {len(converted_records)} files into {args.output_dir}")
+    print(f"Wrote metadata to {metadata_path}")
+
+
+if __name__ == '__main__':
+    main()
