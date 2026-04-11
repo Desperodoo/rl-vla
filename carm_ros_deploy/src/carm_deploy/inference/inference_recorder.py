@@ -4,10 +4,10 @@
 
 数据格式设计原则:
 1. action 定义遵循 inference_ros 的模型输出格式（保持训练-推理一致性）
-2. 记录模型原始输出 (action_model) 和干预后输出 (action_intervened)
-3. 通过 intervention_mask 标记哪些维度被人工干预
-4. observations/images 记录 primary camera 兼容字段，images_by_camera 保存多视角
-5. observations/timestamps 记录 ROS observation stamp
+2. 记录模型原始输出 (action_model) 和实际执行输出 (action_executed)
+3. observations/images 记录 primary camera 兼容字段，images_by_camera 保存多视角
+4. observations/timestamps 记录 ROS observation stamp
+5. 为旧分析工具短期保留 `action_intervened` / `intervention_mask` 兼容字段
 
 HDF5 文件结构:
     episode_{XXXX}_{timestamp}.hdf5
@@ -21,8 +21,9 @@ HDF5 文件结构:
     │   ├── gripper       [T]               # 夹爪状态
     │   └── timestamps    [T]               # ROS observation stamp
     ├── action_model      [T, pred_horizon, action_dim]  # 模型原始输出
-    ├── action_intervened [T, pred_horizon, action_dim]  # 干预后 action
-    ├── intervention_mask [T, pred_horizon, action_dim]  # 干预掩码 (bool)
+    ├── action_executed   [T, pred_horizon, action_dim]  # 实际执行 action
+    ├── action_intervened [T, pred_horizon, action_dim]  # 兼容字段，等于 action_executed
+    ├── intervention_mask [T, pred_horizon, action_dim]  # 兼容字段，当前固定全 0
     └── attrs:
         ├── num_steps
         ├── pred_horizon
@@ -137,9 +138,8 @@ class InferenceRecorder:
             'timestamps': [],       # [T] ROS observation stamp
 
             # Action
-            'action_model': [],     # [T, pred_horizon, action_dim] 模型输出
-            'action_intervened': [],# [T, pred_horizon, action_dim] 干预后
-            'intervention_mask': [],# [T, pred_horizon, action_dim] 干预掩码
+            'action_model': [],      # [T, pred_horizon, action_dim] 模型输出
+            'action_executed': [],   # [T, pred_horizon, action_dim] 实际执行输出
         }
         self.step_count = 0
     
@@ -229,8 +229,7 @@ class InferenceRecorder:
         self,
         obs: Dict[str, Any],
         action_model: np.ndarray,
-        action_intervened: Optional[np.ndarray] = None,
-        intervention_mask: Optional[np.ndarray] = None,
+        action_executed: Optional[np.ndarray] = None,
         timestamp: Optional[float] = None,
     ):
         """
@@ -239,8 +238,7 @@ class InferenceRecorder:
         Args:
             obs: 观测字典，包含 images, qpos_joint, qpos_end, qpos, gripper
             action_model: 模型原始输出 [pred_horizon, action_dim]
-            action_intervened: 干预后的 action [pred_horizon, action_dim]，None 表示无干预
-            intervention_mask: 干预掩码 [pred_horizon, action_dim]，None 表示无干预
+            action_executed: 实际执行的 action [pred_horizon, action_dim]，None 表示与模型输出一致
             timestamp: 时间戳，None 使用当前系统时间
         """
         if not self.recording:
@@ -280,17 +278,10 @@ class InferenceRecorder:
         # Action
         self.episode_data['action_model'].append(action_model.copy())
         
-        if action_intervened is not None:
-            self.episode_data['action_intervened'].append(action_intervened.copy())
+        if action_executed is not None:
+            self.episode_data['action_executed'].append(action_executed.copy())
         else:
-            self.episode_data['action_intervened'].append(action_model.copy())
-        
-        if intervention_mask is not None:
-            self.episode_data['intervention_mask'].append(intervention_mask.copy())
-        else:
-            self.episode_data['intervention_mask'].append(
-                np.zeros_like(action_model, dtype=bool)
-            )
+            self.episode_data['action_executed'].append(action_model.copy())
         
         self.step_count += 1
     
@@ -345,31 +336,33 @@ class InferenceRecorder:
             action_model = np.array(data['action_model'])  # [T, pred_horizon, action_dim]
             f.create_dataset('action_model', data=action_model)
             
-            action_intervened = np.array(data['action_intervened'])  # [T, pred_horizon, action_dim]
-            f.create_dataset('action_intervened', data=action_intervened)
-            
-            intervention_mask = np.array(data['intervention_mask'])  # [T, pred_horizon, action_dim]
+            action_executed = np.array(data['action_executed'])  # [T, pred_horizon, action_dim]
+            f.create_dataset('action_executed', data=action_executed)
+
+            # 兼容字段：保留给旧分析工具，当前不再表示人工 intervention
+            f.create_dataset('action_intervened', data=action_executed)
+            intervention_mask = np.zeros_like(action_executed, dtype=bool)
             f.create_dataset('intervention_mask', data=intervention_mask, dtype='bool')
             
-            # 兼容旧格式: action = action_intervened[:, 0, :]
+            # 兼容旧格式: action = action_executed[:, 0, :]
             # 取每步的第一个 action 作为该步的 action
-            action = action_intervened[:, 0, :]  # [T, action_dim]
+            action = action_executed[:, 0, :]  # [T, action_dim]
             f.create_dataset('action', data=action)
             
             # 元数据
             f.attrs['num_steps'] = num_steps
             f.attrs['pred_horizon'] = self.pred_horizon
             f.attrs['action_dim'] = self.action_dim
-            f.attrs['has_intervention'] = bool(np.any(intervention_mask))
-            f.attrs['intervention_ratio'] = float(np.mean(intervention_mask))
+            f.attrs['has_intervention'] = False
+            f.attrs['intervention_ratio'] = 0.0
             f.attrs['image_height'] = images.shape[1] if len(images.shape) > 1 else 0
             f.attrs['image_width'] = images.shape[2] if len(images.shape) > 2 else 0
             f.attrs['created_at'] = timestamp
-            f.attrs['data_source'] = 'inference_with_intervention'
+            f.attrs['data_source'] = 'inference_rollout'
             f.attrs['timestamp_semantics'] = 'obs_stamp_ros'
             f.attrs['action_semantics_version'] = 'absolute_ee_target_pose_v2'
             f.attrs['action_space'] = 'ee_target_pose_absolute'
-            f.attrs['compat_action_source'] = 'action_intervened[:,0,:]'
+            f.attrs['compat_action_source'] = 'action_executed[:,0,:]'
             f.attrs['camera_topics'] = json.dumps(self.camera_topics)
             f.attrs['camera_names'] = json.dumps(self.camera_names)
             f.attrs['primary_camera'] = self.primary_camera or ''
@@ -377,7 +370,7 @@ class InferenceRecorder:
             f.attrs['outcome_label'] = outcome_label
         
         _log_info(
-            f"Episode saved: {num_steps} steps, intervention_ratio: {np.mean(intervention_mask):.2%}, "
+            f"Episode saved: {num_steps} steps, "
             f"outcome={outcome_label}"
         )
         
@@ -866,17 +859,8 @@ if __name__ == '__main__':
             }
             action_model = np.random.rand(16, 15)
             
-            # 模拟干预
-            if i % 3 == 0:
-                action_intervened = action_model.copy()
-                action_intervened[:, 7:10] += 0.01  # xyz 干预
-                mask = np.zeros_like(action_model, dtype=bool)
-                mask[:, 7:10] = True
-            else:
-                action_intervened = None
-                mask = None
-            
-            recorder.record_step(obs, action_model, action_intervened, mask)
+            action_executed = action_model.copy()
+            recorder.record_step(obs, action_model, action_executed)
         
         recorder.stop_recording()
         
@@ -892,6 +876,6 @@ if __name__ == '__main__':
                 print(f"has_intervention: {f.attrs['has_intervention']}")
                 print(f"intervention_ratio: {f.attrs['intervention_ratio']:.2%}")
                 print(f"action_model shape: {f['action_model'].shape}")
-                print(f"action_intervened shape: {f['action_intervened'].shape}")
+                print(f"action_executed shape: {f['action_executed'].shape}")
     
     print("Test complete")

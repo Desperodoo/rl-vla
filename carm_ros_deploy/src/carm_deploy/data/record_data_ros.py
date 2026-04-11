@@ -195,6 +195,8 @@ class DataRecorder:
         self.pending_episode_data = None  # 待确认的 episode 数据
         self.streams_ready = False
         self.last_candidate_stale = False
+        self.shutting_down = False
+        self._shutdown_complete = False
         
         # 键盘监听
         self.keyboard_thread = None
@@ -541,6 +543,8 @@ class DataRecorder:
         Args:
             obs: 观测字典
         """
+        if self.shutting_down:
+            return
         if not self.recording:
             return
         
@@ -719,6 +723,8 @@ class DataRecorder:
         rospy.loginfo(">>> Press 's' to start recording")
         
         while not rospy.is_shutdown():
+            if self.shutting_down:
+                break
             # 获取观测
             obs = self.env.get_observation()
             
@@ -777,6 +783,9 @@ class DataRecorder:
     
     def shutdown(self):
         """关闭记录器"""
+        if self._shutdown_complete:
+            return
+        self.shutting_down = True
         rospy.loginfo("Shutting down DataRecorder...")
         
         if self.recording:
@@ -790,6 +799,9 @@ class DataRecorder:
 
         if self.timeline_logger is not None:
             self.timeline_logger.close()
+            self.timeline_logger = None
+        
+        self._shutdown_complete = True
         
         rospy.loginfo("DataRecorder shutdown complete")
 

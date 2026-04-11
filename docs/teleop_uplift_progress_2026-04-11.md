@@ -1,7 +1,7 @@
 # Teleop Uplift 最新进展
 
 **日期**: 2026-04-11  
-**状态**: `record_data_ros` 宿主化已落地，`passive_shadow` / `upper_control` candidate-only / `upper_control` live execute 已完成首轮真机验证  
+**状态**: `record_data_ros` 宿主化已落地，`passive_shadow` / `upper_control` candidate-only / `upper_control` live execute 已完成首轮真机与异常退出验证，已开始清理 `inference_ros` 中旧 intervention 链路  
 **定位**: 作为 `project_memory_baseline_2026-04-11.md` 之后的最新实现与现场验证续篇
 
 ---
@@ -19,6 +19,9 @@
 7. 完成 `upper_control` live execute 最小幅度真机验证
 8. 修正 `signal_age_ms` 的跨机绝对时钟问题
 9. 修正 candidate 误差统计中的 `NaN` 污染问题
+10. 完成 live execute 长时稳定性验证
+11. 完成 recorder 异常退出 / Ctrl+C 下的 owner 恢复演练
+12. 开始清理 `inference_ros` 中旧 intervention pipeline，为 Human-in-the-loop inference 准备更干净的入口
 
 ---
 
@@ -197,6 +200,58 @@ timeline JSONL 也已同步记录：
 - `teleop_signal_age_ms` p50 约 `8.59ms`
 - `teleop_signal_age_ms` p95 约 `16.78ms`
 
+### 4.5 `upper_control` live execute 长时验证
+
+已完成一轮更长时间的 live execute 真机录制。
+
+对应样本：
+
+- [episode_0001_20260411_190005.hdf5](/home/amax/rl-vla/recorded_data/tmp_record_data/episode_0001_20260411_190005.hdf5)
+- [timeline_record_20260411_185845.jsonl](/home/amax/rl-vla/recorded_data/tmp_record_data/timeline_record_20260411_185845.jsonl)
+
+关键结论：
+
+1. `recording=True` 期间 owner 持续保持在 `upper_machine`
+2. 停录后 owner 能恢复到 `lower_machine`
+3. candidate/live 控制线程在长时窗口下仍保持稳定
+
+该样本关键指标：
+
+- `teleop_candidate_applied = 1489 / 1751`
+- `teleop_candidate_stale = 262 / 1751`
+- `teleop_signal_age_ms` p50 约 `8.91ms`
+- `teleop_signal_age_ms` p95 约 `17.30ms`
+- candidate loop dt p50 约 `20.32ms`
+- candidate loop dt p95 约 `22.23ms`
+
+### 4.6 stale 拆分结果
+
+为避免把“正常松手”与“真实 timeout”混在一起，现已在分析脚本中将 stale 拆分为：
+
+- `inactive_stale`
+- `timeout_stale`
+
+对长时 live 样本的拆分结果是：
+
+- `inactive_stale = 254 / 1751`
+- `timeout_stale = 8 / 1751`
+
+这说明长时样本中大部分 stale 都来自 teleop inactive，而不是 active 期间的链路陈旧。
+
+### 4.7 异常退出 / owner 恢复演练
+
+已完成多轮 recorder 中途中断与 `Ctrl+C` 异常退出演练。
+
+当前确认：
+
+1. live execute 运行中中断 recorder 后，backend owner 仍可恢复回 `lower_machine`
+2. shutdown 路径中原先存在的 timeline logger 关闭竞态已修正
+3. shutdown 路径中原先存在的 owner 恢复超时误报已修正
+
+当前阶段可以明确确认：
+
+> recorder 异常退出并不会把系统卡死在 `upper_machine` ownership。
+
 ---
 
 ## 5. 关键修正
@@ -249,6 +304,41 @@ candidate-only 首轮样本中，`upper_candidate_rot_error` 曾出现 `NaN`。
 - `control_owner_at_start`: 记录录制启动时 backend owner
 - `upper_control_enabled_at_start`: 记录本次 recorder 是否启用了 live upper control
 
+### 5.4 shutdown 竞态与 owner 恢复误报修正
+
+在异常退出演练中，曾暴露出两个退出路径问题：
+
+1. `timeline_logger` 已关闭，但主循环仍有最后一步尝试写日志
+2. owner 实际已经恢复，但上位机使用过短 HTTP timeout 导致误报“恢复失败”
+
+现已修正为：
+
+1. `record_data_ros` 的 shutdown 变为幂等，并增加 `shutting_down` 保护
+2. `TimelineLogger` 在关闭后会忽略后续写入
+3. `TeleopUpperControlBridge.deactivate_owner()` 使用更宽松 timeout 与少量重试做 best-effort 恢复
+
+修正后，live execute 中途中断退出日志已恢复干净。
+
+### 5.5 `inference_ros` intervention 链路清理
+
+为加速进入 Human-in-the-loop inference，本轮已开始清理当前 `inference_ros` 主 pipeline 中的旧 intervention 内容。
+
+当前已完成：
+
+1. `inference_ros` 主循环不再在 policy 输出与执行之间插入 `InterventionApplier`
+2. episode 控制从 `KeyboardInterventionHandler` 解耦，改为专用的 `EpisodeKeyboardHandler`
+3. `InferenceRecorder` 主语义开始从：
+   - `action_model + action_intervened + intervention_mask`
+   收敛为：
+   - `action_model + action_executed`
+4. 为避免立刻打断旧分析链路，短期仍保留兼容字段：
+   - `action_intervened`
+   - `intervention_mask`
+
+当前阶段目标不是立刻完成 HITL，而是：
+
+> 先把旧键盘 intervention 路径从推理主链路中清出来，再为 HITL 接入腾出更明确的入口。
+
 ---
 
 ## 6. 当前测试状态
@@ -257,11 +347,13 @@ candidate-only 首轮样本中，`upper_candidate_rot_error` 曾出现 `NaN`。
 
 - [test_teleop_bridge.py](/home/amax/rl-vla/carm_ros_deploy/src/carm_deploy/tests/test_teleop_bridge.py)
 - [test_backend_control_state.py](/home/amax/rl-vla/carm_ros_deploy/src/carm_deploy/tests/test_backend_control_state.py)
+- [test_inference_node.py](/home/amax/rl-vla/carm_ros_deploy/src/carm_deploy/tests/test_inference_node.py)
 
 当前本地回归状态：
 
-- `test_teleop_bridge.py`: `6 passed`
+- `test_teleop_bridge.py`: `9 passed`
 - `test_backend_control_state.py`: `4 passed`
+- `test_inference_node.py`: `7 passed`
 
 为运行这两组测试，已在 `carm` 环境中安装：
 
@@ -279,27 +371,29 @@ candidate-only 首轮样本中，`upper_candidate_rot_error` 曾出现 `NaN`。
 1. `record_data_ros` 已经能作为唯一过渡宿主承接 teleop uplift
 2. `passive_shadow` 已经稳定可用
 3. `upper_control` candidate-only 已经稳定可用
-4. `upper_control` live execute 已完成首轮最小幅度真机验证
+4. `upper_control` live execute 已完成最小幅度与长时两轮真机验证
 5. backend ownership gate、owner 切换与退出恢复链路已经真实跑通
-6. `signal_age_ms` 与 candidate 误差统计中的关键观测问题已经修正
+6. recorder 异常退出 / `Ctrl+C` 下的 owner 恢复链路已经演练通过
+7. `signal_age_ms`、candidate 误差统计、shutdown race 与 owner 恢复误报等关键观测问题已经修正
+8. `inference_ros` 中旧 intervention 主链路已经开始清理，为 HITL inference 做前置收口
 
 因此当前项目状态可以概括为：
 
-> Teleop ownership uplift 的第一版最小闭环已经跑通，但仍需要更长时长、更复杂动作和异常退出场景的进一步验证，才能进入“长期可用”的阶段。
+> Teleop ownership uplift 的第一版工程闭环已经基本跑通，系统性验证已覆盖到长时 live 与异常退出恢复；下一阶段可以开始把重心从 ownership 验证转向 Human-in-the-loop inference 接入前的 pipeline 收口。
 
 ---
 
 ## 8. 下一步建议
 
-更合适的下一步不是再改架构，而是补系统性验证。
+当前建议从“继续验证 ownership”转向“开始收口 inference pipeline，为 HITL 接入做准备”。
 
 建议优先顺序：
 
-1. 增加 live execute 的长时稳定性验证
-2. 增加更复杂轨迹与更连续 teleop 操作的真机验证
-3. 补 recorder 异常退出 / ROS shutdown / 网络闪断下的 owner 恢复演练
-4. 评估 live execute 手感与 lower-machine teleop 的残余差异
-5. 在此基础上再讨论 Human-in-the-loop inference 的正式接入
+1. 继续清理 `inference_ros` / `InferenceRecorder` 中遗留的 intervention 语义
+2. 设计并接入 Human-in-the-loop inference 所需的显式 owner/source arbitration
+3. 复用 `TeleopSignalClient` / `TeleopUpperControlBridge` 到 inference 侧
+4. 将 inference rollout 落盘语义与 teleop uplift 数据语义做统一
+5. 在 HITL 主链路跑通后，再按需回补更复杂动作任务上的对比验证
 
 ---
 

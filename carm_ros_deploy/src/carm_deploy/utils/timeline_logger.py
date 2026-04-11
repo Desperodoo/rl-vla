@@ -44,6 +44,7 @@ class TimelineLogger:
             os.makedirs(log_dir, exist_ok=True)
         self._lock = threading.Lock()
         self._fp = open(log_path, 'a', buffering=1)
+        self._closed = False
 
     def log(self, event: str, **fields: Dict[str, Any]):
         """
@@ -61,6 +62,8 @@ class TimelineLogger:
             payload[k] = _to_jsonable(v)
         line = json.dumps(payload, ensure_ascii=False)
         with self._lock:
+            if self._closed or self._fp.closed:
+                return
             self._fp.write(line + '\n')
     
     def log_control(self, **fields: Dict[str, Any]) -> bool:
@@ -82,8 +85,9 @@ class TimelineLogger:
 
     def close(self):
         with self._lock:
-            if not self._fp.closed:
+            if not self._closed and not self._fp.closed:
                 self._fp.close()
+            self._closed = True
 
     def __del__(self):
         try:

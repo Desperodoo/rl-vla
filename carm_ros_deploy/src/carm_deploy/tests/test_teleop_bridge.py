@@ -1,5 +1,7 @@
 """Tests for teleop bridge shared components."""
 
+import time
+
 import numpy as np
 
 from data.teleop_bridge import TeleopShadowTransformer, TeleopUpperControlBridge
@@ -18,10 +20,17 @@ class FakeEnv:
 
 
 class FakeSignalClient:
-    def __init__(self):
+    def __init__(self, fail_on_upper=False, fail_lower_attempts=0):
         self.calls = []
+        self.fail_on_upper = fail_on_upper
+        self.fail_lower_attempts = int(fail_lower_attempts)
 
-    def set_control_state(self, local_control_enabled, control_owner):
+    def set_control_state(self, local_control_enabled, control_owner, timeout_s=None):
+        if self.fail_on_upper and (not bool(local_control_enabled)) and control_owner == "upper_machine":
+            raise RuntimeError("failed to acquire upper owner")
+        if bool(local_control_enabled) and control_owner == "lower_machine" and self.fail_lower_attempts > 0:
+            self.fail_lower_attempts -= 1
+            raise RuntimeError("temporary lower owner restore failure")
         self.calls.append((bool(local_control_enabled), control_owner))
         return {
             "local_control_enabled": bool(local_control_enabled),
@@ -84,7 +93,6 @@ class TestTeleopUpperControlBridge:
                 processed_sequence=7,
             )
             bridge.activate_for_recording()
-            import time
             time.sleep(0.05)
             snapshot = bridge.snapshot()
             assert snapshot["teleop_candidate_applied"] is False
@@ -107,12 +115,70 @@ class TestTeleopUpperControlBridge:
                 processed_sequence=8,
             )
             bridge.activate_for_recording()
-            import time
             time.sleep(0.05)
             bridge.deactivate_owner()
             assert client.calls[0] == (False, "upper_machine")
             assert client.calls[-1] == (True, "lower_machine")
             assert len(env.commands) > 0
+        finally:
+            bridge.stop()
+
+    def test_live_mode_stop_restores_owner(self):
+        env = FakeEnv()
+        client = FakeSignalClient()
+        bridge = TeleopUpperControlBridge(env, client, control_freq=100.0, signal_timeout_ms=150.0, live_enabled=True)
+        bridge.start()
+        bridge.update_signal(
+            processed_target_abs=np.array([0.30, 0.01, 0.29, 0.0, 0.0, 0.0, 1.0, 0.05]),
+            signal_age_ms=20.0,
+            teleop_active=True,
+            processed_sequence=10,
+        )
+        bridge.activate_for_recording()
+        time.sleep(0.05)
+        bridge.stop()
+
+        assert client.calls[0] == (False, "upper_machine")
+        assert client.calls[-1] == (True, "lower_machine")
+
+    def test_live_mode_restore_retries_after_temporary_failure(self):
+        env = FakeEnv()
+        client = FakeSignalClient(fail_lower_attempts=1)
+        bridge = TeleopUpperControlBridge(env, client, control_freq=100.0, signal_timeout_ms=150.0, live_enabled=True)
+        bridge.start()
+        bridge.update_signal(
+            processed_target_abs=np.array([0.30, 0.01, 0.29, 0.0, 0.0, 0.0, 1.0, 0.05]),
+            signal_age_ms=20.0,
+            teleop_active=True,
+            processed_sequence=10,
+        )
+        bridge.activate_for_recording()
+        time.sleep(0.05)
+        bridge.stop()
+
+        assert client.calls[0] == (False, "upper_machine")
+        assert client.calls[-1] == (True, "lower_machine")
+        assert bridge.snapshot()["last_error"] is None
+
+    def test_live_mode_owner_acquire_failure_keeps_bridge_safe(self):
+        env = FakeEnv()
+        client = FakeSignalClient(fail_on_upper=True)
+        bridge = TeleopUpperControlBridge(env, client, control_freq=100.0, signal_timeout_ms=150.0, live_enabled=True)
+        bridge.start()
+        try:
+            bridge.update_signal(
+                processed_target_abs=np.array([0.30, 0.01, 0.29, 0.0, 0.0, 0.0, 1.0, 0.05]),
+                signal_age_ms=20.0,
+                teleop_active=True,
+                processed_sequence=11,
+            )
+            bridge.activate_for_recording()
+            time.sleep(0.05)
+            snapshot = bridge.snapshot()
+            assert snapshot["owner_active"] is False
+            assert snapshot["teleop_candidate_applied"] is False
+            assert "failed to acquire upper owner" in snapshot["last_error"]
+            assert len(env.commands) == 0
         finally:
             bridge.stop()
 
@@ -129,7 +195,6 @@ class TestTeleopUpperControlBridge:
                 processed_sequence=9,
             )
             bridge.activate_for_recording()
-            import time
             time.sleep(0.05)
             snapshot = bridge.snapshot()
             assert snapshot["teleop_candidate_stale"] is True
@@ -150,7 +215,6 @@ class TestTeleopUpperControlBridge:
                 teleop_active=False,
                 processed_sequence=0,
             )
-            import time
             time.sleep(0.05)
             snapshot = bridge.snapshot()
             assert snapshot["teleop_candidate_stale"] is True

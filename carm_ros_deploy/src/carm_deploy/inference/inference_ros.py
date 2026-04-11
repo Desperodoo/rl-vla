@@ -14,8 +14,8 @@ CARM 机械臂 ROS 策略推理主程序
     # 正常推理 (30Hz)
     rosrun carm_deploy inference_ros.py --pretrain /path/to/model.pt
     
-    # 启用干预和采集
-    rosrun carm_deploy inference_ros.py --pretrain /path/to/model.pt --intervention --record_inference
+    # 启用推理回流采集
+    rosrun carm_deploy inference_ros.py --pretrain /path/to/model.pt --record_inference
 """
 
 import argparse
@@ -65,14 +65,14 @@ from inference.inference_recorder import InferenceRecorder
 from core.env_ros import RealEnvironment
 from utils.trajectory_interpolator import VecTF, ActionChunkManager
 from utils.timeline_logger import TimelineLogger
-from utils.keyboard_intervention import KeyboardInterventionHandler, InterventionApplier
+from utils.episode_keyboard import EpisodeKeyboardHandler
 
 
 class InferenceNode:
     """
     ROS 推理节点
     
-    支持人工干预和数据采集
+    支持推理执行与 inference rollout 采集
     """
     
     def __init__(self, config):
@@ -208,13 +208,12 @@ class InferenceNode:
         self.pending_outcome_label = False  # 等待 success/failure 标注
         self.max_steps = config.get('max_steps', 900)  # 每个 episode 最大步数
         
-        # 干预和采集模块
-        self.intervention_enabled = config.get('intervention', False)
-        self.intervention_handler = None
+        # episode 控制与采集模块
+        self.episode_keyboard = None
         self.inference_recorder = None
         
-        if self.intervention_enabled or self.record_inference_enabled:
-            self._init_intervention_and_recording(config)
+        if self.record_inference_enabled:
+            self._init_recording_controls(config)
         
         # 启动推理线程
         self.inference_thread = threading.Thread(target=self._inference_loop, daemon=True)
@@ -236,64 +235,51 @@ class InferenceNode:
         self.primary_camera = self.camera_config.primary_name
         self.primary_camera_idx = self.camera_config.primary_index
 
-    def _init_intervention_and_recording(self, config):
-        """初始化干预和数据采集模块"""
-        if self.intervention_enabled or self.record_inference_enabled:
-            self.intervention_handler = KeyboardInterventionHandler(
-                xyz_scale=config.get('intervention_xyz_scale', 0.005),
-                gripper_open=config.get('intervention_gripper_open', 1.0),
-                gripper_close=config.get('intervention_gripper_close', 0.0),
-                mode=config.get('intervention_mode', 'replace'),
-            )
+    def _init_recording_controls(self, config):
+        """初始化 inference rollout 采集与 episode 键盘控制。"""
+        self.episode_keyboard = EpisodeKeyboardHandler()
 
-            # 设置录制控制回调
-            def on_record_action(action):
-                self._handle_record_action(action)
+        def on_record_action(action):
+            self._handle_record_action(action)
 
-            def on_quit():
-                rospy.loginfo("Quit requested via keyboard")
-                self.running = False
+        def on_quit():
+            rospy.loginfo("Quit requested via keyboard")
+            self.running = False
 
-            self.intervention_handler.set_record_callback(on_record_action)
-            self.intervention_handler.set_quit_callback(on_quit)
-            self.intervention_handler.start()
-            if self.intervention_enabled:
-                rospy.loginfo("Keyboard intervention enabled")
-            else:
-                rospy.loginfo("Keyboard recording controls enabled")
+        self.episode_keyboard.set_record_callback(on_record_action)
+        self.episode_keyboard.set_quit_callback(on_quit)
+        self.episode_keyboard.start()
+        rospy.loginfo("Episode keyboard controls enabled for inference recording")
 
         # 数据采集记录器
-        if self.record_inference_enabled:
-            record_dir = config.get('record_dir', '')
-            if not record_dir:
-                record_dir = config.get('log_dir', '')
-            if not record_dir:
-                from utils.paths import get_inference_logs_dir
-                record_dir = get_inference_logs_dir()
+        record_dir = config.get('record_dir', '')
+        if not record_dir:
+            record_dir = config.get('log_dir', '')
+        if not record_dir:
+            from utils.paths import get_inference_logs_dir
+            record_dir = get_inference_logs_dir()
 
-            # 获取 action_dim
-            action_dim = getattr(self.policy, 'action_dim_full', 15)
+        action_dim = getattr(self.policy, 'action_dim_full', 15)
 
-            self.inference_recorder = InferenceRecorder(
-                output_dir=record_dir,
-                pred_horizon=self._pred_horizon,
-                action_dim=action_dim,
-                camera_topics=self.camera_topics,
-                camera_names=self.camera_names,
-                primary_camera=self.primary_camera,
-            )
-            rospy.loginfo(f"Inference recording enabled, output_dir: {record_dir}")
+        self.inference_recorder = InferenceRecorder(
+            output_dir=record_dir,
+            pred_horizon=self._pred_horizon,
+            action_dim=action_dim,
+            camera_topics=self.camera_topics,
+            camera_names=self.camera_names,
+            primary_camera=self.primary_camera,
+        )
+        rospy.loginfo(f"Inference recording enabled, output_dir: {record_dir}")
 
-            # 启动时等待按 R 开始第一个 episode
-            rospy.loginfo("=" * 60)
-            rospy.loginfo("Multi-episode recording mode enabled")
-            rospy.loginfo("Press 'R' to start recording an episode")
-            rospy.loginfo("Press 'R' again to stop and choose to save (Y) or discard (N)")
-            rospy.loginfo("If saved, press 'S' for success or 'F' for failure")
-            rospy.loginfo("After save/discard, arm will return to init position")
-            rospy.loginfo("Press 'R' to start next episode")
-            rospy.loginfo("Press Ctrl+C to quit")
-            rospy.loginfo("=" * 60)
+        rospy.loginfo("=" * 60)
+        rospy.loginfo("Multi-episode recording mode enabled")
+        rospy.loginfo("Press 'R' to start recording an episode")
+        rospy.loginfo("Press 'R' again to stop and choose to save (Y) or discard (N)")
+        rospy.loginfo("If saved, press 'S' for success or 'F' for failure")
+        rospy.loginfo("After save/discard, arm will return to init position")
+        rospy.loginfo("Press 'R' to start next episode")
+        rospy.loginfo("Press Ctrl+C to quit")
+        rospy.loginfo("=" * 60)
     
     def _handle_record_action(self, action: str):
         """
@@ -785,23 +771,8 @@ class InferenceNode:
                     # 保存模型输出（相对位姿）用于后续日志记录
                     raw_action_for_log = all_actions[0].copy()
 
-                    # 保存安全检查后、干预前的相对动作调试快照
+                    # 保存安全检查后的相对动作调试快照
                     debug_action_model_relative = all_actions.copy()
-
-                    # 应用键盘干预（如果启用）
-                    intervention_mask = None
-                    if self.intervention_enabled and self.intervention_handler is not None:
-                        intervention = self.intervention_handler.get_intervention()
-                        if intervention is not None:
-                            # 确定 action 格式
-                            action_format = 'ee_delta'
-                            all_actions, intervention_mask = InterventionApplier.apply_to_action_chunk(
-                                all_actions, intervention, action_format=action_format
-                            )
-                            rospy.loginfo_throttle(2.0, f"Intervention applied: mask={intervention_mask[0].sum()} dims")
-
-                    # 保存干预后的相对动作调试快照
-                    debug_action_intervened_relative = all_actions.copy()
 
                     # 转换动作空间
                     # full mode (15D): [joint(6), gripper(1), relative_end_pose(7), gripper(1)]
@@ -824,14 +795,11 @@ class InferenceNode:
                     # 生成 absolute target pose 语义的 recorder 快照
                     if safety_reason_counts:
                         safety_clipped = True
-                    action_intervened = all_actions.copy()
-                    if intervention_mask is not None:
-                        action_model = np.array([
-                            apply_relative_transform(step[rel_pose_start:rel_pose_end], qpos_end[:7], step[gripper_idx])
-                            for step in debug_action_model_relative
-                        ])
-                    else:
-                        action_model = action_intervened.copy()
+                    action_executed = all_actions.copy()
+                    action_model = np.array([
+                        apply_relative_transform(step[rel_pose_start:rel_pose_end], qpos_end[:7], step[gripper_idx])
+                        for step in debug_action_model_relative
+                    ])
 
                     # 记录数据（如果启用采集）
                     if self.record_inference_enabled and self.inference_recorder is not None:
@@ -842,13 +810,12 @@ class InferenceNode:
                             self.inference_recorder.record_step(
                                 obs=self.latest_obs,
                                 action_model=action_model,
-                                action_intervened=action_intervened,
-                                intervention_mask=intervention_mask,
+                                action_executed=action_executed,
                                 timestamp=obs_stamp_ros,
                             )
 
                     # 记录第一个动作用于下一次参考
-                    self.last_action = action_intervened[0].copy()
+                    self.last_action = action_executed[0].copy()
                     
                     # 创建轨迹并添加到管理器
                     obs_stamp_ros = self.latest_obs.get("stamp", None)
@@ -1026,9 +993,8 @@ class InferenceNode:
         if self.inference_thread.is_alive():
             self.inference_thread.join(timeout=2.0)
         
-        # 停止键盘干预
-        if self.intervention_handler is not None:
-            self.intervention_handler.stop()
+        if self.episode_keyboard is not None:
+            self.episode_keyboard.stop()
         
         # 处理未保存的录制数据
         if self.inference_recorder is not None:
@@ -1159,20 +1125,9 @@ def parse_args():
     parser.add_argument('--vis', action='store_true', default=True,
                         help='Visualize images in OpenCV window')
     
-    # 干预和数据采集参数
+    # inference rollout 采集参数
     parser.add_argument('--record_inference', action='store_true',
                         help='Enable inference data recording')
-    parser.add_argument('--intervention', action='store_true',
-                        help='Enable keyboard intervention during inference')
-    parser.add_argument('--intervention_mode', type=str, default='replace',
-                        choices=['replace', 'additive'],
-                        help='Intervention mode: replace (override) or additive (delta)')
-    parser.add_argument('--intervention_xyz_scale', type=float, default=0.01,
-                        help='XYZ movement scale per keypress in meters (default: 10mm)')
-    parser.add_argument('--intervention_gripper_open', type=float, default=1.0,
-                        help='Gripper open value for intervention')
-    parser.add_argument('--intervention_gripper_close', type=float, default=0.0,
-                        help='Gripper close value for intervention')
     parser.add_argument('--record_dir', type=str, default='',
                         help='Directory to save recorded inference data (default: log_dir)')
     parser.add_argument('--max_steps', type=int, default=900,
@@ -1207,9 +1162,8 @@ def main():
         'truncate_at_act_horizon', 'act_horizon',
         # Teleop 对齐模式参数
         'teleop_scale', 'inference_speed_scale', 'control_freq', 'gripper_hysteresis_window',
-        # 干预和采集参数
-        'record_inference', 'intervention', 'intervention_mode',
-        'intervention_xyz_scale', 'intervention_gripper_open', 'intervention_gripper_close',
+        # inference rollout 采集参数
+        'record_inference',
         'record_dir', 'max_steps',
     ]:
         if rospy.has_param(f'~{key}'):
@@ -1289,10 +1243,8 @@ def main():
     rospy.loginfo("-" * 60)
     rospy.loginfo(f"  log_dir: {config['log_dir'] or '~/rl-vla/inference_logs'}")
     rospy.loginfo("-" * 60)
-    rospy.loginfo("Intervention & Recording:")
+    rospy.loginfo("Inference Rollout Recording:")
     rospy.loginfo(f"  record_inference: {config.get('record_inference', False)}")
-    rospy.loginfo(f"  intervention: {config.get('intervention', False)}")
-    rospy.loginfo(f"  intervention_mode: {config.get('intervention_mode', 'replace')}")
     rospy.loginfo(f"  max_steps: {config.get('max_steps', 900)} (auto-stop episode when reached)")
     rospy.loginfo("-" * 60)
     rospy.loginfo("Safety Configuration:")
