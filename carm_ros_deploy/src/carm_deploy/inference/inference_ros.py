@@ -645,7 +645,7 @@ class InferenceNode:
                         state = qpos_joint.astype(np.float32)
                     qpos = torch.from_numpy(state).float().cuda().unsqueeze(0)  # [1, state_dim]
                     
-                    # 保存 qpos_end 用于后续安全检查（转回 list 以兼容后续代码）
+                    # 保存 qpos_end 用于后续安全检查与绝对位姿重建
                     qpos_end = qpos_end.tolist()
                     
                     # 图像预处理: resize + HWC->CHW
@@ -801,13 +801,15 @@ class InferenceNode:
                         for step in debug_action_model_relative
                     ])
 
+                    recorded_step = not self.record_inference_enabled
+
                     # 记录数据（如果启用采集）
                     if self.record_inference_enabled and self.inference_recorder is not None:
                         if self.inference_recorder.is_recording:
                             obs_stamp_ros = self.latest_obs.get('stamp', None)
                             if obs_stamp_ros is None:
                                 obs_stamp_ros = time.time()
-                            self.inference_recorder.record_step(
+                            recorded_step = self.inference_recorder.record_step(
                                 obs=self.latest_obs,
                                 action_model=action_model,
                                 action_executed=action_executed,
@@ -877,27 +879,28 @@ class InferenceNode:
                             chunk_targets=chunk_targets,
                         )
                     
-                    # 记录步骤日志（在动作转换后，包含 raw_action 和 executed_action）
-                    self.logger.log_step(
-                        timestamp=time.time(),
-                        obs=self.latest_obs,  # 包含 images, qpos_joint, qpos_end
-                        raw_action=raw_action_for_log,  # 模型输出的相对位姿
-                        executed_action=all_actions[0],  # 转换后的绝对位姿/关节角度
-                        inference_time=inference_time,
-                        safety_clipped=safety_clipped,
-                        safety_warnings=safety_events if safety_events else None,
-                        safety_reason_counts=safety_reason_counts if safety_reason_counts else None,
-                    )
-                    
-                    self.step_count += 1
-                    rospy.loginfo_throttle(5.0, 
-                        f"Step {self.step_count}, Inference: {inference_time:.4f}s, "
-                        f"Actions: {all_actions.shape}")
-                    
-                    # 检查是否达到最大步数
-                    if self.step_count >= self.max_steps:
-                        rospy.logwarn(f"Reached max_steps ({self.max_steps}), auto-stopping episode...")
-                        self._stop_current_episode()
+                    if recorded_step:
+                        # 记录步骤日志（在动作转换后，包含 raw_action 和 executed_action）
+                        self.logger.log_step(
+                            timestamp=time.time(),
+                            obs=self.latest_obs,  # 包含 images, qpos_joint, qpos_end
+                            raw_action=raw_action_for_log,  # 模型输出的相对位姿
+                            executed_action=all_actions[0],  # 转换后的绝对位姿/关节角度
+                            inference_time=inference_time,
+                            safety_clipped=safety_clipped,
+                            safety_warnings=safety_events if safety_events else None,
+                            safety_reason_counts=safety_reason_counts if safety_reason_counts else None,
+                        )
+                        
+                        self.step_count += 1
+                        rospy.loginfo_throttle(5.0, 
+                            f"Step {self.step_count}, Inference: {inference_time:.4f}s, "
+                            f"Actions: {all_actions.shape}")
+                        
+                        # 检查是否达到最大步数
+                        if self.step_count >= self.max_steps:
+                            rospy.logwarn(f"Reached max_steps ({self.max_steps}), auto-stopping episode...")
+                            self._stop_current_episode()
                     
                 except Exception as e:
                     import traceback
@@ -1044,7 +1047,7 @@ def parse_args():
                         help='Camera name(s), comma separated (must align with camera_topics order)')
     parser.add_argument('--primary_camera', type=str,
                         default='',
-                        help='Primary camera name used for legacy observations/images (default: first camera)')
+                        help='Primary camera name used for observations/images canonical view (default: first camera)')
     parser.add_argument('--sync_slop', type=float, default=0.02,
                         help='Image sync tolerance in seconds')
     
@@ -1133,7 +1136,7 @@ def parse_args():
     parser.add_argument('--max_steps', type=int, default=900,
                         help='Maximum steps per episode (default: 900). Episode auto-stops when exceeded.')
     
-    # 兼容 roslaunch remap 参数
+    # 支持 roslaunch <param> 注入
     return parser.parse_args(args=rospy.myargv()[1:])
 
 

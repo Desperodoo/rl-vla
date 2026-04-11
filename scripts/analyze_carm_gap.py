@@ -136,15 +136,9 @@ def _load_action_sources(path: str, kind: str) -> dict[str, Any]:
         if kind == 'inference':
             if 'action_model' in f:
                 sources['model'] = f['action_model'][:, 0, :]
-            if 'action_intervened' in f:
-                sources['intervened'] = f['action_intervened'][:, 0, :]
-            if 'intervention_mask' in f:
-                step_has_intervention = f['intervention_mask'][:, 0, :].any(axis=1)
-                subsets['all'] = np.ones(len(qpos_end), dtype=bool)
-                subsets['intervention_free'] = ~step_has_intervention
-                subsets['intervened_steps'] = step_has_intervention
-            else:
-                subsets['all'] = np.ones(len(qpos_end), dtype=bool)
+            if 'action_executed' in f:
+                sources['executed'] = f['action_executed'][:, 0, :]
+            subsets['all'] = np.ones(len(qpos_end), dtype=bool)
         else:
             subsets['all'] = np.ones(len(qpos_end), dtype=bool)
             if 'teleop_scale' in f:
@@ -618,7 +612,7 @@ def _gap_analysis(
     source_aliases = {
         'compat_action': 'compat_action',
         'model': 'model',
-        'intervened': 'intervened',
+        'executed': 'executed',
     }
 
     results: dict[str, Any] = {
@@ -690,12 +684,6 @@ def _source_summary_lines(label: str, source: dict[str, Any]) -> list[str]:
         best_k = all_subset['scan_by_k'].get('best_k_by_mean')
         if best_k is not None and best_k['k'] > 0:
             lines.append(f'{label} best aligned at k={best_k["k"]} with mean≈{best_k["mean"]:.4f}')
-    if 'intervention_free' in source.get('subsets', {}):
-        free_subset = source['subsets']['intervention_free']
-        if free_subset.get('same_step'):
-            free_pos = free_subset['same_step']['absolute']['pos_gap']
-            if free_pos is not None:
-                lines.append(f'{label} intervention-free same-step mean≈{free_pos["mean"]:.4f}')
     return lines
 
 
@@ -772,7 +760,7 @@ def _motion_summary(report: dict[str, Any]) -> dict[str, Any]:
 
     inference_sources = report.get('inference_gap_analysis', {}).get('sources', {})
     conclusions.extend(_semantic_notes(report.get('inference_gap_analysis', {})))
-    for source_name in ['model', 'intervened', 'compat_action']:
+    for source_name in ['model', 'executed', 'compat_action']:
         source = inference_sources.get(source_name)
         if source is not None:
             conclusions.extend(_source_summary_lines(f'Inference[{source_name}]', source))

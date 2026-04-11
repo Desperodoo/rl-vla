@@ -1,292 +1,278 @@
-# CARM Inference Log Format Specification
+# CARM Inference Logging Format
 
-本文档描述推理日志系统的数据格式，包含三类文件：
-- `run_info.json`: 运行配置和元数据（人类可读的快速查看）
-- `*.hdf5`: 详细的数值数据记录
-- `timeline_*.jsonl`: 时间线事件记录（用于时序分析）
+本文档描述当前 `inference_ros.py` 推理日志与回流采集格式。
 
-## 1. run_info.json
+当前实现已经收敛到两条主线：
 
-每次推理运行开始时生成，包含完整的运行配置，便于快速了解本次推理的设置。
+- `run_info_*.json`
+  记录本次运行的配置、摘要和产物映射
+- `inference_episode_*.hdf5`
+  由 `InferenceRecorder` 记录 canonical 推理回流数据
+- `timeline_*.jsonl`
+  记录推理、chunk、control 的时序事件
+
+旧阶段的 intervention / action_intervened / intervention_mask 语义已经移除，不再是当前格式的一部分。
+
+## 1. run_info_*.json
+
+`InferenceLogger` 在一次运行结束后写出 `run_info_*.json`。
 
 ### 结构
 
 ```json
 {
-  "version": "2.0",
-  "created_at": "2026-01-25T14:30:00.123456",
+  "version": "2.1",
+  "created_at": "2026-04-11T20:50:16.123456",
   "model": {
-    "path": "/path/to/model.pt",
+    "path": "/path/to/checkpoint.pt",
     "algorithm": "consistency_flow",
-    "action_mode": "full",
+    "action_mode": "ee_only",
     "state_mode": "joint_only",
     "obs_horizon": 2,
     "pred_horizon": 16,
-    "action_dim": 13,
-    "action_dim_full": 15,
-    "visual_encoder_type": "resnet18",
+    "action_dim": 8,
+    "action_dim_full": 8,
     "use_ema": false,
     "num_inference_steps": 10
   },
   "normalizer": {
     "enabled": true,
-    "mode": "standard",
-    "action_stats": {
-      "mean": [0.0, 1.5, -0.8, ...],
-      "std": [0.1, 0.2, 0.15, ...]
-    }
+    "mode": "standard"
   },
   "control": {
     "control_freq": 50,
-    "teleop_scale": 0.4,
-    "joint_cmd_mode": false,
+    "teleop_scale": 1.0,
     "gripper_hysteresis_window": 1
   },
   "execution": {
-    "mode": "temporal_ensemble",
-    "act_horizon": 10,
+    "mode": "receding_horizon",
+    "act_horizon": 8,
     "max_active_chunks": null,
     "crossfade_steps": 0,
     "truncate_at_act_horizon": true,
     "temporal_factor_k": 0.05,
     "pos_lookahead_step": 1,
-    "chunk_time_base": "sys_time"
+    "chunk_time_base": "sys_time",
+    "desire_inference_freq": 30
   },
   "safety": {
-    "config_path": "/path/to/carm_deploy/safety_config.json",
+    "config_path": "/path/to/safety_config.json",
     "check_workspace": true,
     "max_relative_translation": 0.1
   },
   "files": {
-    "hdf5": "inference_20260125_143000.hdf5",
-    "timeline": "timeline_20260125_143000.jsonl"
-  }
+    "episode_hdf5": [
+      "inference_episode_0001_20260411_205134.hdf5"
+    ],
+    "timeline": "timeline_20260411_205014.jsonl",
+    "run_info": "run_info_20260411_205016.json"
+  },
+  "summary": {
+    "num_steps": 900,
+    "avg_inference_time": 0.021,
+    "max_inference_time": 0.041,
+    "safety_clips": 0,
+    "safety_clip_rate": 0.0,
+    "safety_reason_counts": {},
+    "episode_success": true,
+    "episode_outcome_label": "success"
+  },
+  "total_steps": 900,
+  "ended_at": "2026-04-11T21:05:14.456789"
 }
 ```
 
-### 字段说明
+### 关键字段
 
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `version` | string | 日志格式版本 |
-| `model.path` | string | 模型 checkpoint 路径 |
-| `model.algorithm` | string | 算法类型: consistency_flow, flow_matching, diffusion_policy |
-| `model.action_mode` | string | 动作模式: full (15D), ee_only (8D) |
-| `model.state_mode` | string | 状态模式: joint_only, ee_only, both |
-| `normalizer.enabled` | bool | 是否启用动作归一化 |
-| `normalizer.action_stats` | object | 归一化统计量 (mean, std) |
-| `control.teleop_scale` | float | 遥操作缩放因子 (0-1)，影响动作幅度 |
-| `execution.mode` | string | 执行模式: temporal_ensemble, basic_chunking |
+| 字段 | 说明 |
+|------|------|
+| `files.episode_hdf5` | 本次运行保存的 canonical 推理回流 HDF5 |
+| `summary.num_steps` | 实际写入 recorder 的步数 |
+| `summary.safety_clips` | 被 safety layer 裁剪的步数 |
+| `summary.safety_clip_rate` | safety clip 比例 |
+| `summary.episode_success` | episode 结果标签 |
 
----
+## 2. inference_episode_*.hdf5
 
-## 2. HDF5 数据文件 (*.hdf5)
-
-存储详细的数值数据，支持高效随机访问。
+`InferenceRecorder` 在 `--record_inference` 模式下记录 canonical 推理回流 HDF5。
 
 ### 结构
 
-```
-inference_YYYYMMDD_HHMMSS.hdf5
-├── observations/                    # 观测数据
-│   ├── step_000000/
-│   │   ├── qpos_joint    [7]       # 关节角度 [6 joints + 1 gripper]
-│   │   └── qpos_end      [8]       # 末端位姿 [xyz, qxyzw, gripper]
-│   ├── step_000001/
-│   │   └── ...
-│   └── ...
-│
-├── predictions/                     # 预测数据
-│   ├── step_000000/
-│   │   ├── raw_action       [action_dim_full]  # 模型原始输出（反归一化后）
-│   │   └── executed_action  [8]                # 实际发送给机械臂的动作
-│   ├── step_000001/
-│   │   └── ...
-│   └── ...
-│
-├── timing/                          # 时间数据
-│   ├── step_000000/
-│   │   ├── timestamp        float  # Unix 时间戳
-│   │   └── inference_time   float  # 推理耗时 (秒)
-│   └── ...
-│
-├── safety/                          # 安全数据
-│   ├── step_000000/
-│   │   ├── clipped     bool        # 是否被安全裁剪
-│   │   └── warnings    string      # 安全警告 (JSON 数组)
-│   └── ...
-│
-└── attrs (HDF5 attributes)          # 元数据
-    ├── start_time     string       # 开始时间 (ISO 格式)
-    ├── end_time       string       # 结束时间 (ISO 格式)
-    ├── num_steps      int          # 总步数
-    ├── model_path     string       # 模型路径
-    └── config         string       # 运行配置 (JSON)
+```text
+inference_episode_0001_YYYYMMDD_HHMMSS.hdf5
+├── observations/
+│   ├── images                   [T, H, W, C]
+│   ├── images_by_camera/
+│   │   └── <camera_name>        [T, H, W, C]
+│   ├── qpos_joint               [T, 7]
+│   ├── qpos_end                 [T, 8]
+│   ├── qpos                     [T, 15]
+│   ├── gripper                  [T]
+│   └── timestamps               [T]
+├── action_model                 [T, pred_horizon, action_dim]
+├── action_executed              [T, pred_horizon, action_dim]
+├── action                       [T, action_dim]
+└── attrs
+    ├── num_steps
+    ├── pred_horizon
+    ├── action_dim
+    ├── data_source = inference_rollout
+    ├── timestamp_semantics = obs_stamp_ros
+    ├── action_semantics_version = absolute_ee_target_pose_v2
+    ├── action_space = ee_target_pose_absolute
+    ├── compat_action_source = action_executed[:,0,:]
+    ├── camera_topics
+    ├── camera_names
+    ├── primary_camera
+    ├── success
+    └── outcome_label
 ```
 
-### 动作维度说明
+### 动作语义
 
-| action_mode | raw_action | executed_action | 说明 |
-|-------------|------------|-----------------|------|
-| full (15D)  | [15] | [8] | raw: [joint(6), grip(1), rel_pose(7), grip(1)]<br>exec: [abs_pose(7), grip(1)] |
-| ee_only (8D)| [8]  | [8] | raw: [rel_pose(7), grip(1)]<br>exec: [abs_pose(7), grip(1)] |
+| dataset | shape | 语义 |
+|---------|-------|------|
+| `action_model` | `[T, pred_horizon, 8]` | 模型输出经过安全检查后的 absolute target chunk |
+| `action_executed` | `[T, pred_horizon, 8]` | 实际送入执行链的 absolute target chunk |
+| `action` | `[T, 8]` | `action_executed[:, 0, :]` 的单步兼容视图 |
 
-**注意**：
-- `raw_action` 是模型输出经过反归一化后的动作（相对位姿）
-- `executed_action` 是经过 `apply_relative_transform` 转换后的绝对位姿
-- 两者的区别对于调试"动作幅度"问题非常重要
+说明：
 
----
+- 当前 rollout 语义以 `action_executed` 为准。
+- `action_model` 用于分析“模型原本想发什么”与“执行链实际发了什么”之间的差异。
+- 当前格式不再写入 `action_intervened`、`intervention_mask`、`has_intervention`、`intervention_ratio`。
 
-## 3. Timeline 文件 (timeline_*.jsonl)
+## 3. timeline_*.jsonl
 
-JSONL 格式的时间线记录，每行一个 JSON 对象。专注于时间语义分析。
+时间线日志由 `TimelineLogger` 写出，每行一个 JSON 事件。
 
-### 事件类型
+### `init`
 
-#### 3.1 init 事件
-
-推理开始时记录一次，包含执行参数。
+记录运行初始化参数。
 
 ```json
 {
   "event": "init",
-  "t_sys": 1737793639.123,
-  "execution_mode": "temporal_ensemble",
-  "act_horizon": 10,
-  "pred_horizon": 16,
-  "obs_horizon": 2,
-  "control_freq": 50,
-  "teleop_scale": 0.4,
+  "desire_inference_freq": 30,
   "temporal_factor_k": 0.05,
-  "chunk_time_base": "sys_time"
+  "chunk_time_base": "sys_time",
+  "act_horizon": 8,
+  "pred_horizon": 16,
+  "execution_mode": "receding_horizon",
+  "teleop_scale": 1.0,
+  "control_freq": 50
 }
 ```
 
-#### 3.2 inference 事件
+### `obs`
 
-每次模型推理时记录。
+记录观测可用时刻与 `obs_stamp_ros` 的差值。
+
+```json
+{
+  "event": "obs",
+  "obs_stamp_ros": 1712843414.10,
+  "t_obs_ready_sys": 1712843414.12,
+  "delta_obs": 0.02
+}
+```
+
+### `inference`
+
+记录单次模型推理耗时。
 
 ```json
 {
   "event": "inference",
-  "t_sys": 1737793639.500,
-  "step": 100,
-  "inference_time": 0.030,
-  "action_norm": 0.0152
+  "t_infer_start": 1712843414.12,
+  "t_infer_end": 1712843414.15,
+  "inference_time": 0.03
 }
 ```
 
-| 字段 | 说明 |
-|------|------|
-| `step` | 推理步数 |
-| `inference_time` | 推理耗时 (秒) |
-| `action_norm` | 第一个动作的位移幅度 (米) |
+### `chunk`
 
-#### 3.3 chunk 事件
-
-新 chunk 创建时记录。
+记录 action chunk 入队信息。
 
 ```json
 {
   "event": "chunk",
-  "t_sys": 1737793639.520,
-  "chunk_id": 5,
-  "chunk_base_time": 1737793639.456,
-  "num_actions": 10,
-  "action_interval": 0.02
+  "chunk_id": 42,
+  "chunk_base_time": 1712843414.15,
+  "obs_stamp_ros": 1712843414.10,
+  "action_interval": 0.02,
+  "pred_horizon": 16,
+  "act_horizon": 8,
+  "num_actions_added": 8,
+  "truncated": true,
+  "delta_chunk_obs": 0.05
 }
 ```
 
-#### 3.4 control 事件
+### `control`
 
-控制命令发送时记录（每 100 步记录一次，或异常时记录）。
+记录控制线程取样与下发时刻。
 
 ```json
 {
   "event": "control",
-  "t_sys": 1737793639.600,
-  "step": 100,
-  "num_candidates": 3,
-  "used_chunk_ids": [4, 5]
+  "query_time": 1712843414.18,
+  "t_send_sys": 1712843414.18,
+  "candidate_timestamps": [1712843414.15],
+  "weights": [1.0],
+  "num_candidates": 1,
+  "used_chunk_ids": [42]
 }
 ```
 
-#### 3.5 episode_end 事件
+## 4. inference_staging HDF5
 
-Episode 结束时记录。
+`scripts/convert_inference_to_training_staging.py` 会把 canonical rollout 转成训练 staging HDF5。
 
-```json
-{
-  "event": "episode_end",
-  "t_sys": 1737793700.000,
-  "total_steps": 1500,
-  "duration": 60.877
-}
+### 结构
+
+```text
+episode_0001_YYYYMMDD_HHMMSS.hdf5
+├── observations/...
+├── action                       [T, 8]
+└── attrs
+    ├── dataset_type = inference_staging
+    ├── staging_schema_version = inference_staging_v2
+    ├── source_file
+    ├── source_num_steps
+    ├── kept_steps
+    ├── dropped_steps
+    ├── action_source_used = action_executed[:,0,:]
+    ├── source_run_info
+    ├── source_timeline
+    ├── admission_label
+    ├── admission_pass
+    ├── admission_reason
+    ├── admission_bucket
+    ├── admission_policy
+    ├── policy_version
+    ├── min_steps
+    ├── gold_max_safety_clip_rate
+    ├── silver_max_safety_clip_rate
+    ├── safety_clips
+    ├── safety_clip_rate
+    └── ...
 ```
 
----
+### Admission 语义
 
-## 4. 文件命名约定
+- 当前 staging admission 不再使用 intervention ratio。
+- 当前 bucket 主要由以下因素决定：
+  - 是否缺失关键字段
+  - 是否太短
+  - 是否存在 NaN
+  - `run_info.summary.safety_clip_rate`
 
-```
-inference_logs/
-├── run_info_20260125_143000.json       # 运行配置
-├── inference_20260125_143000.hdf5      # 数据文件
-└── timeline_20260125_143000.jsonl      # 时间线
-```
+## 5. 诊断建议
 
-所有文件使用相同的时间戳后缀，便于关联。
-
----
-
-## 5. 分析示例
-
-### 5.1 快速查看运行配置
-
-```bash
-cat run_info_*.json | jq '.control.teleop_scale, .normalizer.enabled'
-```
-
-### 5.2 提取动作数据
-
-```python
-import h5py
-import numpy as np
-
-with h5py.File('inference_*.hdf5', 'r') as f:
-    # 获取所有 raw_action
-    raw_actions = []
-    for step_key in sorted(f['predictions'].keys()):
-        if 'raw_action' in f['predictions'][step_key]:
-            raw_actions.append(f['predictions'][step_key]['raw_action'][:])
-    raw_actions = np.array(raw_actions)
-    
-    # 分析相对位姿幅度 (full mode: 维度 7-13)
-    rel_pos = raw_actions[:, 7:10]
-    print(f"位移幅度: {np.linalg.norm(rel_pos, axis=1).mean():.6f} m")
-```
-
-### 5.3 分析时间线
-
-```python
-import json
-
-with open('timeline_*.jsonl', 'r') as f:
-    events = [json.loads(line) for line in f]
-
-# 计算推理频率
-infer_events = [e for e in events if e['event'] == 'inference']
-times = [e['t_sys'] for e in infer_events]
-freq = 1.0 / np.diff(times).mean()
-print(f"实际推理频率: {freq:.1f} Hz")
-```
-
----
-
-## 6. 版本历史
-
-| 版本 | 日期 | 变更 |
-|------|------|------|
-| 2.0 | 2026-01-25 | 添加 run_info.json，精简 timeline，添加 executed_action |
-| 1.0 | 2026-01-20 | 初始版本 |
+- 回看真实执行语义时，优先看 `action_executed`。
+- 分析模型与执行差异时，对比 `action_model` vs `action_executed`。
+- 检查计数一致性时，三处应基本一致：
+  - `HDF5 attrs.num_steps`
+  - `run_info.total_steps`
+  - timeline 中 `obs` / `inference` / `chunk` 事件数

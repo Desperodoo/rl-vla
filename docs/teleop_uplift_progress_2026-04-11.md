@@ -328,12 +328,8 @@ candidate-only 首轮样本中，`upper_candidate_rot_error` 曾出现 `NaN`。
 1. `inference_ros` 主循环不再在 policy 输出与执行之间插入 `InterventionApplier`
 2. episode 控制从 `KeyboardInterventionHandler` 解耦，改为专用的 `EpisodeKeyboardHandler`
 3. `InferenceRecorder` 主语义开始从：
-   - `action_model + action_intervened + intervention_mask`
-   收敛为：
    - `action_model + action_executed`
-4. 为避免立刻打断旧分析链路，短期仍保留兼容字段：
-   - `action_intervened`
-   - `intervention_mask`
+4. `KeyboardInterventionHandler` / `InterventionApplier` 已从当前 inference 主 pipeline 视角降级为历史实现，不再视为现役入口
 
 当前阶段目标不是立刻完成 HITL，而是：
 

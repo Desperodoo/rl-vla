@@ -23,7 +23,7 @@ def infer_schema(f: h5py.File) -> str:
     dataset_type = f.attrs.get('dataset_type', '')
     if dataset_type == 'inference_staging':
         return 'inference_staging'
-    if 'source_file' in f.attrs or 'filtered_intervention' in f.attrs:
+    if 'source_file' in f.attrs or 'staging_schema_version' in f.attrs:
         return 'inference_staging'
     return 'teleop_v2'
 
@@ -127,18 +127,18 @@ def verify_episode(filepath: str, schema: str = 'auto', verbose: bool = True):
                     for attr_key in [
                         'staging_schema_version',
                         'source_file',
-                        'filtered_intervention',
+                        'source_num_steps',
                         'kept_steps',
                         'dropped_steps',
-                        'intervention_ratio_raw',
-                        'intervention_ratio_kept',
+                        'action_source_used',
                         'admission_label',
                         'admission_pass',
                         'admission_reason',
                         'policy_level',
                         'admission_policy',
                         'min_steps',
-                        'max_intervention_ratio',
+                        'gold_max_safety_clip_rate',
+                        'silver_max_safety_clip_rate',
                         'timestamp_semantics',
                     ]:
                         if attr_key not in f.attrs:

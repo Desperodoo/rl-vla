@@ -19,51 +19,42 @@ from inference.inference_recorder import InferenceDatasetConverter
 
 
 def _validate_thresholds(
-    gold_max_intervention_ratio: float,
-    silver_max_intervention_ratio: float,
+    gold_max_safety_clip_rate: float,
+    silver_max_safety_clip_rate: float,
 ) -> None:
-    if not 0.0 <= gold_max_intervention_ratio <= 1.0:
-        raise ValueError('gold_max_intervention_ratio must be within [0, 1]')
-    if not 0.0 <= silver_max_intervention_ratio <= 1.0:
-        raise ValueError('silver_max_intervention_ratio must be within [0, 1]')
-    if gold_max_intervention_ratio > silver_max_intervention_ratio:
-        raise ValueError('gold_max_intervention_ratio must be <= silver_max_intervention_ratio')
+    if not 0.0 <= gold_max_safety_clip_rate <= 1.0:
+        raise ValueError('gold_max_safety_clip_rate must be within [0, 1]')
+    if not 0.0 <= silver_max_safety_clip_rate <= 1.0:
+        raise ValueError('silver_max_safety_clip_rate must be within [0, 1]')
+    if gold_max_safety_clip_rate > silver_max_safety_clip_rate:
+        raise ValueError('gold_max_safety_clip_rate must be <= silver_max_safety_clip_rate')
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description='Convert inference_episode files into training staging episodes')
     parser.add_argument('--input_dir', type=str, default='inference_logs', help='Directory containing inference_episode_*.hdf5')
     parser.add_argument('--output_dir', type=str, required=True, help='Directory to write converted episode_*.hdf5 files')
-    parser.add_argument('--use_model_action', action='store_true', help='Use action_model[:,0,:] instead of action_intervened[:,0,:]')
-    parser.add_argument('--filter_intervention', action='store_true', help='Drop steps where intervention_mask indicates intervention')
     parser.add_argument('--admission_policy', choices=['none', 'episode'], default='none', help='Apply no admission filter or episode-level admission')
     parser.add_argument('--policy_version', type=str, default=InferenceDatasetConverter.ADMISSION_POLICY_VERSION, help='Admission policy version string written into metadata')
     parser.add_argument('--min_steps', type=int, default=InferenceDatasetConverter.DEFAULT_MIN_STEPS, help='Minimum kept steps for episode admission')
-    parser.add_argument('--max_intervention_ratio', type=float, default=None, help='Legacy alias for silver_max_intervention_ratio')
-    parser.add_argument('--gold_max_intervention_ratio', type=float, default=InferenceDatasetConverter.DEFAULT_GOLD_MAX_INTERVENTION_RATIO, help='Maximum raw intervention ratio for gold bucket')
-    parser.add_argument('--silver_max_intervention_ratio', type=float, default=InferenceDatasetConverter.DEFAULT_SILVER_MAX_INTERVENTION_RATIO, help='Maximum raw intervention ratio for silver bucket')
+    parser.add_argument('--gold_max_safety_clip_rate', type=float, default=InferenceDatasetConverter.DEFAULT_GOLD_MAX_SAFETY_CLIP_RATE, help='Maximum safety clip rate for gold bucket')
+    parser.add_argument('--silver_max_safety_clip_rate', type=float, default=InferenceDatasetConverter.DEFAULT_SILVER_MAX_SAFETY_CLIP_RATE, help='Maximum safety clip rate for silver bucket')
     parser.add_argument('--drop_failed_episode', action='store_true', help='Do not write staging HDF5 for episodes that fail admission')
     args = parser.parse_args()
 
-    if args.max_intervention_ratio is not None:
-        args.silver_max_intervention_ratio = args.max_intervention_ratio
-
     _validate_thresholds(
-        gold_max_intervention_ratio=args.gold_max_intervention_ratio,
-        silver_max_intervention_ratio=args.silver_max_intervention_ratio,
+        gold_max_safety_clip_rate=args.gold_max_safety_clip_rate,
+        silver_max_safety_clip_rate=args.silver_max_safety_clip_rate,
     )
 
     converted_records = InferenceDatasetConverter.convert_directory_to_training_format(
         input_dir=args.input_dir,
         output_dir=args.output_dir,
-        use_intervened_action=not args.use_model_action,
-        filter_intervention=args.filter_intervention,
         admission_policy=args.admission_policy,
         policy_version=args.policy_version,
         min_steps=args.min_steps,
-        max_intervention_ratio=args.silver_max_intervention_ratio,
-        gold_max_intervention_ratio=args.gold_max_intervention_ratio,
-        silver_max_intervention_ratio=args.silver_max_intervention_ratio,
+        gold_max_safety_clip_rate=args.gold_max_safety_clip_rate,
+        silver_max_safety_clip_rate=args.silver_max_safety_clip_rate,
         drop_failed_episode=args.drop_failed_episode,
     )
 
@@ -88,14 +79,12 @@ def main() -> None:
         'num_failure_labeled': sum(1 for record in converted_records if record.get('success') is False),
         'converted_files': [os.path.basename(record['output_path']) for record in converted_records if record.get('converted')],
         'episode_sidecars': [os.path.basename(record['sidecar_path']) for record in converted_records],
-        'use_intervened_action': not args.use_model_action,
-        'filter_intervention': args.filter_intervention,
+        'action_source_used': 'action_executed[:,0,:]',
         'admission_policy': args.admission_policy,
         'policy_version': args.policy_version,
         'min_steps': args.min_steps,
-        'max_intervention_ratio': args.silver_max_intervention_ratio,
-        'gold_max_intervention_ratio': args.gold_max_intervention_ratio,
-        'silver_max_intervention_ratio': args.silver_max_intervention_ratio,
+        'gold_max_safety_clip_rate': args.gold_max_safety_clip_rate,
+        'silver_max_safety_clip_rate': args.silver_max_safety_clip_rate,
         'drop_failed_episode': args.drop_failed_episode,
         'admission_bucket_counts': bucket_counts,
         'admission_reason_counts': reason_counts,

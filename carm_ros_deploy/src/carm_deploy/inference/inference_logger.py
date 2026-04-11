@@ -156,7 +156,7 @@ class InferenceLogger:
         safety_warnings: List[str] = None,
         safety_reason_counts: Optional[Dict[str, int]] = None,
     ):
-        """记录单步摘要，保留接口兼容性但不再写 HDF5。"""
+        """记录单步摘要，HDF5 数据由 InferenceRecorder 单独负责。"""
         self.step_count += 1
         if inference_time > 0:
             self._inference_times.append(float(inference_time))

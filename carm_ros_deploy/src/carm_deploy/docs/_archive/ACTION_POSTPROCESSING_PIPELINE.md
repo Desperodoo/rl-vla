@@ -1,5 +1,14 @@
 # Action Post-Processing Pipeline 分析报告
 
+> Archive note
+>
+> 本文档描述的是较早阶段的 action post-processing 设计，其中包含
+> `KeyboardInterventionHandler` / `InterventionApplier` 这条人工键盘干预链路。
+> 该链路已经不再属于当前现役 `inference_ros` pipeline。
+>
+> 当前现役推理链路以 `action_model -> action_executed` 为主语义，
+> Human-in-the-loop 相关能力也不会直接复用这里的旧 intervention 设计。
+
 本报告详细分析真机部署 (`inference_ros.py`) 中 action 从模型输出到机械臂执行的完整后处理流程。
 
 ---
@@ -250,7 +259,7 @@ for i in range(len(all_actions)):
     clipped_gripper, grip_warnings = safety_controller.check_joint_limits(gripper_action)
 ```
 
-### Step 3: 人工干预（可选）
+### Step 3: 人工干预（历史设计，现役链路已移除）
 ```python
 if self.intervention_enabled:
     intervention = self.intervention_handler.get_intervention()

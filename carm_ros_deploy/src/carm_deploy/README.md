@@ -245,6 +245,9 @@ rosrun carm_deploy inference_ros.py --pretrain /path/to/model.pt --safety_config
 ```
 
 > 推理必须提供 `safety_config.json`，默认路径为 `carm_deploy/safety_config.json`。
+>
+> 当前现役 `inference_ros` pipeline 不再接入 `KeyboardInterventionHandler` /
+> `InterventionApplier` 这条旧键盘干预链路；相关实现仅保留作历史参考。
 
 ### 离线测试
 

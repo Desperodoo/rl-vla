@@ -1,6 +1,15 @@
 #!/usr/bin/env python3
 """
-键盘干预模块 - 用于真机推理时的人工干预
+键盘干预模块 - 已退役的历史实验实现
+
+状态说明:
+- 该模块保留仅用于回看早期 keyboard-intervention 实验设计。
+- 当前 `inference_ros` 主 pipeline 已不再接入本模块。
+- 当前现役推理链路只保留 episode 级别的 `EpisodeKeyboardHandler` 控制，
+  不再在 policy 输出与执行之间插入人工键盘干预。
+
+如果后续要做 Human-in-the-loop inference，请不要直接复用这条旧链路，
+应基于当前 `action_model -> action_executed` 语义重新设计接入点。
 
 支持:
 - xyz 平移 (W/S=X, A/D=Y, Q/E=Z)
@@ -40,7 +49,9 @@ except ImportError:
 
 class KeyboardInterventionHandler:
     """
-    键盘干预处理器
+    键盘干预处理器。
+
+    该类属于历史实验接口，不再属于当前现役 inference pipeline。
     
     键位映射:
         W/S: X 轴正/负方向移动
@@ -123,7 +134,7 @@ class KeyboardInterventionHandler:
         self._quit_callback = callback
     
     def start(self):
-        """启动键盘监听线程"""
+        """启动键盘监听线程。"""
         if self._running:
             return
         
@@ -132,10 +143,10 @@ class KeyboardInterventionHandler:
         self._thread.start()
         
         if HAS_ROSPY:
-            rospy.loginfo("KeyboardInterventionHandler started")
+            rospy.logwarn("KeyboardInterventionHandler started in archived mode; current inference_ros no longer uses this path")
             rospy.loginfo("Controls: WS=X, AD=Y, QE=Z, G=Open, H=Close, R=Record, Y/N=Save/Discard, S/F=Success/Failure")
         else:
-            print("KeyboardInterventionHandler started")
+            print("KeyboardInterventionHandler started in archived mode; current inference_ros no longer uses this path")
             print("Controls: WS=X, AD=Y, QE=Z, G=Open, H=Close, R=Record, Y/N=Save/Discard, S/F=Success/Failure")
     
     def stop(self):
@@ -310,7 +321,9 @@ class KeyboardInterventionHandler:
 
 class InterventionApplier:
     """
-    干预应用器 - 将键盘干预应用到模型输出的 action
+    干预应用器 - 将键盘干预应用到模型输出的 action。
+
+    该类仅保留为历史参考，不再由当前 inference_ros 主流程调用。
     
     支持两种模式:
         - replace: 替换对应维度
@@ -402,7 +415,7 @@ class InterventionApplier:
 
 if __name__ == '__main__':
     # 简单测试
-    print("Testing KeyboardInterventionHandler...")
+    print("Testing archived KeyboardInterventionHandler...")
     
     handler = KeyboardInterventionHandler(
         xyz_scale=0.005,
