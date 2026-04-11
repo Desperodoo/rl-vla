@@ -13,6 +13,7 @@ catkin_package()
 catkin_install_python(PROGRAMS
   inference/inference_ros.py
   data/record_data_ros.py
+  data/teleop_shadow_ros.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 

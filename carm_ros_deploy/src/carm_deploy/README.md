@@ -100,27 +100,126 @@ roslaunch carm_deploy camera.launch
 
 ## 📝 数据采集
 
-### 拖动示教录制
+### Teleop 录制模式
+
+当前 `record_data_ros` 已支持两种 teleop bridge 模式：
+
+- `passive_shadow`
+  - recorder 只录制 teleop shadow / candidate 观测
+  - 不切 backend owner
+  - 不由上位机真实接管 teleop 控制权
+- `upper_control`
+  - 启用 upper bridge
+  - 是否真实接管由 `upper_control_enabled` 决定
+  - `upper_control_enabled:=false` 时是 candidate-only
+  - `upper_control_enabled:=true` 时会在 `recording=True` 期间切 owner 并由上位机 live execute
+
+当前推荐默认模式仍是：
+
+- 常规采集: `teleop_bridge_mode:=passive_shadow`
+- 真机验证: `teleop_bridge_mode:=upper_control upper_control_enabled:=false`
+- 最小 live 接管验证: `teleop_bridge_mode:=upper_control upper_control_enabled:=true`
+
+### 单相机录制
 
 ```bash
 # 启动相机
 roslaunch carm_deploy camera.launch
 
-# 启动录制
-roslaunch carm_deploy record.launch output_dir:=~/rl-vla/recorded_data
+# 启动录制（推荐默认：passive shadow）
+roslaunch carm_deploy record.launch \
+    output_dir:=~/recorded_data \
+    teleop_bridge_mode:=passive_shadow
 
 # 如果相机已在别处启动
-roslaunch carm_deploy record.launch output_dir:=~/rl-vla/recorded_data use_camera:=false
+roslaunch carm_deploy record.launch \
+    output_dir:=~/recorded_data \
+    use_camera:=false \
+    teleop_bridge_mode:=passive_shadow
 ```
 
+### 双相机录制
+
+```bash
+# 腕部 + 第三视角一体化录制（默认透传到 record.launch）
+roslaunch carm_deploy dual_camera.launch \
+    output_dir:=~/recorded_data \
+    wrist_serial:=218622279840 \
+    third_serial:=<D455_SERIAL> \
+    teleop_bridge_mode:=passive_shadow
+```
+
+### Candidate-only / Live execute 示例
+
+```bash
+# upper_control candidate-only：启动 50Hz 候选控制线程，但不真实下发
+roslaunch carm_deploy record.launch \
+    output_dir:=~/recorded_data \
+    use_camera:=false \
+    teleop_bridge_mode:=upper_control \
+    upper_control_enabled:=false
+
+# upper_control live execute：仅建议在真机小幅验证时使用
+roslaunch carm_deploy record.launch \
+    output_dir:=~/recorded_data \
+    use_camera:=false \
+    teleop_bridge_mode:=upper_control \
+    upper_control_enabled:=true \
+    vis:=false
+```
+
+可选 teleop 参数：
+
+- `backend_url_v2`: 显式指定 `teleop_target_v2` 接口
+- `events_v2_url`: 显式指定 `events_v2` 接口
+- `pred_horizon`: shadow chunk horizon
+- `act_horizon`: action horizon metadata
+- `teleop_candidate_control_freq`: candidate/live 控制线程频率，默认 `50Hz`
+- `teleop_signal_timeout_ms`: stale timeout，默认 `150ms`
+- `enable_teleop_sse`: 是否启用 SSE 监控
+- `return_to_zero`: `upper_control` 下建议保持 `false`
+
 控制键:
+
 - `s`: 开始/停止录制
-- `q`: 保存并退出
+- `y`: 保存当前 episode
+- `n`: 丢弃当前 episode
+- `q`: 退出 recorder
+
+### 当前 teleop 落盘内容
+
+在保留旧字段兼容性的同时，teleop uplift 已额外写入：
+
+- `teleop_processed_target_abs`
+- `teleop_human_chunk_abs`
+- `teleop_human_chunk_rel`
+- `teleop_reconstructed_target_abs`
+- `teleop_active`
+- `teleop_processed_sequence`
+- `teleop_raw_sequence`
+- `teleop_signal_age_ms`
+- `teleop_abs_reconstruction_pos_error`
+- `teleop_abs_reconstruction_rot_error`
+- `upper_candidate_target_abs`
+- `upper_candidate_pos_error`
+- `upper_candidate_rot_error`
+- `teleop_candidate_loop_dt_ms`
+- `teleop_candidate_stale`
+- `teleop_candidate_applied`
+
+当前 HDF5 metadata 也会记录：
+
+- `teleop_bridge_mode`
+- `backend_url_v2`
+- `events_v2_url`
+- `teleop_signal_timeout_ms`
+- `control_owner_at_start`
+- `upper_control_enabled_at_start`
 
 ### 数据分析
 
 ```bash
-python data/analyze_dataset.py --data_dir ~/rl-vla/recorded_data/mix
+python data/analyze_dataset.py --data_dir ~/recorded_data/mix
 ```
 
 ## 🤖 策略推理
@@ -228,7 +327,7 @@ python tools/arm_test/safe_shutdown.py
 
 ## 📋 数据格式
 
-记录的数据保存为 HDF5 格式：
+记录的数据保存为 HDF5 格式。当前 teleop uplift 版本会在旧 schema 上增量扩展 teleop shadow / candidate 字段：
 
 ```
 episode_0001_20240108_120000.hdf5
@@ -239,10 +338,23 @@ episode_0001_20240108_120000.hdf5
 │   ├── qpos            # [T, 15] float64 (兼容格式)
 │   ├── gripper         # [T] float64
 │   └── timestamps      # [T] float64
-├── action              # [T, 15] float64 (joint cmd + end pose cmd)
+├── action                          # [T, 8/15] 兼容字段；当前 teleop uplift 中表示 processed absolute target fallback
+├── teleop_processed_target_abs     # [T, 8]
+├── teleop_human_chunk_abs          # [T, H, 8]
+├── teleop_human_chunk_rel          # [T, H, 7]
+├── teleop_reconstructed_target_abs # [T, H, 8]
+├── teleop_active                   # [T]
+├── teleop_signal_age_ms            # [T]
+├── upper_candidate_target_abs      # [T, 8]
+├── teleop_candidate_loop_dt_ms     # [T]
+├── teleop_candidate_stale          # [T]
+├── teleop_candidate_applied        # [T]
 └── attrs/
     ├── num_steps
     ├── record_freq
+    ├── teleop_bridge_mode
+    ├── control_owner_at_start
+    ├── upper_control_enabled_at_start
     └── ...
 ```
 

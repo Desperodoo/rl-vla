@@ -10,7 +10,8 @@
     roslaunch carm_deploy dual_camera.launch \
       output_dir:=$(env HOME)/rl-vla/recorded_data \
       wrist_serial:=218622279840 \
-      third_serial:=<D455_SERIAL>
+      third_serial:=<D455_SERIAL> \
+      teleop_bridge_mode:=passive_shadow
 -->
 <launch>
   <!-- ==================== 双相机参数 ==================== -->
@@ -47,7 +48,7 @@
 
   <!-- ==================== 录制参数（透传到 record.launch） ==================== -->
   <arg name="start_record" default="true"/>
-  <arg name="output_dir" default="$(env HOME)/maniskill_benchmark/recorded_data/test_fps"/>
+  <arg name="output_dir" default="$(env HOME)/recorded_data"/>
   <arg name="robot_ip" default="10.42.0.101"/>
   <arg name="robot_mode" default="3"/>
   <arg name="record_freq" default="47"/>
@@ -58,6 +59,16 @@
   <arg name="image_height" default="240"/>
   <arg name="timeline_enabled" default="true"/>
   <arg name="timeline_log" default=""/>
+  <arg name="backend_url_v2" default=""/>
+  <arg name="events_v2_url" default=""/>
+  <arg name="teleop_bridge_mode" default="passive_shadow"/>
+  <arg name="pred_horizon" default="16"/>
+  <arg name="act_horizon" default="16"/>
+  <arg name="teleop_candidate_control_freq" default="50.0"/>
+  <arg name="teleop_signal_timeout_ms" default="150.0"/>
+  <arg name="upper_control_enabled" default="false"/>
+  <arg name="enable_teleop_sse" default="false"/>
+  <arg name="return_to_zero" default="false"/>
   <arg name="teleop" default="true"/>
   <arg name="vis" default="true"/>
 
@@ -125,6 +136,17 @@
 
     <arg name="timeline_enabled" value="$(arg timeline_enabled)"/>
     <arg name="timeline_log" value="$(arg timeline_log)"/>
+
+    <arg name="backend_url_v2" value="$(arg backend_url_v2)"/>
+    <arg name="events_v2_url" value="$(arg events_v2_url)"/>
+    <arg name="teleop_bridge_mode" value="$(arg teleop_bridge_mode)"/>
+    <arg name="pred_horizon" value="$(arg pred_horizon)"/>
+    <arg name="act_horizon" value="$(arg act_horizon)"/>
+    <arg name="teleop_candidate_control_freq" value="$(arg teleop_candidate_control_freq)"/>
+    <arg name="teleop_signal_timeout_ms" value="$(arg teleop_signal_timeout_ms)"/>
+    <arg name="upper_control_enabled" value="$(arg upper_control_enabled)"/>
+    <arg name="enable_teleop_sse" value="$(arg enable_teleop_sse)"/>
+    <arg name="return_to_zero" value="$(arg return_to_zero)"/>
 
     <arg name="teleop" value="$(arg teleop)"/>
     <arg name="vis" value="$(arg vis)"/>

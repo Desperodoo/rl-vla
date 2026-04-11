@@ -27,6 +27,7 @@ import threading
 import signal
 import atexit
 import json
+import copy
 import numpy as np
 import cv2
 import h5py
@@ -46,6 +47,11 @@ sys.path.insert(0, carm_deploy_root)
 
 from core.camera_config import resolve_camera_config
 from core.env_ros import RealEnvironment
+from data.teleop_bridge import (
+    TeleopShadowTransformer,
+    TeleopSignalClient,
+    TeleopUpperControlBridge,
+)
 from utils.image_sync import ImageSynchronizer, SingleImageSubscriber
 from utils.timeline_logger import TimelineLogger
 
@@ -76,7 +82,16 @@ class DataRecorder:
         self.max_episodes = config.get('max_episodes', 100)
         self.max_steps = config.get('max_steps', 1000)
         self.backend_url = config.get('backend_url', None)  # None = auto-detect from robot_ip
-        
+        self.backend_url_v2 = config.get('backend_url_v2', None)
+        self.events_v2_url = config.get('events_v2_url', None)
+        self.teleop_bridge_mode = config.get('teleop_bridge_mode', 'passive_shadow')
+        self.pred_horizon = int(config.get('pred_horizon', 16))
+        self.act_horizon = int(config.get('act_horizon', self.pred_horizon))
+        self.teleop_signal_timeout_ms = float(config.get('teleop_signal_timeout_ms', 150.0))
+        self.teleop_candidate_control_freq = float(config.get('teleop_candidate_control_freq', 50.0))
+        self.upper_control_enabled = bool(config.get('upper_control_enabled', False))
+        self.enable_teleop_sse = bool(config.get('enable_teleop_sse', False))
+
         # 图像参数
         self.image_width = config.get('image_width', 640)
         self.image_height = config.get('image_height', 480)
@@ -95,12 +110,33 @@ class DataRecorder:
         # CV Bridge
         self.bridge = CvBridge()
         
-        # 启用被动模式（不干扰手柄遥操作）
+        # recorder 阶段默认仍保持 passive_mode，避免初始化/回零等副作用
         config['passive_mode'] = True
-        
+        if self.teleop_bridge_mode == 'upper_control':
+            config['return_to_zero'] = False
+
         # 初始化环境
         rospy.loginfo("Initializing environment...")
         self.env = RealEnvironment(config)
+
+        self.teleop_signal_client = TeleopSignalClient(
+            robot_ip=config.get('robot_ip', '10.42.0.101'),
+            backend_url_v2=self.backend_url_v2,
+            events_v2_url=self.events_v2_url,
+            enable_sse=self.enable_teleop_sse,
+        )
+        self.teleop_shadow_transformer = TeleopShadowTransformer(self.pred_horizon)
+        self.teleop_bridge = None
+        if self.teleop_bridge_mode == 'upper_control':
+            self.teleop_bridge = TeleopUpperControlBridge(
+                env=self.env,
+                signal_client=self.teleop_signal_client,
+                control_freq=self.teleop_candidate_control_freq,
+                signal_timeout_ms=self.teleop_signal_timeout_ms,
+                live_enabled=self.upper_control_enabled,
+            )
+            self.teleop_bridge.start()
+        self.start_control_state = self.teleop_signal_client.get_control_state()
 
         # 时间线日志（用于分析采集时间语义）
         self.timeline_enabled = config.get('timeline_enabled', True)
@@ -115,6 +151,9 @@ class DataRecorder:
                 'init',
                 record_freq=self.record_freq,
                 output_dir=self.output_dir,
+                teleop_bridge_mode=self.teleop_bridge_mode,
+                pred_horizon=self.pred_horizon,
+                act_horizon=self.act_horizon,
             )
         
         # 数据缓冲
@@ -126,6 +165,24 @@ class DataRecorder:
             'qpos': [],           # 兼容旧版格式
             'action': [],         # 遥操作目标位姿 [target_pose(7), gripper(1)] = 8D
             'teleop_scale': [],   # 遥操作 scale 值 (0 表示非活跃)
+            'teleop_valid_mask': [],
+            'teleop_processed_target_abs': [],
+            'teleop_human_chunk_abs': [],
+            'teleop_human_chunk_rel': [],
+            'teleop_reconstructed_target_abs': [],
+            'teleop_active': [],
+            'teleop_processed_sequence': [],
+            'teleop_raw_sequence': [],
+            'teleop_signal_age_ms': [],
+            'teleop_abs_reconstruction_pos_error': [],
+            'teleop_abs_reconstruction_rot_error': [],
+            'upper_candidate_target_abs': [],
+            'upper_candidate_pos_error': [],
+            'upper_candidate_rot_error': [],
+            'upper_executed_target_abs': [],
+            'teleop_candidate_loop_dt_ms': [],
+            'teleop_candidate_stale': [],
+            'teleop_candidate_applied': [],
             'gripper': [],
             'timestamps': [],
         }
@@ -137,6 +194,7 @@ class DataRecorder:
         self.pending_save = False  # 等待用户确认保存
         self.pending_episode_data = None  # 待确认的 episode 数据
         self.streams_ready = False
+        self.last_candidate_stale = False
         
         # 键盘监听
         self.keyboard_thread = None
@@ -291,11 +349,31 @@ class DataRecorder:
             'qpos': [],           # 兼容旧版格式
             'action': [],         # 遥操作目标位姿 [target_pose(7), gripper(1)] = 8D
             'teleop_scale': [],   # 遥操作 scale 值 (0 表示非活跃)
+            'teleop_valid_mask': [],
+            'teleop_processed_target_abs': [],
+            'teleop_human_chunk_abs': [],
+            'teleop_human_chunk_rel': [],
+            'teleop_reconstructed_target_abs': [],
+            'teleop_active': [],
+            'teleop_processed_sequence': [],
+            'teleop_raw_sequence': [],
+            'teleop_signal_age_ms': [],
+            'teleop_abs_reconstruction_pos_error': [],
+            'teleop_abs_reconstruction_rot_error': [],
+            'upper_candidate_target_abs': [],
+            'upper_candidate_pos_error': [],
+            'upper_candidate_rot_error': [],
+            'upper_executed_target_abs': [],
+            'teleop_candidate_loop_dt_ms': [],
+            'teleop_candidate_stale': [],
+            'teleop_candidate_applied': [],
             'gripper': [],
             'timestamps': [],
         }
         
         self.episode_count += 1
+        if self.teleop_bridge is not None:
+            self.teleop_bridge.activate_for_recording()
         rospy.loginfo(f"Recording started - Episode {self.episode_count}")
     
     def stop_recording(self):
@@ -305,6 +383,8 @@ class DataRecorder:
             return
         
         self.recording = False
+        if self.teleop_bridge is not None:
+            self.teleop_bridge.deactivate_owner()
         rospy.loginfo(f">>> Recording stopped - {self.step_count} steps collected")
         
         if len(self.episode_data['timestamps']) == 0:
@@ -313,7 +393,7 @@ class DataRecorder:
             return
         
         # 保存数据到待确认状态
-        self.pending_episode_data = self.episode_data.copy()
+        self.pending_episode_data = copy.deepcopy(self.episode_data)
         self.pending_save = True
         
         rospy.loginfo("="*50)
@@ -388,6 +468,47 @@ class DataRecorder:
                 teleop_scale = np.array(episode_data['teleop_scale'])  # [T]
                 f.create_dataset('teleop_scale', data=teleop_scale)
 
+            if len(episode_data.get('teleop_valid_mask', [])) > 0:
+                f.create_dataset('teleop_valid_mask', data=np.array(episode_data['teleop_valid_mask'], dtype=np.bool_))
+                f.create_dataset('teleop_processed_target_abs', data=np.array(episode_data['teleop_processed_target_abs']))
+                f.create_dataset('teleop_human_chunk_abs', data=np.array(episode_data['teleop_human_chunk_abs']))
+                f.create_dataset('teleop_human_chunk_rel', data=np.array(episode_data['teleop_human_chunk_rel']))
+                f.create_dataset('teleop_reconstructed_target_abs', data=np.array(episode_data['teleop_reconstructed_target_abs']))
+                f.create_dataset('teleop_active', data=np.array(episode_data['teleop_active'], dtype=np.bool_))
+                f.create_dataset('teleop_processed_sequence', data=np.array(episode_data['teleop_processed_sequence'], dtype=np.int64))
+                f.create_dataset('teleop_raw_sequence', data=np.array(episode_data['teleop_raw_sequence'], dtype=np.int64))
+                f.create_dataset('teleop_signal_age_ms', data=np.array(episode_data['teleop_signal_age_ms'], dtype=np.float64))
+                f.create_dataset(
+                    'teleop_abs_reconstruction_pos_error',
+                    data=np.array(episode_data['teleop_abs_reconstruction_pos_error'], dtype=np.float64),
+                )
+                f.create_dataset(
+                    'teleop_abs_reconstruction_rot_error',
+                    data=np.array(episode_data['teleop_abs_reconstruction_rot_error'], dtype=np.float64),
+                )
+                f.create_dataset('upper_candidate_target_abs', data=np.array(episode_data['upper_candidate_target_abs']))
+                f.create_dataset(
+                    'upper_candidate_pos_error',
+                    data=np.array(episode_data['upper_candidate_pos_error'], dtype=np.float64),
+                )
+                f.create_dataset(
+                    'upper_candidate_rot_error',
+                    data=np.array(episode_data['upper_candidate_rot_error'], dtype=np.float64),
+                )
+                f.create_dataset('upper_executed_target_abs', data=np.array(episode_data['upper_executed_target_abs']))
+                f.create_dataset(
+                    'teleop_candidate_loop_dt_ms',
+                    data=np.array(episode_data['teleop_candidate_loop_dt_ms'], dtype=np.float64),
+                )
+                f.create_dataset(
+                    'teleop_candidate_stale',
+                    data=np.array(episode_data['teleop_candidate_stale'], dtype=np.bool_),
+                )
+                f.create_dataset(
+                    'teleop_candidate_applied',
+                    data=np.array(episode_data['teleop_candidate_applied'], dtype=np.bool_),
+                )
+
             # 元数据
             f.attrs['num_steps'] = num_steps
             f.attrs['record_freq'] = self.record_freq
@@ -398,7 +519,18 @@ class DataRecorder:
             f.attrs['primary_camera'] = self.primary_camera
             f.attrs['robot_ip'] = self.config.get('robot_ip', '')
             f.attrs['created_at'] = timestamp
-            f.attrs['data_version'] = 'v3'  # 多视角格式标记（兼容 v2 主图像字段）
+            f.attrs['data_version'] = 'v4'  # teleop uplift shadow / candidate metadata
+            f.attrs['teleop_bridge_mode'] = self.teleop_bridge_mode
+            f.attrs['backend_url_v2'] = self.teleop_signal_client.backend_url_v2
+            f.attrs['events_v2_url'] = self.teleop_signal_client.events_v2_url
+            f.attrs['teleop_signal_timeout_ms'] = self.teleop_signal_timeout_ms
+            f.attrs['pred_horizon'] = self.pred_horizon
+            f.attrs['act_horizon'] = self.act_horizon
+            f.attrs['lower_control_enabled_at_start'] = bool(
+                self.start_control_state.get('local_control_enabled')
+            ) if self.start_control_state.get('local_control_enabled') is not None else True
+            f.attrs['control_owner_at_start'] = self.start_control_state.get('control_owner', 'lower_machine')
+            f.attrs['upper_control_enabled_at_start'] = bool(self.upper_control_enabled)
         
         rospy.loginfo(f"Episode saved: {num_steps} steps, {images.nbytes / 1e6:.1f} MB")
     
@@ -440,23 +572,85 @@ class DataRecorder:
         self.episode_data['gripper'].append(obs['gripper'])
         self.episode_data['timestamps'].append(obs['stamp'])
         
-        # 记录遥操作目标位姿（GAP-1 修复：直接从 backend 获取 track_pose 目标）
+        # 记录遥操作目标位姿（v2 双通道主路径）
         t_action_query_sys = time.time()
-        teleop_state = self.env.get_teleop_action(backend_url=self.backend_url)
+        teleop_snapshot = self.teleop_signal_client.fetch_snapshot()
+        teleop_state_v2 = teleop_snapshot.get('teleop_state_v2')
+        transformed = self.teleop_shadow_transformer.build(obs['qpos_end'][:7], teleop_state_v2)
+        if self.teleop_bridge is not None:
+            bridge_input = transformed['processed_target_abs'] if transformed['teleop_valid'] else None
+            self.teleop_bridge.update_signal(
+                processed_target_abs=bridge_input,
+                signal_age_ms=teleop_snapshot.get('signal_age_ms'),
+                teleop_active=teleop_snapshot.get('teleop_active'),
+                processed_sequence=teleop_snapshot.get('processed_sequence'),
+            )
+            bridge_snapshot = self.teleop_bridge.snapshot()
+        else:
+            bridge_snapshot = {
+                'upper_candidate_target_abs': np.zeros(8, dtype=np.float64),
+                'upper_executed_target_abs': np.zeros(8, dtype=np.float64),
+                'upper_candidate_pos_error': 0.0,
+                'upper_candidate_rot_error': 0.0,
+                'teleop_candidate_loop_dt_ms': 0.0,
+                'teleop_candidate_stale': False,
+                'teleop_candidate_applied': False,
+            }
 
-        if teleop_state and teleop_state.get('active') and teleop_state.get('target_pose') is not None:
-            target_pose = teleop_state['target_pose']    # [7] xyz+quat
-            gripper = teleop_state.get('gripper_pose', 0.0) or 0.0
-            teleop_scale = teleop_state.get('scale', 0.0) or 0.0
-
-            action = np.array(target_pose + [gripper], dtype=np.float64)
-            self.episode_data['action'].append(action)
+        processed = teleop_snapshot.get('processed') or {}
+        teleop_scale = processed.get('scale', 0.0) or 0.0
+        if transformed['teleop_valid']:
+            action = np.array(transformed['processed_target_abs'], dtype=np.float64)
             self.episode_data['teleop_scale'].append(teleop_scale)
         else:
-            # 遥操作未激活（离合器松开等），使用当前实际状态作为 fallback
             action = np.array(obs['qpos_end'], dtype=np.float64)  # 8D
-            self.episode_data['action'].append(action)
             self.episode_data['teleop_scale'].append(0.0)
+        self.episode_data['action'].append(action)
+
+        self.episode_data['teleop_valid_mask'].append(bool(transformed['teleop_valid']))
+        self.episode_data['teleop_processed_target_abs'].append(transformed['processed_target_abs'])
+        self.episode_data['teleop_human_chunk_abs'].append(transformed['human_chunk_abs'])
+        self.episode_data['teleop_human_chunk_rel'].append(transformed['human_chunk_rel'])
+        self.episode_data['teleop_reconstructed_target_abs'].append(transformed['reconstructed_target_abs'])
+        self.episode_data['teleop_active'].append(bool(teleop_snapshot.get('teleop_active')))
+        processed_sequence = teleop_snapshot.get('processed_sequence')
+        raw_sequence = teleop_snapshot.get('raw_sequence')
+        self.episode_data['teleop_processed_sequence'].append(
+            -1 if processed_sequence is None else int(processed_sequence)
+        )
+        self.episode_data['teleop_raw_sequence'].append(
+            -1 if raw_sequence is None else int(raw_sequence)
+        )
+        self.episode_data['teleop_signal_age_ms'].append(
+            float(teleop_snapshot.get('signal_age_ms') or 0.0)
+        )
+        self.episode_data['teleop_abs_reconstruction_pos_error'].append(
+            float(transformed['abs_reconstruction_pos_error'])
+        )
+        self.episode_data['teleop_abs_reconstruction_rot_error'].append(
+            float(transformed['abs_reconstruction_rot_error'])
+        )
+        self.episode_data['upper_candidate_target_abs'].append(
+            np.asarray(bridge_snapshot['upper_candidate_target_abs'], dtype=np.float64)
+        )
+        self.episode_data['upper_candidate_pos_error'].append(
+            float(bridge_snapshot['upper_candidate_pos_error'])
+        )
+        self.episode_data['upper_candidate_rot_error'].append(
+            float(bridge_snapshot['upper_candidate_rot_error'])
+        )
+        self.episode_data['upper_executed_target_abs'].append(
+            np.asarray(bridge_snapshot['upper_executed_target_abs'], dtype=np.float64)
+        )
+        self.episode_data['teleop_candidate_loop_dt_ms'].append(
+            float(bridge_snapshot['teleop_candidate_loop_dt_ms'])
+        )
+        self.episode_data['teleop_candidate_stale'].append(
+            bool(bridge_snapshot['teleop_candidate_stale'])
+        )
+        self.episode_data['teleop_candidate_applied'].append(
+            bool(bridge_snapshot['teleop_candidate_applied'])
+        )
 
         if self.timeline_logger is not None:
             obs_stamp_ros = obs.get('stamp', None)
@@ -475,7 +669,29 @@ class DataRecorder:
                 t_action_query_sys=t_action_query_sys,
                 delta_action_obs=delta_action_obs,
                 action_present=action is not None,
+                teleop_processed_sequence=teleop_snapshot.get('processed_sequence'),
+                teleop_raw_sequence=teleop_snapshot.get('raw_sequence'),
+                teleop_active=bool(teleop_snapshot.get('teleop_active')),
+                teleop_signal_age_ms=teleop_snapshot.get('signal_age_ms'),
+                processed_target_abs_present=bool(transformed['teleop_valid']),
+                human_chunk_rel_present=bool(transformed['teleop_valid']),
+                abs_reconstruction_pos_error=float(transformed['abs_reconstruction_pos_error']),
+                abs_reconstruction_rot_error=float(transformed['abs_reconstruction_rot_error']),
+                upper_candidate_pos_error=float(bridge_snapshot['upper_candidate_pos_error']),
+                upper_candidate_rot_error=float(bridge_snapshot['upper_candidate_rot_error']),
+                teleop_candidate_loop_dt_ms=float(bridge_snapshot['teleop_candidate_loop_dt_ms']),
+                teleop_candidate_stale=bool(bridge_snapshot['teleop_candidate_stale']),
+                teleop_candidate_applied=bool(bridge_snapshot['teleop_candidate_applied']),
             )
+            if bridge_snapshot['teleop_candidate_stale'] and not self.last_candidate_stale:
+                self.timeline_logger.log(
+                    'stale_signal_event',
+                    episode=self.episode_count,
+                    step=self.step_count,
+                    teleop_processed_sequence=teleop_snapshot.get('processed_sequence'),
+                    teleop_signal_age_ms=teleop_snapshot.get('signal_age_ms'),
+                )
+        self.last_candidate_stale = bool(bridge_snapshot['teleop_candidate_stale'])
         
         self.step_count += 1
         
@@ -565,7 +781,10 @@ class DataRecorder:
         
         if self.recording:
             self.stop_recording()
-        
+
+        if self.teleop_bridge is not None:
+            self.teleop_bridge.stop()
+        self.teleop_signal_client.close()
         self.env.shutdown()
         cv2.destroyAllWindows()
 
@@ -619,6 +838,27 @@ def parse_args():
     # Backend URL（遥操作目标位姿获取）
     parser.add_argument('--backend_url', type=str, default='',
                         help='Backend API URL (default: http://{robot_ip}:1999/api/joystick/teleop_target)')
+    parser.add_argument('--backend_url_v2', type=str, default='',
+                        help='Backend v2 API URL (default: http://{robot_ip}:1999/api/joystick/teleop_target_v2)')
+    parser.add_argument('--events_v2_url', type=str, default='',
+                        help='Backend SSE v2 URL (default: http://{robot_ip}:1999/api/joystick/events_v2)')
+    parser.add_argument('--teleop_bridge_mode', type=str, default='passive_shadow',
+                        choices=['passive_shadow', 'upper_control'],
+                        help='Teleop bridge mode for recorder')
+    parser.add_argument('--pred_horizon', type=int, default=16,
+                        help='Prediction horizon used for teleop shadow chunk construction')
+    parser.add_argument('--act_horizon', type=int, default=16,
+                        help='Action horizon metadata for teleop uplift runs')
+    parser.add_argument('--teleop_candidate_control_freq', type=float, default=50.0,
+                        help='Candidate/live upper control loop frequency in Hz')
+    parser.add_argument('--teleop_signal_timeout_ms', type=float, default=150.0,
+                        help='Teleop signal stale timeout in milliseconds')
+    parser.add_argument('--upper_control_enabled', action='store_true',
+                        help='Enable live upper control in upper_control mode')
+    parser.add_argument('--enable_teleop_sse', action='store_true',
+                        help='Enable background SSE monitor for teleop v2')
+    parser.add_argument('--return_to_zero', action='store_true',
+                        help='Return to zero on shutdown (disabled automatically in upper_control mode)')
 
     # 时间线日志
     parser.add_argument('--timeline_enabled', action='store_true',
@@ -648,7 +888,10 @@ def main():
         'output_dir', 'robot_ip', 'robot_mode', 'camera_topics', 'camera_names', 'primary_camera', 'sync_slop',
         'record_freq', 'max_episodes', 'max_steps', 'image_width', 'image_height',
         'teleop', 'vis', 'timeline_log', 'timeline_enabled', 'timeline_disabled',
-        'backend_url'
+        'backend_url', 'backend_url_v2', 'events_v2_url', 'teleop_bridge_mode',
+        'pred_horizon', 'act_horizon', 'teleop_candidate_control_freq',
+        'teleop_signal_timeout_ms', 'upper_control_enabled', 'enable_teleop_sse',
+        'return_to_zero',
     ]:
         if rospy.has_param(f'~{key}'):
             config[key] = rospy.get_param(f'~{key}')
@@ -674,7 +917,8 @@ def main():
     rospy.loginfo(f"Robot IP: {config['robot_ip']}")
     rospy.loginfo(f"Camera topics: {config['camera_topics']}")
     rospy.loginfo(f"Output dir: {config['output_dir']}")
-    rospy.loginfo("Mode: Passive (does NOT control robot)")
+    rospy.loginfo(f"Teleop bridge mode: {config.get('teleop_bridge_mode', 'passive_shadow')}")
+    rospy.loginfo(f"Upper control enabled: {config.get('upper_control_enabled', False)}")
     rospy.loginfo("=" * 50)
     
     # 创建记录器

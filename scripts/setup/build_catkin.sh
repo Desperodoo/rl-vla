@@ -32,9 +32,16 @@ echo -e "${BLUE}================================================${NC}"
 
 # Conda
 if [[ "$CONDA_DEFAULT_ENV" != "carm" ]]; then
-    source ~/miniconda3/etc/profile.d/conda.sh 2>/dev/null \
-        || source ~/anaconda3/etc/profile.d/conda.sh 2>/dev/null \
-        || true
+    for conda_sh in \
+        ~/miniconda3/etc/profile.d/conda.sh \
+        ~/anaconda3/etc/profile.d/conda.sh \
+        ~/miniforge-pypy3/etc/profile.d/conda.sh \
+        /opt/conda/etc/profile.d/conda.sh; do
+        if [ -f "$conda_sh" ]; then
+            source "$conda_sh"
+            break
+        fi
+    done
     conda activate carm 2>/dev/null || {
         echo -e "${RED}无法激活 carm 环境，请先: conda create -n carm python=3.10${NC}"
         exit 1
@@ -89,7 +96,7 @@ SDK_POCO_LIB="$SDK_DIR/poco/lib"
 # 将 SDK 加入 CMAKE_PREFIX_PATH（使用环境变量让 catkin_make 自动处理）
 export CMAKE_PREFIX_PATH="$SDK_DIR:${CMAKE_PREFIX_PATH:-}"
 
-catkin_make -DPYTHON_EXECUTABLE=$(which python) \
+catkin_make -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DPYTHON_EXECUTABLE=$(which python) \
   -DCMAKE_EXE_LINKER_FLAGS="-L$SDK_POCO_LIB -Wl,-rpath,$SDK_POCO_LIB"
 
 echo -e ""

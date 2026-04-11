@@ -205,7 +205,8 @@ class InferenceNode:
         self.waiting_start = self.record_inference_enabled  # 启用采集时等待 R 键开始
         self.episode_paused = self.waiting_start  # 与 waiting_start 一致
         self.pending_save = False  # 等待保存确认
-        self.max_steps = config.get('max_steps', 99999)  # 每个 episode 最大步数
+        self.pending_outcome_label = False  # 等待 success/failure 标注
+        self.max_steps = config.get('max_steps', 900)  # 每个 episode 最大步数
         
         # 干预和采集模块
         self.intervention_enabled = config.get('intervention', False)
@@ -288,6 +289,7 @@ class InferenceNode:
             rospy.loginfo("Multi-episode recording mode enabled")
             rospy.loginfo("Press 'R' to start recording an episode")
             rospy.loginfo("Press 'R' again to stop and choose to save (Y) or discard (N)")
+            rospy.loginfo("If saved, press 'S' for success or 'F' for failure")
             rospy.loginfo("After save/discard, arm will return to init position")
             rospy.loginfo("Press 'R' to start next episode")
             rospy.loginfo("Press Ctrl+C to quit")
@@ -298,34 +300,47 @@ class InferenceNode:
         处理录制相关的键盘动作
         
         状态机:
-        1. waiting_start=True, pending_save=False: 等待按 R 开始
-        2. waiting_start=False, pending_save=False: 正在录制，按 R 停止
-        3. waiting_start=False, pending_save=True: 等待 Y/N 确认保存
+        1. waiting_start=True, pending_save=False, pending_outcome_label=False: 等待按 R 开始
+        2. waiting_start=False, pending_save=False, pending_outcome_label=False: 正在录制，按 R 停止
+        3. waiting_start=False, pending_save=True: 等待 Y/N 确认是否保存
+        4. waiting_start=False, pending_outcome_label=True: 等待 S/F 标注 success/failure
         """
         if action == 'toggle':  # R 键
-            if self.pending_save:
-                # 正在等待保存确认，忽略 R 键
-                rospy.logwarn("Please confirm save first (Y/N)")
+            if self.pending_save or self.pending_outcome_label:
+                # 正在等待保存确认或 outcome 标注，忽略 R 键
+                rospy.logwarn("Please finish save/outcome confirmation first")
                 return
-            
+
             if self.waiting_start:
                 # 开始新 episode
                 self._start_new_episode()
             else:
                 # 停止当前 episode，等待确认
                 self._stop_current_episode()
-                
+
         elif action == 'confirm':  # Y 键
             if self.pending_save:
                 self._confirm_save_episode(save=True)
             else:
                 rospy.logwarn("No episode waiting for save")
-                
+
         elif action == 'discard':  # N 键
             if self.pending_save:
                 self._confirm_save_episode(save=False)
             else:
                 rospy.logwarn("No episode to discard")
+
+        elif action == 'mark_success':  # S 键
+            if self.pending_outcome_label:
+                self._finalize_episode_outcome(success=True)
+            else:
+                rospy.logwarn("No episode waiting for success/failure label")
+
+        elif action == 'mark_failure':  # F 键
+            if self.pending_outcome_label:
+                self._finalize_episode_outcome(success=False)
+            else:
+                rospy.logwarn("No episode waiting for success/failure label")
     
     def _start_new_episode(self):
         """开始新的 episode"""
@@ -371,34 +386,46 @@ class InferenceNode:
         rospy.loginfo("=" * 60)
     
     def _confirm_save_episode(self, save: bool):
-        """确认保存或丢弃 episode，然后初始化机械臂等待下一个 episode"""
+        """确认保存或丢弃 episode。保存时进入 success/failure 标注阶段。"""
         if save:
-            # 保存
-            if self.inference_recorder:
-                filepath = self.inference_recorder.confirm_save()
-                if filepath:
-                    self.logger.record_episode_file(filepath)
-                    rospy.loginfo(f"Episode saved to: {filepath}")
-        else:
-            # 丢弃
-            if self.inference_recorder:
-                self.inference_recorder.discard()
-            rospy.loginfo("Episode discarded")
-        
+            self.pending_save = False
+            self.pending_outcome_label = True
+            rospy.loginfo("Mark episode outcome: press 'S' for success or 'F' for failure")
+            return
+
+        # 丢弃
+        if self.inference_recorder:
+            self.inference_recorder.discard()
+        rospy.loginfo("Episode discarded")
+
         self.pending_save = False
-        
-        # 初始化机械臂回到初始位置
+        self.pending_outcome_label = False
+        self._finish_episode_cycle()
+
+    def _finalize_episode_outcome(self, success: bool):
+        """在保存前补充 success/failure 标签并真正保存 episode。"""
+        outcome_label = 'success' if success else 'failure'
+        if self.inference_recorder:
+            filepath = self.inference_recorder.confirm_save(success=success, outcome_label=outcome_label)
+            if filepath:
+                self.logger.record_episode_file(filepath, success=success, outcome_label=outcome_label)
+                rospy.loginfo(f"Episode saved to: {filepath} ({outcome_label})")
+
+        self.pending_outcome_label = False
+        self._finish_episode_cycle()
+
+    def _finish_episode_cycle(self):
+        """结束当前 episode 周期，机械臂回初始位并等待下一条。"""
         rospy.loginfo("Returning to initial position...")
         self._reinitialize_arm()
-        
-        # 进入等待开始状态
+
         self.waiting_start = True
         self.episode_paused = True
-        
+
         rospy.loginfo("=" * 60)
         rospy.loginfo("Ready for next episode. Press 'R' to start recording")
         rospy.loginfo("=" * 60)
-    
+
     def _reinitialize_arm(self):
         """重新初始化机械臂到初始位置"""
         try:
@@ -1148,8 +1175,8 @@ def parse_args():
                         help='Gripper close value for intervention')
     parser.add_argument('--record_dir', type=str, default='',
                         help='Directory to save recorded inference data (default: log_dir)')
-    parser.add_argument('--max_steps', type=int, default=99999,
-                        help='Maximum steps per episode (default: 99999). Episode auto-stops when exceeded.')
+    parser.add_argument('--max_steps', type=int, default=900,
+                        help='Maximum steps per episode (default: 900). Episode auto-stops when exceeded.')
     
     # 兼容 roslaunch remap 参数
     return parser.parse_args(args=rospy.myargv()[1:])
@@ -1266,7 +1293,7 @@ def main():
     rospy.loginfo(f"  record_inference: {config.get('record_inference', False)}")
     rospy.loginfo(f"  intervention: {config.get('intervention', False)}")
     rospy.loginfo(f"  intervention_mode: {config.get('intervention_mode', 'replace')}")
-    rospy.loginfo(f"  max_steps: {config.get('max_steps', 99999)} (auto-stop episode when reached)")
+    rospy.loginfo(f"  max_steps: {config.get('max_steps', 900)} (auto-stop episode when reached)")
     rospy.loginfo("-" * 60)
     rospy.loginfo("Safety Configuration:")
     rospy.loginfo(f"  safety_config: {config['safety_config'] or 'default'}")

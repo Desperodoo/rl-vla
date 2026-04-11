@@ -346,6 +346,7 @@ def load_carm_dataset(
     data_dir: str,
     num_episodes: Optional[int] = None,
     verbose: bool = True,
+    episode_paths: Optional[List[str]] = None,
 ) -> Dict[str, List[np.ndarray]]:
     """Load CARM dataset from directory containing HDF5 files.
     
@@ -358,9 +359,12 @@ def load_carm_dataset(
         Dictionary with lists of arrays for each data field
     """
     data_dir = os.path.expanduser(data_dir)
-    pattern = os.path.join(data_dir, "episode_*.hdf5")
-    files = sorted(glob.glob(pattern))
-    
+    if episode_paths is None:
+        pattern = os.path.join(data_dir, "episode_*.hdf5")
+        files = sorted(glob.glob(pattern))
+    else:
+        files = [os.path.expanduser(path) for path in episode_paths]
+
     if len(files) == 0:
         raise ValueError(f"No episode files found in {data_dir}")
     

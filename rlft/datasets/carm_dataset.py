@@ -150,6 +150,7 @@ class CARMDataset(Dataset):
         fit_action_normalizer: bool = True,
         filter_inactive_teleop: bool = False,
         inactive_threshold: float = 0.0,
+        episode_paths: Optional[List[str]] = None,
     ):
         self.obs_horizon = obs_horizon
         self.pred_horizon = pred_horizon
@@ -170,7 +171,11 @@ class CARMDataset(Dataset):
 
         # Load dataset
         print(f"Loading CARM dataset from {data_path}...")
-        raw_data = load_carm_dataset(data_path, num_episodes=num_episodes)
+        raw_data = load_carm_dataset(
+            data_path,
+            num_episodes=num_episodes,
+            episode_paths=episode_paths,
+        )
 
         episode_teleop_scales = raw_data.get('teleop_scale', [None] * len(raw_data['images']))
         num_missing_teleop_scale = sum(scale is None for scale in episode_teleop_scales)

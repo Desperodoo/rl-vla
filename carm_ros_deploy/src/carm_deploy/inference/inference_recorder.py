@@ -195,21 +195,25 @@ class InferenceRecorder:
         
         return True
     
-    def confirm_save(self) -> Optional[str]:
+    def confirm_save(self, success: bool, outcome_label: Optional[str] = None) -> Optional[str]:
         """
         确认保存 episode
-        
+
+        Args:
+            success: episode 是否成功
+            outcome_label: outcome 文本标签，默认按 success 推断
+
         Returns:
             保存的文件路径，如果没有数据返回 None
         """
         if not self.pending_save or self.pending_data is None:
             _log_warn("No pending data to save")
             return None
-        
-        filepath = self._do_save()
+
+        filepath = self._do_save(success=success, outcome_label=outcome_label)
         self.pending_save = False
         self.pending_data = None
-        
+
         return filepath
     
     def discard(self):
@@ -290,12 +294,13 @@ class InferenceRecorder:
         
         self.step_count += 1
     
-    def _do_save(self) -> str:
+    def _do_save(self, success: bool, outcome_label: Optional[str] = None) -> str:
         """实际执行保存"""
         if self.pending_data is None:
             return None
         
         data = self.pending_data
+        outcome_label = outcome_label or ('success' if success else 'failure')
         
         # 生成文件名
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -368,9 +373,13 @@ class InferenceRecorder:
             f.attrs['camera_topics'] = json.dumps(self.camera_topics)
             f.attrs['camera_names'] = json.dumps(self.camera_names)
             f.attrs['primary_camera'] = self.primary_camera or ''
+            f.attrs['success'] = bool(success)
+            f.attrs['outcome_label'] = outcome_label
         
-        _log_info(f"Episode saved: {num_steps} steps, "
-                  f"intervention_ratio: {np.mean(intervention_mask):.2%}")
+        _log_info(
+            f"Episode saved: {num_steps} steps, intervention_ratio: {np.mean(intervention_mask):.2%}, "
+            f"outcome={outcome_label}"
+        )
         
         return filepath
     
@@ -398,6 +407,10 @@ class InferenceDatasetConverter:
 
     STAGING_SCHEMA_VERSION = 'inference_staging_v1'
     ADMISSION_LABEL = 'train_admission_v1'
+    ADMISSION_POLICY_VERSION = 'carm_inference_admission_v1'
+    DEFAULT_MIN_STEPS = 32
+    DEFAULT_GOLD_MAX_INTERVENTION_RATIO = 0.02
+    DEFAULT_SILVER_MAX_INTERVENTION_RATIO = 0.10
 
     @staticmethod
     def _to_serializable(value: Any) -> Any:
@@ -478,23 +491,24 @@ class InferenceDatasetConverter:
     def _evaluate_admission(
         *,
         policy: str,
+        policy_version: str,
         kept_steps: int,
         intervention_ratio_raw: float,
+        safety_clip_rate: Optional[float],
         required_ok: bool,
+        required_reasons: List[str],
         action: np.ndarray,
         qpos_joint: np.ndarray,
         qpos_end: np.ndarray,
         timestamps: np.ndarray,
         min_steps: int,
         max_intervention_ratio: float,
+        gold_max_intervention_ratio: float,
+        silver_max_intervention_ratio: float,
     ) -> Dict[str, Any]:
-        reasons: list[str] = []
-        if not required_ok:
-            reasons.append('missing_required_data')
+        reasons: list[str] = list(required_reasons)
         if kept_steps < min_steps:
             reasons.append('too_short')
-        if intervention_ratio_raw > max_intervention_ratio:
-            reasons.append('high_intervention')
         for name, data in (
             ('action', action),
             ('qpos_joint', qpos_joint),
@@ -505,21 +519,48 @@ class InferenceDatasetConverter:
                 reasons.append(f'nan_detected:{name}')
                 break
 
+        admission_bucket = 'reject'
+        if len(reasons) == 0:
+            if intervention_ratio_raw <= gold_max_intervention_ratio:
+                admission_bucket = 'gold'
+            elif intervention_ratio_raw <= silver_max_intervention_ratio:
+                admission_bucket = 'silver'
+            else:
+                reasons.append('high_intervention')
+
+        if safety_clip_rate is not None and not np.isnan(safety_clip_rate):
+            if safety_clip_rate > 0.05:
+                admission_bucket = 'reject'
+                reasons.append('high_safety_clip_rate')
+            elif admission_bucket == 'gold' and safety_clip_rate > 0.01:
+                admission_bucket = 'silver'
+                reasons.append('downgraded_by_safety_clip_rate')
+
         if policy == 'none':
-            admission_pass = True if required_ok else False
-            admission_reason = 'ok' if admission_pass else '|'.join(reasons or ['missing_required_data'])
+            admission_pass = bool(required_ok and len([r for r in reasons if r.startswith('missing_required_data') or r.startswith('too_short') or r.startswith('nan_detected:')]) == 0)
+            if admission_pass:
+                admission_bucket = 'silver'
+                admission_reason = 'ok'
+            else:
+                admission_bucket = 'reject'
+                admission_reason = '|'.join(reasons or ['missing_required_data'])
         else:
-            admission_pass = len(reasons) == 0
-            admission_reason = 'ok' if admission_pass else '|'.join(reasons)
+            admission_pass = admission_bucket != 'reject'
+            admission_reason = 'ok' if admission_pass else '|'.join(reasons or ['rejected'])
 
         return {
             'admission_label': InferenceDatasetConverter.ADMISSION_LABEL,
             'admission_pass': bool(admission_pass),
             'admission_reason': admission_reason,
+            'admission_bucket': admission_bucket,
             'policy_level': 'episode',
             'admission_policy': policy,
+            'policy_version': policy_version,
             'min_steps': int(min_steps),
             'max_intervention_ratio': float(max_intervention_ratio),
+            'gold_max_intervention_ratio': float(gold_max_intervention_ratio),
+            'silver_max_intervention_ratio': float(silver_max_intervention_ratio),
+            'safety_clip_rate': None if safety_clip_rate is None else float(safety_clip_rate),
         }
 
     @staticmethod
@@ -529,8 +570,11 @@ class InferenceDatasetConverter:
         use_intervened_action: bool = True,
         filter_intervention: bool = False,
         admission_policy: str = 'none',
+        policy_version: Optional[str] = None,
         min_steps: int = 32,
-        max_intervention_ratio: float = 0.4,
+        max_intervention_ratio: float = 0.10,
+        gold_max_intervention_ratio: float = 0.02,
+        silver_max_intervention_ratio: float = 0.10,
         drop_failed_episode: bool = False,
     ) -> Dict[str, Any]:
         """
@@ -542,10 +586,14 @@ class InferenceDatasetConverter:
             use_intervened_action: 使用干预后的 action
             filter_intervention: 是否过滤掉有干预的帧
             admission_policy: 准入策略，'none' 或 'episode'
+            policy_version: 写入 metadata 的准入策略版本
             min_steps: episode-level admission 的最小步数
-            max_intervention_ratio: 原始 episode 最大允许 intervention ratio
+            max_intervention_ratio: 兼容旧接口，等价于 silver bucket 的最大 intervention ratio
+            gold_max_intervention_ratio: gold bucket 最大 intervention ratio
+            silver_max_intervention_ratio: silver bucket 最大 intervention ratio
             drop_failed_episode: 若准入失败，是否不写出 staging HDF5
         """
+        policy_version = policy_version or InferenceDatasetConverter.ADMISSION_POLICY_VERSION
         output_path = os.path.expandvars(os.path.expanduser(output_path))
         os.makedirs(os.path.dirname(output_path) or '.', exist_ok=True)
         sidecar_path = os.path.splitext(output_path)[0] + '.meta.json'
@@ -581,7 +629,23 @@ class InferenceDatasetConverter:
             action_kept = action[keep_idx]
 
             required_obs_keys = ['images', 'qpos_joint', 'qpos_end', 'gripper', 'timestamps']
-            required_ok = obs_group is not None and all(key in obs_group for key in required_obs_keys) and 'intervention_mask' in f_in
+            required_reasons: list[str] = []
+            if obs_group is None:
+                required_reasons.append('missing_observations_group')
+            else:
+                for key in required_obs_keys:
+                    if key not in obs_group:
+                        required_reasons.append(f'missing_required_obs:{key}')
+            if 'intervention_mask' not in f_in:
+                required_reasons.append('missing_intervention_mask')
+            if f_in.attrs.get('timestamp_semantics', None) != 'obs_stamp_ros':
+                required_reasons.append('bad_timestamp_semantics')
+            if not str(f_in.attrs.get('primary_camera', '')).strip():
+                required_reasons.append('missing_primary_camera')
+            for attr_name in ('camera_names', 'camera_topics', 'action_semantics_version', 'action_space'):
+                if attr_name not in f_in.attrs:
+                    required_reasons.append(f'missing_attr:{attr_name}')
+            required_ok = len(required_reasons) == 0
 
             if required_ok:
                 qpos_joint_kept = obs_group['qpos_joint'][:][keep_idx]
@@ -594,15 +658,20 @@ class InferenceDatasetConverter:
 
             admission = InferenceDatasetConverter._evaluate_admission(
                 policy=admission_policy,
+                policy_version=policy_version,
                 kept_steps=kept_steps,
                 intervention_ratio_raw=intervention_ratio_raw,
+                safety_clip_rate=run_summary.get('safety_clip_rate'),
                 required_ok=required_ok,
+                required_reasons=required_reasons,
                 action=action_kept,
                 qpos_joint=qpos_joint_kept,
                 qpos_end=qpos_end_kept,
                 timestamps=timestamps_kept,
                 min_steps=min_steps,
                 max_intervention_ratio=max_intervention_ratio,
+                gold_max_intervention_ratio=gold_max_intervention_ratio,
+                silver_max_intervention_ratio=silver_max_intervention_ratio,
             )
 
             converted = admission['admission_pass'] or not drop_failed_episode
@@ -651,6 +720,8 @@ class InferenceDatasetConverter:
                         'data_source',
                         'has_intervention',
                         'intervention_ratio',
+                        'success',
+                        'outcome_label',
                     ]:
                         if key in f_in.attrs:
                             f_out.attrs[key] = f_in.attrs[key]
@@ -658,10 +729,14 @@ class InferenceDatasetConverter:
                     f_out.attrs['admission_label'] = admission['admission_label']
                     f_out.attrs['admission_pass'] = admission['admission_pass']
                     f_out.attrs['admission_reason'] = admission['admission_reason']
+                    f_out.attrs['admission_bucket'] = admission['admission_bucket']
+                    f_out.attrs['policy_version'] = admission['policy_version']
                     f_out.attrs['policy_level'] = admission['policy_level']
                     f_out.attrs['admission_policy'] = admission['admission_policy']
                     f_out.attrs['min_steps'] = admission['min_steps']
                     f_out.attrs['max_intervention_ratio'] = admission['max_intervention_ratio']
+                    f_out.attrs['gold_max_intervention_ratio'] = admission['gold_max_intervention_ratio']
+                    f_out.attrs['silver_max_intervention_ratio'] = admission['silver_max_intervention_ratio']
 
                     for key in ['safety_clips', 'safety_clip_rate', 'avg_inference_time', 'desire_inference_freq', 'act_horizon', 'control_freq']:
                         value = run_summary.get(key)
@@ -678,8 +753,11 @@ class InferenceDatasetConverter:
                 'use_intervened_action': bool(use_intervened_action),
                 'filter_intervention': bool(filter_intervention),
                 'admission_policy': admission_policy,
+                'policy_version': policy_version,
                 'min_steps': int(min_steps),
                 'max_intervention_ratio': float(max_intervention_ratio),
+                'gold_max_intervention_ratio': float(gold_max_intervention_ratio),
+                'silver_max_intervention_ratio': float(silver_max_intervention_ratio),
             },
             'stats': {
                 'num_steps_raw': num_steps,
@@ -689,6 +767,8 @@ class InferenceDatasetConverter:
                 'intervention_ratio_kept': float(np.mean(has_intervention[keep_idx])) if kept_steps > 0 else 0.0,
                 'use_intervened_action': bool(use_intervened_action),
                 'filter_intervention': bool(filter_intervention),
+                'success': input_attrs.get('success'),
+                'outcome_label': input_attrs.get('outcome_label'),
             },
             'admission': admission,
             'source': {
@@ -710,6 +790,10 @@ class InferenceDatasetConverter:
             'converted': bool(converted),
             'admission_pass': bool(admission['admission_pass']),
             'admission_reason': admission['admission_reason'],
+            'admission_bucket': admission['admission_bucket'],
+            'policy_version': admission['policy_version'],
+            'success': input_attrs.get('success'),
+            'outcome_label': input_attrs.get('outcome_label'),
             'source_file': os.path.basename(input_path),
         }
 
@@ -720,8 +804,11 @@ class InferenceDatasetConverter:
         use_intervened_action: bool = True,
         filter_intervention: bool = False,
         admission_policy: str = 'none',
+        policy_version: Optional[str] = None,
         min_steps: int = 32,
-        max_intervention_ratio: float = 0.4,
+        max_intervention_ratio: float = 0.10,
+        gold_max_intervention_ratio: float = 0.02,
+        silver_max_intervention_ratio: float = 0.10,
         drop_failed_episode: bool = False,
     ) -> list[Dict[str, Any]]:
         """批量将 inference_episode_*.hdf5 转换到训练 staging 目录。"""
@@ -742,8 +829,11 @@ class InferenceDatasetConverter:
                 use_intervened_action=use_intervened_action,
                 filter_intervention=filter_intervention,
                 admission_policy=admission_policy,
+                policy_version=policy_version,
                 min_steps=min_steps,
                 max_intervention_ratio=max_intervention_ratio,
+                gold_max_intervention_ratio=gold_max_intervention_ratio,
+                silver_max_intervention_ratio=silver_max_intervention_ratio,
                 drop_failed_episode=drop_failed_episode,
             )
             converted_records.append(record)

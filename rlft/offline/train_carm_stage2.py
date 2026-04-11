@@ -1,0 +1,1120 @@
+"""
+CARM Second-Stage Training Script
+
+Trains / fine-tunes CARM policies from selected teleop and inference staging episodes.
+Supports inference bucket filtering and selection manifest generation.
+"""
+
+ALGO_NAME = "CARM_UNet"
+
+import json
+import os
+import random
+import time
+from collections import defaultdict
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Literal, Tuple
+
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torch.optim as optim
+import wandb
+from tqdm import tqdm
+import tyro
+from diffusers.optimization import get_scheduler
+from diffusers.training_utils import EMAModel
+from torch.utils.data.dataloader import DataLoader
+from torch.utils.data.sampler import BatchSampler, RandomSampler, SequentialSampler
+from torch.utils.tensorboard import SummaryWriter
+
+# Import from rlft package
+from rlft.networks import (
+    PlainConv, ResNetEncoder, StateEncoder, VelocityUNet1D, 
+    ShortCutVelocityUNet1D, GripperHead,
+)
+from rlft.algorithms import (
+    DiffusionPolicyAgent, FlowMatchingAgent, ShortCutFlowAgent,
+    ConsistencyFlowAgent, ReflectedFlowAgent,
+)
+from rlft.datasets import (
+    CARMDataset, ActionNormalizer, 
+    load_carm_dataset, create_carm_obs_process_fn, get_carm_data_info,
+)
+from rlft.datasets.data_utils import (
+    IterationBasedBatchSampler,
+    worker_init_fn,
+    encode_observations,
+    get_state_dim_for_mode,
+    load_carm_episode,
+)
+
+
+@dataclass
+class Args:
+    """Training arguments for CARM robot."""
+    # Experiment settings
+    exp_name: Optional[str] = None
+    seed: int = 1
+    torch_deterministic: bool = True
+    cuda: bool = True
+    track: bool = True
+    wandb_project_name: str = "CARM"
+    wandb_entity: Optional[str] = None
+
+    # Data settings
+    demo_path: str = "~/rl-vla/recorded_data/mix"
+    val_demo_path: Optional[str] = None
+    num_demos: Optional[int] = None
+    task_name: str = "carm_teleop_pick_place"
+    teleop_demo_paths: List[str] = field(default_factory=list)
+    inference_staging_paths: List[str] = field(default_factory=list)
+    admission_buckets: List[str] = field(default_factory=lambda: ["gold"])
+    policy_version: Optional[str] = None
+    max_inference_episodes: Optional[int] = None
+    max_teleop_episodes: Optional[int] = None
+    mix_mode: Literal["inference_only", "mixed"] = "inference_only"
+    dry_run_selection: bool = False
+
+    # Action space settings
+    action_mode: Literal["full", "ee_only"] = "ee_only"
+    state_mode: Literal["joint_only", "ee_only", "both"] = "ee_only"
+    precompute_actions: bool = False
+    normalize_actions: bool = True
+    action_norm_mode: Literal["standard", "minmax"] = "standard"
+    action_bounds: Optional[Tuple[float, float]] = None
+    """Action bounds for clamping during inference. Set to None to disable clamping.
+    CARM robot may have different action space, so disabled by default."""
+    
+    # Discrete gripper settings
+    gripper_threshold: float = 0.05
+    gripper_ce_weight: float = 1.0
+    gripper_class_weight_close: float = 3.0
+    gripper_open_val: float = 0.078
+    gripper_close_val: float = 0.04
+    gripper_head_hidden_dim: int = 256
+    filter_inactive_teleop: bool = True
+    inactive_threshold: float = 0.0
+
+    # Camera settings
+    target_image_size: Optional[Tuple[int, int]] = (128, 128)
+    include_depth: bool = False
+    """Whether to include depth channel in visual observations. When True, visual input is RGBD (4 channels).
+    NOTE: Depth support requires CARM data collection to save depth images, which is not yet implemented."""
+
+    # Training settings
+    total_iters: int = 100_000
+    batch_size: int = 256
+    lr: float = 3e-4  # Best from sweep
+
+    # Policy architecture settings
+    obs_horizon: int = 2
+    act_horizon: int = 8
+    pred_horizon: int = 16
+    diffusion_step_embed_dim: int = 64
+    unet_dims: List[int] = field(default_factory=lambda: [64, 128, 256])
+    n_groups: int = 8
+    
+    # Visual encoder settings
+    visual_encoder_type: Literal["plain_conv", "resnet10", "resnet18", "resnet34", "resnet50"] = "resnet10"
+    visual_feature_dim: int = 256
+    pretrained_backbone: bool = True
+    freeze_backbone: bool = False
+    freeze_bn: bool = True
+    lr_backbone: float = 1e-5
+    auto_image_size: bool = True
+    """automatically adjust image size based on encoder type (128 for plain_conv/resnet10, 224 for ResNet18+)"""
+    
+    # State encoder settings
+    use_state_encoder: bool = True
+    state_encoder_hidden_dim: int = 128
+    state_encoder_out_dim: int = 256
+
+    # Algorithm selection
+    algorithm: Literal[
+        "diffusion_policy", 
+        "flow_matching", 
+        "reflected_flow",
+        "consistency_flow",
+        "shortcut_flow",
+    ] = "flow_matching"
+    
+    # Diffusion/Flow settings
+    num_diffusion_iters: int = 100
+    num_flow_steps: int = 20  # Best from sweep (20 > 10 > 5)
+    ema_decay: float = 0.9995  # Best from wave3 (0.9995 > 0.999)
+    bc_weight: float = 1.0
+    consistency_weight: float = 0.3
+    
+    # Reflected Flow settings
+    reflection_mode: Literal["hard", "soft"] = "hard"
+    """reflection mode for reflected_flow"""
+    boundary_reg_weight: float = 0.01
+    """boundary regularization weight for reflected_flow"""
+    
+    # Consistency Flow settings
+    cons_use_flow_t: bool = False
+    cons_full_t_range: bool = False
+    cons_t_min: float = 0.05
+    cons_t_max: float = 0.95
+    cons_t_upper: float = 0.95
+    cons_delta_mode: Literal["random", "fixed"] = "fixed"
+    """delta sampling strategy (fixed works best from sweep)"""
+    cons_delta_min: float = 0.02
+    cons_delta_max: float = 0.15
+    cons_delta_fixed: float = 0.03
+    """fixed delta (best from wave3: 0.03)"""
+    cons_delta_dynamic_max: bool = False
+    cons_delta_cap: float = 0.99
+    cons_teacher_steps: int = 2
+    cons_teacher_from: Literal["t_plus", "t_cons"] = "t_plus"
+    cons_student_point: Literal["t_plus", "t_cons"] = "t_plus"
+    cons_loss_space: Literal["velocity", "endpoint"] = "velocity"
+    cons_delta: float = 0.1
+    """consistency delta (kept for API compatibility)"""
+    
+    # ShortCut Flow settings
+    sc_max_denoising_steps: int = 8
+    """max denoising steps for shortcut_flow"""
+    sc_self_consistency_k: float = 0.25
+    """fraction of batch for self-consistency (best from sweep)"""
+    sc_t_min: float = 0.0
+    sc_t_max: float = 1.0
+    sc_t_sampling_mode: Literal["uniform", "truncated"] = "uniform"
+    sc_step_size_mode: Literal["power2", "uniform", "fixed"] = "fixed"
+    """step size mode (fixed works best from sweep)"""
+    sc_min_step_size: float = 0.0625
+    sc_max_step_size: float = 0.5
+    sc_fixed_step_size: float = 0.15  # Best from wave3 (0.15 > 0.125)
+    sc_target_mode: Literal["velocity", "endpoint"] = "velocity"
+    sc_teacher_steps: int = 1
+    sc_use_ema_teacher: bool = True
+    sc_inference_mode: Literal["adaptive", "uniform"] = "uniform"
+    sc_num_inference_steps: int = 8
+    """number of inference steps (best from sweep)"""
+
+    # Logging settings
+    log_freq: int = 1
+    save_freq: int = 2000
+    eval_freq: int = 2000
+    eval_batches: int = 50
+    num_dataload_workers: int = 0
+    early_stop_patience: int = 0
+    early_stop_min_iters: int = 2000
+    early_stop_min_delta: float = 0.0
+    
+    # Resume training
+    resume_from: Optional[str] = None
+    resume_optimizer: bool = True
+
+
+def _expand_teleop_roots(paths: List[str]) -> List[str]:
+    expanded: List[str] = []
+    for root in paths:
+        resolved_root = os.path.expanduser(root)
+        default_train_dir = os.path.join(resolved_root, 'train')
+        default_test_dir = os.path.join(resolved_root, 'test')
+        if os.path.isdir(default_train_dir) and os.path.isdir(default_test_dir):
+            expanded.append(default_train_dir)
+        else:
+            expanded.append(resolved_root)
+    return expanded
+
+
+def _list_episode_files(data_dir: str) -> List[str]:
+    data_dir = os.path.expanduser(data_dir)
+    return sorted(str(p) for p in Path(data_dir).glob('episode_*.hdf5'))
+
+
+def _resolve_teleop_episode_paths(paths: List[str], limit: Optional[int]) -> List[Dict[str, Any]]:
+    records: List[Dict[str, Any]] = []
+    for root in paths:
+        for episode_path in _list_episode_files(root):
+            records.append({
+                'episode_path': episode_path,
+                'source_type': 'teleop',
+                'admission_bucket': None,
+                'policy_version': None,
+                'source_root': os.path.expanduser(root),
+            })
+    if limit is not None:
+        records = records[:limit]
+    return records
+
+
+def _resolve_inference_episode_paths(
+    staging_paths: List[str],
+    admission_buckets: List[str],
+    policy_version: Optional[str],
+    limit: Optional[int],
+) -> List[Dict[str, Any]]:
+    records: List[Dict[str, Any]] = []
+    bucket_allowlist = set(admission_buckets)
+    for root in staging_paths:
+        root_path = Path(os.path.expanduser(root))
+        metadata_path = root_path / 'conversion_metadata.json'
+        if not metadata_path.exists():
+            raise FileNotFoundError(f'conversion_metadata.json not found in {root_path}')
+        metadata = json.loads(metadata_path.read_text())
+        for episode in metadata.get('episodes', []):
+            if not episode.get('converted', False):
+                continue
+            bucket = episode.get('admission_bucket')
+            if bucket not in bucket_allowlist:
+                continue
+            episode_policy_version = episode.get('policy_version')
+            if policy_version is not None and episode_policy_version != policy_version:
+                continue
+            records.append({
+                'episode_path': episode['output_path'],
+                'source_type': 'inference',
+                'admission_bucket': bucket,
+                'policy_version': episode_policy_version,
+                'source_root': str(root_path),
+            })
+    if limit is not None:
+        records = records[:limit]
+    return records
+
+
+def _write_selection_artifacts(run_name: str, args: Args, selected_records: List[Dict[str, Any]]) -> None:
+    run_dir = Path('runs') / run_name
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    bucket_counts: Dict[str, int] = defaultdict(int)
+    source_counts: Dict[str, int] = defaultdict(int)
+    for record in selected_records:
+        source_counts[record['source_type']] += 1
+        bucket_key = record['admission_bucket'] if record['admission_bucket'] is not None else 'teleop'
+        bucket_counts[str(bucket_key)] += 1
+
+    manifest = {
+        'args': asdict(args),
+        'total_selected_episodes': len(selected_records),
+        'source_counts': dict(source_counts),
+        'bucket_counts': dict(bucket_counts),
+        'admission_buckets': list(args.admission_buckets),
+        'policy_version': args.policy_version,
+        'dry_run_selection': args.dry_run_selection,
+        'selected_teleop_roots': _expand_teleop_roots(list(args.teleop_demo_paths) or ([args.demo_path] if args.mix_mode == 'mixed' else [])),
+        'selected_inference_roots': [os.path.expanduser(path) for path in args.inference_staging_paths],
+    }
+    (run_dir / 'training_manifest.json').write_text(json.dumps(manifest, indent=2, ensure_ascii=False))
+
+    with (run_dir / 'used_episodes.jsonl').open('w') as f:
+        for record in selected_records:
+            f.write(json.dumps(record, ensure_ascii=False) + '\n')
+
+
+def _select_episode_records(args: Args) -> List[Dict[str, Any]]:
+    teleop_paths = _expand_teleop_roots(list(args.teleop_demo_paths))
+    if args.mix_mode == 'mixed' and not teleop_paths:
+        teleop_paths = _expand_teleop_roots([args.demo_path])
+
+    teleop_records = _resolve_teleop_episode_paths(teleop_paths, args.max_teleop_episodes)
+    inference_records = _resolve_inference_episode_paths(
+        args.inference_staging_paths,
+        args.admission_buckets,
+        args.policy_version,
+        args.max_inference_episodes,
+    )
+
+    if args.mix_mode == 'inference_only':
+        selected_records = inference_records
+    else:
+        selected_records = teleop_records + inference_records
+
+    random.Random(args.seed).shuffle(selected_records)
+    return selected_records
+
+
+def create_visual_encoder(encoder_type: str, out_dim: int, in_channels: int = 3,
+                          pretrained: bool = True, freeze_backbone: bool = False,
+                          freeze_bn: bool = True):
+    """Create visual encoder based on type.
+
+    Args:
+        encoder_type: Type of encoder ('plain_conv', 'resnet10', etc.)
+        out_dim: Output dimension of the encoder
+        in_channels: Number of input channels (3 for RGB, 4 for RGBD)
+        pretrained: Whether to use pretrained weights (ResNet only)
+        freeze_backbone: Whether to freeze backbone weights (ResNet only)
+        freeze_bn: Whether to freeze batch norm layers (ResNet only)
+    """
+    if encoder_type == "plain_conv":
+        return PlainConv(in_channels=in_channels, out_dim=out_dim, pool_feature_map=True)
+    elif encoder_type.startswith("resnet"):
+        # ResNet only supports 3-channel input (RGB)
+        if in_channels != 3:
+            raise ValueError(
+                f"ResNet encoder only supports 3-channel RGB input, but got {in_channels} channels. "
+                f"For RGBD input, please use 'plain_conv' encoder instead."
+            )
+        return ResNetEncoder(
+            backbone_name=encoder_type,
+            out_dim=out_dim,
+            pretrained=pretrained,
+            freeze_backbone=freeze_backbone,
+            freeze_bn=freeze_bn,
+        )
+    else:
+        raise ValueError(f"Unknown encoder type: {encoder_type}")
+
+
+def create_agent(algorithm: str, action_dim: int, global_cond_dim: int, args):
+    """Create agent based on algorithm name."""
+    device = "cuda" if args.cuda else "cpu"
+    
+    if algorithm == "diffusion_policy":
+        from rlft.networks import ConditionalUnet1D
+        noise_pred_net = ConditionalUnet1D(
+            input_dim=action_dim,
+            global_cond_dim=global_cond_dim,
+            diffusion_step_embed_dim=args.diffusion_step_embed_dim,
+            down_dims=args.unet_dims,
+            n_groups=args.n_groups,
+        )
+        return DiffusionPolicyAgent(
+            noise_pred_net=noise_pred_net,
+            action_dim=action_dim,
+            obs_horizon=args.obs_horizon,
+            pred_horizon=args.pred_horizon,
+            num_diffusion_iters=args.num_diffusion_iters,
+            action_bounds=args.action_bounds,
+            device=device,
+        )
+    
+    elif algorithm == "flow_matching":
+        velocity_net = VelocityUNet1D(
+            input_dim=action_dim,
+            global_cond_dim=global_cond_dim,
+            diffusion_step_embed_dim=args.diffusion_step_embed_dim,
+            down_dims=tuple(args.unet_dims),
+            n_groups=args.n_groups,
+        )
+        return FlowMatchingAgent(
+            velocity_net=velocity_net,
+            action_dim=action_dim,
+            obs_horizon=args.obs_horizon,
+            pred_horizon=args.pred_horizon,
+            num_flow_steps=args.num_flow_steps,
+            action_bounds=args.action_bounds,
+            device=device,
+        )
+    
+    elif algorithm == "reflected_flow":
+        velocity_net = VelocityUNet1D(
+            input_dim=action_dim,
+            global_cond_dim=global_cond_dim,
+            diffusion_step_embed_dim=args.diffusion_step_embed_dim,
+            down_dims=tuple(args.unet_dims),
+            n_groups=args.n_groups,
+        )
+        return ReflectedFlowAgent(
+            velocity_net=velocity_net,
+            action_dim=action_dim,
+            obs_horizon=args.obs_horizon,
+            pred_horizon=args.pred_horizon,
+            num_flow_steps=args.num_flow_steps,
+            reflection_mode=args.reflection_mode,
+            boundary_reg_weight=args.boundary_reg_weight,
+            action_bounds=args.action_bounds,
+            device=device,
+        )
+    
+    elif algorithm == "consistency_flow":
+        velocity_net = VelocityUNet1D(
+            input_dim=action_dim,
+            global_cond_dim=global_cond_dim,
+            diffusion_step_embed_dim=args.diffusion_step_embed_dim,
+            down_dims=tuple(args.unet_dims),
+            n_groups=args.n_groups,
+        )
+        return ConsistencyFlowAgent(
+            velocity_net=velocity_net,
+            action_dim=action_dim,
+            obs_horizon=args.obs_horizon,
+            pred_horizon=args.pred_horizon,
+            num_flow_steps=args.num_flow_steps,
+            flow_weight=args.bc_weight,
+            consistency_weight=args.consistency_weight,
+            ema_decay=args.ema_decay,
+            # Consistency-specific parameters
+            cons_use_flow_t=args.cons_use_flow_t,
+            cons_full_t_range=args.cons_full_t_range,
+            cons_t_min=args.cons_t_min,
+            cons_t_max=args.cons_t_max,
+            cons_t_upper=args.cons_t_upper,
+            cons_delta_mode=args.cons_delta_mode,
+            cons_delta_min=args.cons_delta_min,
+            cons_delta_max=args.cons_delta_max,
+            cons_delta_fixed=args.cons_delta_fixed,
+            cons_delta_dynamic_max=args.cons_delta_dynamic_max,
+            cons_delta_cap=args.cons_delta_cap,
+            teacher_steps=args.cons_teacher_steps,
+            teacher_from=args.cons_teacher_from,
+            student_point=args.cons_student_point,
+            consistency_loss_space=args.cons_loss_space,
+            consistency_delta=args.cons_delta,
+            action_bounds=args.action_bounds,
+            device=device,
+        )
+    
+    elif algorithm == "shortcut_flow":
+        shortcut_velocity_net = ShortCutVelocityUNet1D(
+            input_dim=action_dim,
+            global_cond_dim=global_cond_dim,
+            diffusion_step_embed_dim=args.diffusion_step_embed_dim,
+            down_dims=tuple(args.unet_dims),
+            n_groups=args.n_groups,
+        )
+        return ShortCutFlowAgent(
+            velocity_net=shortcut_velocity_net,
+            action_dim=action_dim,
+            obs_horizon=args.obs_horizon,
+            pred_horizon=args.pred_horizon,
+            num_flow_steps=args.num_flow_steps,
+            flow_weight=args.bc_weight,
+            shortcut_weight=args.consistency_weight,
+            ema_decay=args.ema_decay,
+            # ShortCut-specific parameters
+            max_denoising_steps=args.sc_max_denoising_steps,
+            self_consistency_k=args.sc_self_consistency_k,
+            t_min=args.sc_t_min,
+            t_max=args.sc_t_max,
+            t_sampling_mode=args.sc_t_sampling_mode,
+            step_size_mode=args.sc_step_size_mode,
+            min_step_size=args.sc_min_step_size,
+            max_step_size=args.sc_max_step_size,
+            fixed_step_size=args.sc_fixed_step_size,
+            target_mode=args.sc_target_mode,
+            teacher_steps=args.sc_teacher_steps,
+            use_ema_teacher=args.sc_use_ema_teacher,
+            inference_mode=args.sc_inference_mode,
+            num_inference_steps=args.sc_num_inference_steps,
+            action_bounds=args.action_bounds,
+            device=device,
+        )
+    
+    else:
+        raise ValueError(f"Unknown algorithm: {algorithm}")
+
+
+def save_ckpt(run_name, tag, agent, ema_agent, visual_encoder, state_encoder, 
+              gripper_head, action_normalizer, optimizer=None, lr_scheduler=None,
+              ema=None, iteration=None, args=None):
+    """Save checkpoint using shared utility."""
+    from rlft.utils.checkpoint import save_checkpoint
+    save_checkpoint(
+        path=f"runs/{run_name}/checkpoints/{tag}.pt",
+        agent=agent,
+        visual_encoder=visual_encoder,
+        ema_agent=ema_agent,
+        state_encoder=state_encoder,
+        gripper_head=gripper_head,
+        action_normalizer=action_normalizer,
+        optimizer=optimizer,
+        lr_scheduler=lr_scheduler,
+        ema=ema,
+        iteration=iteration,
+        args=args,
+    )
+
+
+def main():
+    args = tyro.cli(Args)
+
+    # Generate experiment name
+    if args.exp_name is None:
+        args.exp_name = f"{args.algorithm}-{args.task_name}-stage2-seed{args.seed}"
+
+    run_name = f"{args.exp_name}__{int(time.time())}"
+
+    selected_records = _select_episode_records(args)
+    if len(selected_records) == 0:
+        raise ValueError('No episodes selected for second-stage training')
+    _write_selection_artifacts(run_name, args, selected_records)
+
+    if args.dry_run_selection:
+        print(f"Dry run selection complete: {len(selected_records)} episodes")
+        print(f"Run: {run_name}")
+        return
+
+    # Set up logging
+    if args.track:
+        wandb.init(
+            project=args.wandb_project_name,
+            entity=args.wandb_entity,
+            name=run_name,
+            config=vars(args),
+            save_code=True,
+        )
+
+    writer = SummaryWriter(f"runs/{run_name}")
+
+    # Set seeds
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    torch.backends.cudnn.deterministic = args.torch_deterministic
+
+    device = torch.device("cuda" if args.cuda and torch.cuda.is_available() else "cpu")
+
+    train_episode_paths = [record['episode_path'] for record in selected_records]
+    train_demo_path = os.path.expanduser(args.demo_path)
+    val_demo_path = os.path.expanduser(args.val_demo_path) if args.val_demo_path is not None else None
+
+    # Get data info from the first selected episode to avoid reading unrelated files in the same directory.
+    first_episode = load_carm_episode(train_episode_paths[0])
+    state_dim = get_state_dim_for_mode(args.state_mode)
+
+    # Determine action dimension placeholder (final value will follow dataset schema)
+    action_dim = 7
+    print(f"State dim: {state_dim}, Initial action dim: {action_dim}")
+    
+    # Check depth support
+    if args.include_depth:
+        raise NotImplementedError(
+            "Depth support for CARM is not yet implemented. "
+            "CARM data collection needs to save depth images first. "
+            "Please use include_depth=False for now."
+        )
+    
+    # Determine image size based on encoder type
+    if args.auto_image_size:
+        # ResNet18+ works better with 224x224, plain_conv/resnet10 with 128x128
+        if args.visual_encoder_type in ["resnet18", "resnet34", "resnet50"]:
+            target_image_size = (224, 224)
+        else:
+            target_image_size = (128, 128)
+        print(f"Auto image size: {args.visual_encoder_type} -> {target_image_size}")
+        args.target_image_size = target_image_size
+    else:
+        target_image_size = args.target_image_size
+        print(f"Manual image size: {target_image_size}")
+    
+    # Create observation processing function
+    obs_process_fn = create_carm_obs_process_fn(
+        output_format="NCHW",
+        target_size=target_image_size,
+        normalize_images=True,
+        state_mode=args.state_mode,
+    )
+    
+    # Create action normalizer
+    action_normalizer = ActionNormalizer(mode=args.action_norm_mode) if args.normalize_actions else None
+    
+    # Create dataset on CPU; tensors are moved to GPU later in encode_observations.
+    # This avoids CUDA initialization inside DataLoader worker subprocesses.
+    dataset = CARMDataset(
+        data_path=train_demo_path,
+        obs_process_fn=obs_process_fn,
+        device=torch.device("cpu"),
+        num_episodes=args.num_demos,
+        obs_horizon=args.obs_horizon,
+        pred_horizon=args.pred_horizon,
+        action_mode=args.action_mode,
+        precompute_actions=args.precompute_actions,
+        action_normalizer=action_normalizer,
+        gripper_threshold=args.gripper_threshold,
+        filter_inactive_teleop=args.filter_inactive_teleop,
+        inactive_threshold=args.inactive_threshold,
+        episode_paths=train_episode_paths,
+    )
+
+    val_dataset = None
+    val_dataloader = None
+    if val_demo_path is not None:
+        print(f"Loading validation dataset from {val_demo_path}...")
+        val_dataset = CARMDataset(
+            data_path=val_demo_path,
+            obs_process_fn=obs_process_fn,
+            device=torch.device("cpu"),
+            num_episodes=None,
+            obs_horizon=args.obs_horizon,
+            pred_horizon=args.pred_horizon,
+            action_mode=args.action_mode,
+            precompute_actions=args.precompute_actions,
+            action_normalizer=action_normalizer,
+            gripper_threshold=args.gripper_threshold,
+            fit_action_normalizer=False,
+            filter_inactive_teleop=args.filter_inactive_teleop,
+            inactive_threshold=args.inactive_threshold,
+        )
+
+    # Create dataloader
+    sampler = RandomSampler(dataset, replacement=False)
+    batch_sampler = BatchSampler(sampler, batch_size=args.batch_size, drop_last=True)
+    batch_sampler = IterationBasedBatchSampler(batch_sampler, args.total_iters)
+    train_dataloader = DataLoader(
+        dataset,
+        batch_sampler=batch_sampler,
+        num_workers=args.num_dataload_workers,
+        worker_init_fn=lambda worker_id: worker_init_fn(worker_id, base_seed=args.seed),
+        persistent_workers=(args.num_dataload_workers > 0),
+    )
+
+    if val_dataset is not None:
+        val_sampler = SequentialSampler(val_dataset)
+        val_batch_sampler = BatchSampler(val_sampler, batch_size=args.batch_size, drop_last=False)
+        val_dataloader = DataLoader(
+            val_dataset,
+            batch_sampler=val_batch_sampler,
+            num_workers=args.num_dataload_workers,
+            worker_init_fn=lambda worker_id: worker_init_fn(worker_id, base_seed=args.seed),
+            persistent_workers=(args.num_dataload_workers > 0),
+        )
+
+    # Finalize action dimension from dataset to avoid schema mismatch (v2 data is 7D ee_only)
+    action_dim = dataset.action_dim
+    print(f"Resolved action dim from dataset: {action_dim}")
+    
+    # Build visual encoder
+    # Compute input channels: 3 for RGB, 4 for RGBD
+    visual_in_channels = 4 if args.include_depth else 3
+    print(f"Visual encoder input channels: {visual_in_channels}")
+    
+    visual_encoder = create_visual_encoder(
+        encoder_type=args.visual_encoder_type,
+        out_dim=args.visual_feature_dim,
+        in_channels=visual_in_channels,
+        pretrained=args.pretrained_backbone,
+        freeze_backbone=args.freeze_backbone,
+        freeze_bn=args.freeze_bn,
+    ).to(device)
+    
+    # Build state encoder
+    if args.use_state_encoder:
+        state_encoder = StateEncoder(
+            state_dim=state_dim,
+            hidden_dim=args.state_encoder_hidden_dim,
+            out_dim=args.state_encoder_out_dim,
+        ).to(device)
+        feature_dim = args.visual_feature_dim + args.state_encoder_out_dim
+    else:
+        state_encoder = None
+        feature_dim = args.visual_feature_dim + state_dim
+    
+    obs_dim = feature_dim * args.obs_horizon
+    print(f"Feature dim: {feature_dim}, Obs dim: {obs_dim}")
+    
+    # Create agent
+    agent = create_agent(args.algorithm, action_dim, obs_dim, args).to(device)
+    ema_agent = create_agent(args.algorithm, action_dim, obs_dim, args).to(device)
+    
+    # Create gripper head
+    gripper_head = GripperHead(
+        obs_dim=obs_dim,
+        hidden_dim=args.gripper_head_hidden_dim,
+        pred_horizon=args.pred_horizon,
+    ).to(device)
+    
+    # Set up optimizer with different LRs for backbone vs rest
+    param_groups = []
+    
+    # Visual encoder params
+    if args.freeze_backbone:
+        visual_params = [p for p in visual_encoder.parameters() if p.requires_grad]
+    else:
+        visual_params = list(visual_encoder.parameters())
+    
+    if args.visual_encoder_type.startswith("resnet") and not args.freeze_backbone:
+        # Separate backbone and head parameters
+        backbone_params = [p for n, p in visual_encoder.named_parameters() if "fc" not in n]
+        head_params = [p for n, p in visual_encoder.named_parameters() if "fc" in n]
+        param_groups.append({"params": backbone_params, "lr": args.lr_backbone})
+        param_groups.append({"params": head_params, "lr": args.lr})
+    else:
+        param_groups.append({"params": visual_params, "lr": args.lr})
+    
+    # State encoder params
+    if state_encoder is not None:
+        param_groups.append({"params": state_encoder.parameters(), "lr": args.lr})
+    
+    # Agent params
+    param_groups.append({"params": agent.parameters(), "lr": args.lr})
+    
+    # Gripper head params
+    param_groups.append({"params": gripper_head.parameters(), "lr": args.lr})
+    
+    optimizer = optim.AdamW(
+        params=param_groups,
+        betas=(0.95, 0.999),
+        weight_decay=1e-6,
+    )
+    lr_scheduler = get_scheduler(
+        name="cosine",
+        optimizer=optimizer,
+        num_warmup_steps=500,
+        num_training_steps=args.total_iters,
+    )
+    
+    # EMA (only for agent parameters, matching the original implementation)
+    ema = EMAModel(parameters=agent.parameters(), power=0.75)
+    
+    # Gripper loss with class weighting
+    gripper_class_weights = torch.tensor([1.0, args.gripper_class_weight_close], device=device)
+    gripper_criterion = nn.CrossEntropyLoss(weight=gripper_class_weights)
+    
+    # Resume from checkpoint if specified
+    start_iter = 0
+    if args.resume_from is not None:
+        resume_path = os.path.expanduser(args.resume_from)
+        if not os.path.exists(resume_path):
+            raise FileNotFoundError(f"Resume checkpoint not found: {resume_path}")
+        
+        print(f"Resuming from checkpoint: {resume_path}")
+        checkpoint = torch.load(resume_path, map_location=device)
+        
+        # Load agent weights
+        agent.load_state_dict(checkpoint["agent"], strict=True)
+        print("  Loaded agent weights")
+        
+        # Load EMA agent weights
+        if "ema_agent" in checkpoint:
+            ema_agent.load_state_dict(checkpoint["ema_agent"], strict=True)
+            print("  Loaded ema_agent weights")
+        
+        # Load visual encoder weights
+        if "visual_encoder" in checkpoint:
+            visual_encoder.load_state_dict(checkpoint["visual_encoder"], strict=True)
+            print("  Loaded visual_encoder weights")
+        
+        # Load state encoder weights
+        if state_encoder is not None and "state_encoder" in checkpoint:
+            state_encoder.load_state_dict(checkpoint["state_encoder"], strict=True)
+            print("  Loaded state_encoder weights")
+        
+        # Load gripper head weights
+        if "gripper_head" in checkpoint:
+            gripper_head.load_state_dict(checkpoint["gripper_head"], strict=True)
+            print("  Loaded gripper_head weights")
+        else:
+            print("  gripper_head not in checkpoint (will train from scratch)")
+        
+        # Load EMA state
+        if "ema" in checkpoint:
+            ema.load_state_dict(checkpoint["ema"])
+            print("  Loaded EMA state")
+        
+        # Load optimizer and scheduler state
+        if args.resume_optimizer:
+            if "optimizer" in checkpoint:
+                optimizer.load_state_dict(checkpoint["optimizer"])
+                print("  Loaded optimizer state")
+            if "lr_scheduler" in checkpoint:
+                lr_scheduler.load_state_dict(checkpoint["lr_scheduler"])
+                print("  Loaded lr_scheduler state")
+        else:
+            print("  Skipped optimizer/scheduler state (resume_optimizer=False)")
+        
+        # Load action normalizer stats
+        if action_normalizer is not None and "action_normalizer" in checkpoint:
+            saved_norm = checkpoint["action_normalizer"]
+            action_normalizer.mode = saved_norm["mode"]
+            action_normalizer.stats = {
+                k: np.array(v) if isinstance(v, list) else v
+                for k, v in saved_norm["stats"].items()
+            }
+            print("  Loaded action_normalizer stats")
+        
+        # Get starting iteration
+        if "iteration" in checkpoint:
+            start_iter = checkpoint["iteration"] + 1
+            print(f"  Resuming from iteration {start_iter}")
+        
+        print(f"Resume complete!")
+    
+    def _encode_obs(obs_seq):
+        """Thin wrapper around shared encode_observations."""
+        return encode_observations(
+            obs_seq=obs_seq,
+            visual_encoder=visual_encoder,
+            include_rgb=True,
+            device=device,
+            state_encoder=state_encoder,
+            include_depth=args.include_depth,
+            flatten=False,
+        )
+
+    def _evaluate(eval_loader):
+        if eval_loader is None:
+            return None
+
+        ema.copy_to(ema_agent.parameters())
+        ema_agent.eval()
+        visual_encoder.eval()
+        gripper_head.eval()
+        if state_encoder is not None:
+            state_encoder.eval()
+
+        metrics = defaultdict(float)
+        total_count = 0
+        with torch.no_grad():
+            for batch_idx, data_batch in enumerate(eval_loader):
+                if args.eval_batches > 0 and batch_idx >= args.eval_batches:
+                    break
+
+                obs_seq = data_batch["observations"]
+                action_seq = data_batch["actions_cont"].to(device)
+                gripper_labels = data_batch["gripper_label"].to(device)
+
+                obs_features = _encode_obs(obs_seq)
+                loss_dict = ema_agent.compute_loss(obs_features=obs_features, actions=action_seq)
+                policy_loss = loss_dict["loss"] if isinstance(loss_dict, dict) else loss_dict
+
+                obs_cond = obs_features.reshape(obs_features.shape[0], -1)
+                gripper_logits = gripper_head(obs_cond)
+                gripper_loss = gripper_criterion(
+                    gripper_logits.view(-1, 2),
+                    gripper_labels.view(-1),
+                )
+                total_loss = policy_loss + args.gripper_ce_weight * gripper_loss
+
+                gripper_pred = gripper_logits.argmax(dim=-1)
+                gripper_acc = (gripper_pred == gripper_labels).float().mean()
+
+                pred_actions = ema_agent.get_action_deterministic(obs_features, num_steps=args.num_flow_steps)
+                pred_actions = pred_actions.detach()
+
+                if action_normalizer is not None:
+                    pred_np = pred_actions.cpu().numpy()
+                    gt_np = action_seq.detach().cpu().numpy()
+                    pred_flat = pred_np.reshape(-1, pred_np.shape[-1])
+                    gt_flat = gt_np.reshape(-1, gt_np.shape[-1])
+                    pred_actions = torch.from_numpy(
+                        action_normalizer.inverse_transform(pred_flat).reshape(pred_np.shape)
+                    ).to(device).float()
+                    action_seq = torch.from_numpy(
+                        action_normalizer.inverse_transform(gt_flat).reshape(gt_np.shape)
+                    ).to(device).float()
+
+                pred_gripper_cls = gripper_logits.argmax(dim=-1)
+                pred_gripper_vals = torch.where(
+                    pred_gripper_cls == 1,
+                    torch.full_like(pred_gripper_cls, args.gripper_close_val, dtype=torch.float32),
+                    torch.full_like(pred_gripper_cls, args.gripper_open_val, dtype=torch.float32),
+                )
+                gt_gripper_vals = torch.where(
+                    gripper_labels == 1,
+                    torch.full_like(gripper_labels, args.gripper_close_val, dtype=torch.float32),
+                    torch.full_like(gripper_labels, args.gripper_open_val, dtype=torch.float32),
+                )
+
+                pred_full = torch.cat([pred_actions, pred_gripper_vals.unsqueeze(-1)], dim=-1)
+                gt_full = torch.cat([action_seq, gt_gripper_vals.unsqueeze(-1)], dim=-1)
+
+                pred_1 = pred_full[:, 0, :]
+                gt_1 = gt_full[:, 0, :]
+                mae_1 = torch.mean(torch.abs(pred_1 - gt_1))
+
+                window_len = min(8, pred_full.shape[1], gt_full.shape[1])
+                mae_8 = torch.mean(torch.abs(pred_full[:, :window_len, :] - gt_full[:, :window_len, :]))
+
+                pose_mae_1 = torch.mean(torch.abs(pred_actions[:, 0, :] - action_seq[:, 0, :]))
+                pose_mae_8 = torch.mean(torch.abs(pred_actions[:, :window_len, :] - action_seq[:, :window_len, :]))
+
+                batch_size = action_seq.shape[0]
+                total_count += batch_size
+                metrics["policy_loss"] += policy_loss.item() * batch_size
+                metrics["gripper_loss"] += gripper_loss.item() * batch_size
+                metrics["total_loss"] += total_loss.item() * batch_size
+                metrics["gripper_accuracy"] += gripper_acc.item() * batch_size
+                metrics["mae_1step"] += mae_1.item() * batch_size
+                metrics["mae_8step"] += mae_8.item() * batch_size
+                metrics["pose_mae_1step"] += pose_mae_1.item() * batch_size
+                metrics["pose_mae_8step"] += pose_mae_8.item() * batch_size
+
+        ema_agent.train()
+        visual_encoder.train()
+        gripper_head.train()
+        if state_encoder is not None:
+            state_encoder.train()
+
+        if total_count == 0:
+            return None
+
+        return {k: float(v / total_count) for k, v in metrics.items()}
+    
+    # Training loop
+    agent.train()
+    visual_encoder.train()
+    gripper_head.train()
+    if state_encoder is not None:
+        state_encoder.train()
+    
+    pbar = tqdm(total=args.total_iters, initial=start_iter)
+    best_val_total_loss = float("inf")
+    no_improve_eval_count = 0
+    last_iteration = start_iter
+    
+    for iteration, data_batch in enumerate(train_dataloader):
+        iteration = iteration + start_iter
+        if iteration >= args.total_iters:
+            break
+        last_iteration = iteration
+        obs_seq = data_batch["observations"]
+        action_seq = data_batch["actions_cont"].to(device)  # Continuous actions without gripper
+        gripper_labels = data_batch["gripper_label"].to(device)  # Discrete gripper labels
+
+        obs_features = _encode_obs(obs_seq)
+        
+        # Policy loss (continuous actions)
+        loss_dict = agent.compute_loss(obs_features=obs_features, actions=action_seq)
+        policy_loss = loss_dict["loss"] if isinstance(loss_dict, dict) else loss_dict
+        
+        # Gripper classification loss
+        obs_cond = obs_features.reshape(obs_features.shape[0], -1)
+        gripper_logits = gripper_head(obs_cond)  # [B, pred_horizon, 2]
+        gripper_loss = gripper_criterion(
+            gripper_logits.view(-1, 2), 
+            gripper_labels.view(-1)
+        )
+        
+        # Total loss
+        total_loss = policy_loss + args.gripper_ce_weight * gripper_loss
+        
+        optimizer.zero_grad()
+        total_loss.backward()
+        torch.nn.utils.clip_grad_norm_(agent.parameters(), 1.0)
+        torch.nn.utils.clip_grad_norm_(visual_encoder.parameters(), 1.0)
+        torch.nn.utils.clip_grad_norm_(gripper_head.parameters(), 1.0)
+        if state_encoder is not None:
+            torch.nn.utils.clip_grad_norm_(state_encoder.parameters(), 1.0)
+        optimizer.step()
+        lr_scheduler.step()
+        
+        if hasattr(agent, "update_ema"):
+            agent.update_ema()
+        
+        # EMA update
+        ema.step(agent.parameters())
+        
+        # Logging
+        if iteration % args.log_freq == 0:
+            writer.add_scalar("losses/policy_loss", policy_loss.item(), iteration)
+            writer.add_scalar("losses/gripper_loss", gripper_loss.item(), iteration)
+            writer.add_scalar("losses/total_loss", total_loss.item(), iteration)
+            writer.add_scalar("charts/learning_rate", optimizer.param_groups[0]["lr"], iteration)
+            
+            # Gripper accuracy
+            with torch.no_grad():
+                gripper_pred = gripper_logits.argmax(dim=-1)
+                gripper_acc = (gripper_pred == gripper_labels).float().mean()
+                writer.add_scalar("metrics/gripper_accuracy", gripper_acc.item(), iteration)
+            
+            # WandB logging
+            if args.track:
+                wandb.log({
+                    "losses/policy_loss": policy_loss.item(),
+                    "losses/gripper_loss": gripper_loss.item(),
+                    "losses/total_loss": total_loss.item(),
+                    "charts/learning_rate": optimizer.param_groups[0]["lr"],
+                    "metrics/gripper_accuracy": gripper_acc.item(),
+                    "charts/iteration": iteration,
+                }, step=iteration)
+        
+        # Save checkpoint
+        if iteration > 0 and iteration % args.save_freq == 0:
+            ema.copy_to(ema_agent.parameters())
+            save_ckpt(
+                run_name, f"iter_{iteration}", 
+                agent, ema_agent, visual_encoder, state_encoder, 
+                gripper_head, action_normalizer, optimizer,
+                lr_scheduler, ema, iteration, args
+            )
+            save_ckpt(
+                run_name, "latest", 
+                agent, ema_agent, visual_encoder, state_encoder, 
+                gripper_head, action_normalizer, optimizer,
+                lr_scheduler, ema, iteration, args
+            )
+
+        if val_dataloader is not None and iteration > 0 and iteration % args.eval_freq == 0:
+            eval_metrics = _evaluate(val_dataloader)
+            if eval_metrics is not None:
+                writer.add_scalar("val/policy_loss", eval_metrics["policy_loss"], iteration)
+                writer.add_scalar("val/gripper_loss", eval_metrics["gripper_loss"], iteration)
+                writer.add_scalar("val/total_loss", eval_metrics["total_loss"], iteration)
+                writer.add_scalar("val/gripper_accuracy", eval_metrics["gripper_accuracy"], iteration)
+                writer.add_scalar("val/mae_1step", eval_metrics["mae_1step"], iteration)
+                writer.add_scalar("val/mae_8step", eval_metrics["mae_8step"], iteration)
+
+                if args.track:
+                    wandb.log({
+                        "val/policy_loss": eval_metrics["policy_loss"],
+                        "val/gripper_loss": eval_metrics["gripper_loss"],
+                        "val/total_loss": eval_metrics["total_loss"],
+                        "val/gripper_accuracy": eval_metrics["gripper_accuracy"],
+                        "val/mae_1step": eval_metrics["mae_1step"],
+                        "val/mae_8step": eval_metrics["mae_8step"],
+                        "charts/iteration": iteration,
+                    }, step=iteration)
+
+                improvement = best_val_total_loss - eval_metrics["total_loss"]
+                if improvement > args.early_stop_min_delta:
+                    best_val_total_loss = eval_metrics["total_loss"]
+                    no_improve_eval_count = 0
+                    ema.copy_to(ema_agent.parameters())
+                    save_ckpt(
+                        run_name, "best",
+                        agent, ema_agent, visual_encoder, state_encoder,
+                        gripper_head, action_normalizer, optimizer,
+                        lr_scheduler, ema, iteration, args
+                    )
+                else:
+                    no_improve_eval_count += 1
+                    if (
+                        args.early_stop_patience > 0
+                        and iteration >= args.early_stop_min_iters
+                        and no_improve_eval_count >= args.early_stop_patience
+                    ):
+                        print(
+                            f"Early stopping triggered at iter {iteration} "
+                            f"(best val/total_loss={best_val_total_loss:.6f})"
+                        )
+                        break
+        
+        pbar.update(1)
+        pbar.set_postfix({
+            "policy": f"{policy_loss.item():.4f}",
+            "gripper": f"{gripper_loss.item():.4f}",
+        })
+    
+    # Final checkpoint
+    ema.copy_to(ema_agent.parameters())
+    save_ckpt(
+        run_name, "final", 
+        agent, ema_agent, visual_encoder, state_encoder, 
+        gripper_head, action_normalizer, optimizer,
+        lr_scheduler, ema, last_iteration, args
+    )
+
+    if val_dataloader is not None:
+        final_eval_metrics = _evaluate(val_dataloader)
+        if final_eval_metrics is not None:
+            print("Final validation metrics:")
+            print(f"  total_loss: {final_eval_metrics['total_loss']:.4f}")
+            print(f"  policy_loss: {final_eval_metrics['policy_loss']:.4f}")
+            print(f"  gripper_loss: {final_eval_metrics['gripper_loss']:.4f}")
+            print(f"  gripper_accuracy: {final_eval_metrics['gripper_accuracy']:.4f}")
+            print(f"  mae_1step: {final_eval_metrics['mae_1step']:.4f}")
+            print(f"  mae_8step: {final_eval_metrics['mae_8step']:.4f}")
+
+    writer.close()
+    
+    # Close WandB
+    if args.track:
+        wandb.finish()
+    
+    print("\n" + "=" * 50)
+    print("Training completed successfully!")
+    print(f"Run: {run_name}")
+    print(f"Total iterations: {args.total_iters}")
+    print("=" * 50)
+
+
+if __name__ == "__main__":
+    main()

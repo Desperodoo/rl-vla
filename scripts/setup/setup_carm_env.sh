@@ -33,6 +33,8 @@ if [[ "$CONDA_DEFAULT_ENV" != "carm" ]]; then
         source ~/miniconda3/etc/profile.d/conda.sh
     elif [ -f ~/anaconda3/etc/profile.d/conda.sh ]; then
         source ~/anaconda3/etc/profile.d/conda.sh
+    elif [ -f ~/miniforge-pypy3/etc/profile.d/conda.sh ]; then
+        source ~/miniforge-pypy3/etc/profile.d/conda.sh
     elif [ -f /opt/conda/etc/profile.d/conda.sh ]; then
         source /opt/conda/etc/profile.d/conda.sh
     fi

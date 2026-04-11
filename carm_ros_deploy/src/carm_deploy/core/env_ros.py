@@ -264,6 +264,29 @@ class RealEnvironment:
             "gripper": qpos_joint[-1],  # 夹爪状态在 joint_state 最后一位
             "qpos": np.concatenate([qpos_joint, qpos_end], axis=0),  # 兼容旧版格式
         }
+
+    def get_state_observation(self):
+        """
+        获取仅包含机械臂状态的观测快照（无需相机）
+
+        Returns:
+            dict: 包含 stamp, qpos_joint, qpos_end, gripper, qpos
+                  如果状态不完整返回 None
+        """
+        with self.state_lock:
+            if self.end_state is None or self.joint_state is None:
+                return None
+
+            qpos_joint = self.joint_state.copy()
+            qpos_end = self.end_state.copy()
+
+        return {
+            "stamp": time.time(),
+            "qpos_joint": qpos_joint,
+            "qpos_end": qpos_end,
+            "gripper": qpos_joint[-1],
+            "qpos": np.concatenate([qpos_joint, qpos_end], axis=0),
+        }
     
     def get_last_action(self):
         """
@@ -303,6 +326,18 @@ class RealEnvironment:
             失败时返回 None
         """
         url = backend_url or f"http://{self.robot_ip}:1999/api/joystick/teleop_target"
+        try:
+            resp = self._teleop_http.get(url, timeout=0.05)
+            if resp.status_code == 200:
+                body = resp.json()
+                return body.get('data', {})
+        except requests.RequestException:
+            pass
+        return None
+
+    def get_teleop_action_v2(self, backend_url: str = None) -> Optional[dict]:
+        """从 backend 获取遥操作双通道状态（processed + raw）"""
+        url = backend_url or f"http://{self.robot_ip}:1999/api/joystick/teleop_target_v2"
         try:
             resp = self._teleop_http.get(url, timeout=0.05)
             if resp.status_code == 200:

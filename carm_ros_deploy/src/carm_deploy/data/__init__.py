@@ -7,6 +7,21 @@ CARM 数据模块
     - DatasetAnalyzer: 数据集分析器
 """
 
-from .analyze_dataset import DatasetAnalyzer
+try:
+    from .analyze_dataset import DatasetAnalyzer
+except Exception:
+    DatasetAnalyzer = None
 
-__all__ = ['DatasetAnalyzer']
+try:
+    from .teleop_bridge import TeleopShadowTransformer, TeleopSignalClient, TeleopUpperControlBridge
+except Exception:
+    TeleopShadowTransformer = None
+    TeleopSignalClient = None
+    TeleopUpperControlBridge = None
+
+__all__ = [
+    'DatasetAnalyzer',
+    'TeleopShadowTransformer',
+    'TeleopSignalClient',
+    'TeleopUpperControlBridge',
+]

@@ -3,11 +3,14 @@
   数据记录节点启动文件
   
   使用方法:
-    roslaunch carm_ros_deploy record.launch output_dir:=/path/to/data
+    roslaunch carm_deploy record.launch output_dir:=/path/to/data
     
   参数:
     output_dir: 输出目录
     teleop: 是否使用拖动示教模式
+    teleop_bridge_mode:
+      - passive_shadow: 只录制 teleop shadow / candidate 观测，不切 owner
+      - upper_control: 启用 upper bridge；是否真实接管由 upper_control_enabled 决定
 -->
 <launch>
   <!-- 输出参数 -->
@@ -53,6 +56,18 @@
   <!-- 时间线日志 -->
   <arg name="timeline_enabled" default="true"/>
   <arg name="timeline_log" default=""/>
+
+  <!-- Teleop uplift -->
+  <arg name="backend_url_v2" default=""/>
+  <arg name="events_v2_url" default=""/>
+  <arg name="teleop_bridge_mode" default="passive_shadow"/>
+  <arg name="pred_horizon" default="16"/>
+  <arg name="act_horizon" default="16"/>
+  <arg name="teleop_candidate_control_freq" default="50.0"/>
+  <arg name="teleop_signal_timeout_ms" default="150.0"/>
+  <arg name="upper_control_enabled" default="false"/>
+  <arg name="enable_teleop_sse" default="false"/>
+  <arg name="return_to_zero" default="false"/>
   
   <!-- 模式 -->
   <arg name="teleop" default="true"/>
@@ -98,6 +113,18 @@
 
     <param name="timeline_enabled" value="$(arg timeline_enabled)"/>
     <param name="timeline_log" value="$(arg timeline_log)"/>
+
+    <!-- Teleop uplift / ownership bridge -->
+    <param name="backend_url_v2" value="$(arg backend_url_v2)"/>
+    <param name="events_v2_url" value="$(arg events_v2_url)"/>
+    <param name="teleop_bridge_mode" value="$(arg teleop_bridge_mode)"/>
+    <param name="pred_horizon" value="$(arg pred_horizon)"/>
+    <param name="act_horizon" value="$(arg act_horizon)"/>
+    <param name="teleop_candidate_control_freq" value="$(arg teleop_candidate_control_freq)"/>
+    <param name="teleop_signal_timeout_ms" value="$(arg teleop_signal_timeout_ms)"/>
+    <param name="upper_control_enabled" value="$(arg upper_control_enabled)"/>
+    <param name="enable_teleop_sse" value="$(arg enable_teleop_sse)"/>
+    <param name="return_to_zero" value="$(arg return_to_zero)"/>
     
     <param name="teleop" value="$(arg teleop)"/>
     <param name="vis" value="$(arg vis)"/>

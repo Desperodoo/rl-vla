@@ -134,12 +134,16 @@ class InferenceLogger:
 
         _log_info(f"Run-info session started: run_info_{self._timestamp_suffix}.json")
 
-    def record_episode_file(self, episode_path: str):
-        """记录 canonical recorder episode 文件名。"""
+    def record_episode_file(self, episode_path: str, success: Optional[bool] = None, outcome_label: Optional[str] = None):
+        """记录 canonical recorder episode 文件名与 outcome。"""
         basename = os.path.basename(episode_path)
         episode_files = self.run_info['files'].setdefault('episode_hdf5', [])
         if basename not in episode_files:
             episode_files.append(basename)
+        if success is not None:
+            self.run_info.setdefault('summary', {})['episode_success'] = bool(success)
+        if outcome_label is not None:
+            self.run_info.setdefault('summary', {})['episode_outcome_label'] = str(outcome_label)
 
     def log_step(
         self,
@@ -206,6 +210,8 @@ class InferenceLogger:
             'safety_clips': self._safety_clips,
             'safety_clip_rate': self._safety_clips / self.step_count if self.step_count > 0 else 0,
             'safety_reason_counts': dict(self._safety_reason_counts),
+            'episode_success': self.run_info.get('summary', {}).get('episode_success'),
+            'episode_outcome_label': self.run_info.get('summary', {}).get('episode_outcome_label'),
         }
 
 

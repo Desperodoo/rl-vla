@@ -108,7 +108,7 @@ class KeyboardInterventionHandler:
         self._intervention_active = False
         
         # 录制控制回调
-        self._record_callback = None  # (action: str) -> None, action in ['start', 'stop', 'confirm', 'discard']
+        self._record_callback = None  # (action: str) -> None
         self._quit_callback = None    # () -> None
         
         # 干预事件队列 (用于日志)
@@ -133,10 +133,10 @@ class KeyboardInterventionHandler:
         
         if HAS_ROSPY:
             rospy.loginfo("KeyboardInterventionHandler started")
-            rospy.loginfo("Controls: WS=X, AD=Y, QE=Z, G=Open, H=Close, R=Record, Y/N=Save/Discard")
+            rospy.loginfo("Controls: WS=X, AD=Y, QE=Z, G=Open, H=Close, R=Record, Y/N=Save/Discard, S/F=Success/Failure")
         else:
             print("KeyboardInterventionHandler started")
-            print("Controls: WS=X, AD=Y, QE=Z, G=Open, H=Close, R=Record, Y/N=Save/Discard")
+            print("Controls: WS=X, AD=Y, QE=Z, G=Open, H=Close, R=Record, Y/N=Save/Discard, S/F=Success/Failure")
     
     def stop(self):
         """停止键盘监听"""
@@ -210,11 +210,21 @@ class KeyboardInterventionHandler:
                 if self._record_callback:
                     self._record_callback('confirm')
                 self._log_event('record', action='confirm')
-                    
+
             elif key_lower == 'n':
                 if self._record_callback:
                     self._record_callback('discard')
                 self._log_event('record', action='discard')
+
+            elif key_lower == 's':
+                if self._record_callback:
+                    self._record_callback('mark_success')
+                self._log_event('record', action='mark_success')
+
+            elif key_lower == 'f':
+                if self._record_callback:
+                    self._record_callback('mark_failure')
+                self._log_event('record', action='mark_failure')
             
             # 退出
             elif key == '\x03':  # Ctrl+C
