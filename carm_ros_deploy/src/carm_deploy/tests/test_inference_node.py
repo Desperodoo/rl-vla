@@ -220,3 +220,19 @@ class TestNodeConfigPropagation:
     def test_act_horizon_override(self):
         node = _make_node({"act_horizon": 8})
         assert node._act_horizon == 8
+
+    def test_hitl_defaults_disabled(self):
+        node = _make_node()
+        assert node.hitl_mode == "disabled"
+        assert node.hitl_enabled is False
+
+    def test_hitl_candidate_initializes_candidate_manager(self):
+        node = _make_node({"hitl_mode": "candidate"})
+        assert node.hitl_enabled is True
+        assert node.hitl_candidate_manager is not None
+
+    def test_hitl_live_initializes_owner_state(self):
+        node = _make_node({"hitl_mode": "live"})
+        assert node.hitl_enabled is True
+        assert node.hitl_live_owner_active is False
+        assert node.hitl_live_state["shared_source"] == "policy"

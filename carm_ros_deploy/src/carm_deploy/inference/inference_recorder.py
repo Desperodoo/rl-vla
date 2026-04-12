@@ -78,6 +78,11 @@ class InferenceRecorder:
         camera_topics: Optional[List[str]] = None,
         camera_names: Optional[List[str]] = None,
         primary_camera: Optional[str] = None,
+        hitl_enabled: bool = False,
+        hitl_mode: str = 'disabled',
+        hitl_signal_source: str = 'teleop_v2_processed',
+        hitl_arbitration_mode: str = 'source_select',
+        hitl_record_full_provenance: bool = True,
     ):
         """
         初始化记录器
@@ -100,6 +105,11 @@ class InferenceRecorder:
         self.camera_names = [str(name) for name in (camera_names or [])]
         self.camera_index = {name: idx for idx, name in enumerate(self.camera_names)}
         self.primary_camera = primary_camera or (self.camera_names[0] if self.camera_names else None)
+        self.hitl_enabled = bool(hitl_enabled)
+        self.hitl_mode = str(hitl_mode)
+        self.hitl_signal_source = str(hitl_signal_source)
+        self.hitl_arbitration_mode = str(hitl_arbitration_mode)
+        self.hitl_record_full_provenance = bool(hitl_record_full_provenance)
         if self.camera_topics and len(self.camera_names) != len(self.camera_topics):
             raise ValueError("normalized camera_names count must match camera_topics count")
         if self.primary_camera is not None and self.primary_camera not in self.camera_index:
@@ -135,6 +145,23 @@ class InferenceRecorder:
             # Action
             'action_model': [],      # [T, pred_horizon, action_dim] 模型输出
             'action_executed': [],   # [T, pred_horizon, action_dim] 实际执行输出
+
+            # HITL provenance
+            'action_policy_chunk': [],
+            'action_human_chunk': [],
+            'action_shared_chunk': [],
+            'action_sched_candidate': [],
+            'action_exec_candidate': [],
+            'action_human_direct_target': [],
+            'action_live_execute_target': [],
+            'hitl_human_active': [],
+            'hitl_human_valid': [],
+            'hitl_signal_age_ms': [],
+            'hitl_policy_sequence': [],
+            'hitl_human_sequence': [],
+            'hitl_shared_source': [],
+            'hitl_shared_valid_mask': [],
+            'hitl_live_execute_source': [],
         }
         self.step_count = 0
     
@@ -226,6 +253,7 @@ class InferenceRecorder:
         action_model: np.ndarray,
         action_executed: Optional[np.ndarray] = None,
         timestamp: Optional[float] = None,
+        hitl_data: Optional[Dict[str, Any]] = None,
     ) -> bool:
         """
         记录一步数据
@@ -235,6 +263,7 @@ class InferenceRecorder:
             action_model: 模型原始输出 [pred_horizon, action_dim]
             action_executed: 实际执行的 action [pred_horizon, action_dim]，None 表示与模型输出一致
             timestamp: 时间戳，None 使用当前系统时间
+            hitl_data: HITL provenance 数据
         """
         if not self.recording:
             return False
@@ -277,6 +306,49 @@ class InferenceRecorder:
             self.episode_data['action_executed'].append(action_executed.copy())
         else:
             self.episode_data['action_executed'].append(action_model.copy())
+
+        if self.hitl_enabled:
+            hitl_data = hitl_data or {}
+            zeros_chunk = np.zeros_like(action_model, dtype=np.float64)
+            zeros_step = np.zeros((action_model.shape[-1],), dtype=np.float64)
+            self.episode_data['action_policy_chunk'].append(
+                np.asarray(hitl_data.get('action_policy_chunk', action_model), dtype=np.float64)
+            )
+            self.episode_data['action_human_chunk'].append(
+                np.asarray(hitl_data.get('action_human_chunk', zeros_chunk), dtype=np.float64)
+            )
+            self.episode_data['action_shared_chunk'].append(
+                np.asarray(hitl_data.get('action_shared_chunk', action_model), dtype=np.float64)
+            )
+            self.episode_data['action_sched_candidate'].append(
+                np.asarray(hitl_data.get('action_sched_candidate', zeros_step), dtype=np.float64)
+            )
+            self.episode_data['action_exec_candidate'].append(
+                np.asarray(hitl_data.get('action_exec_candidate', zeros_step), dtype=np.float64)
+            )
+            self.episode_data['action_human_direct_target'].append(
+                np.asarray(hitl_data.get('action_human_direct_target', zeros_step), dtype=np.float64)
+            )
+            live_execute_target = hitl_data.get('action_live_execute_target')
+            if live_execute_target is None:
+                if action_executed is not None:
+                    live_execute_target = np.asarray(action_executed[0], dtype=np.float64)
+                else:
+                    live_execute_target = np.asarray(action_model[0], dtype=np.float64)
+            self.episode_data['action_live_execute_target'].append(
+                np.asarray(live_execute_target, dtype=np.float64)
+            )
+            self.episode_data['hitl_human_active'].append(bool(hitl_data.get('hitl_human_active', False)))
+            self.episode_data['hitl_human_valid'].append(bool(hitl_data.get('hitl_human_valid', False)))
+            signal_age_ms = hitl_data.get('hitl_signal_age_ms')
+            self.episode_data['hitl_signal_age_ms'].append(
+                np.nan if signal_age_ms is None else float(signal_age_ms)
+            )
+            self.episode_data['hitl_policy_sequence'].append(int(hitl_data.get('hitl_policy_sequence', self.step_count)))
+            self.episode_data['hitl_human_sequence'].append(int(hitl_data.get('hitl_human_sequence', -1)))
+            self.episode_data['hitl_shared_source'].append(int(hitl_data.get('hitl_shared_source', 0)))
+            self.episode_data['hitl_shared_valid_mask'].append(bool(hitl_data.get('hitl_shared_valid_mask', True)))
+            self.episode_data['hitl_live_execute_source'].append(int(hitl_data.get('hitl_live_execute_source', 0)))
         
         self.step_count += 1
         return True
@@ -334,6 +406,23 @@ class InferenceRecorder:
             
             action_executed = np.array(data['action_executed'])  # [T, pred_horizon, action_dim]
             f.create_dataset('action_executed', data=action_executed)
+
+            if self.hitl_enabled and self.hitl_record_full_provenance:
+                f.create_dataset('action_policy_chunk', data=np.array(data['action_policy_chunk']))
+                f.create_dataset('action_human_chunk', data=np.array(data['action_human_chunk']))
+                f.create_dataset('action_shared_chunk', data=np.array(data['action_shared_chunk']))
+                f.create_dataset('action_sched_candidate', data=np.array(data['action_sched_candidate']))
+                f.create_dataset('action_exec_candidate', data=np.array(data['action_exec_candidate']))
+                f.create_dataset('action_human_direct_target', data=np.array(data['action_human_direct_target']))
+                f.create_dataset('action_live_execute_target', data=np.array(data['action_live_execute_target']))
+                f.create_dataset('hitl_human_active', data=np.array(data['hitl_human_active'], dtype=np.bool_))
+                f.create_dataset('hitl_human_valid', data=np.array(data['hitl_human_valid'], dtype=np.bool_))
+                f.create_dataset('hitl_signal_age_ms', data=np.array(data['hitl_signal_age_ms'], dtype=np.float64))
+                f.create_dataset('hitl_policy_sequence', data=np.array(data['hitl_policy_sequence'], dtype=np.int64))
+                f.create_dataset('hitl_human_sequence', data=np.array(data['hitl_human_sequence'], dtype=np.int64))
+                f.create_dataset('hitl_shared_source', data=np.array(data['hitl_shared_source'], dtype=np.int64))
+                f.create_dataset('hitl_shared_valid_mask', data=np.array(data['hitl_shared_valid_mask'], dtype=np.bool_))
+                f.create_dataset('hitl_live_execute_source', data=np.array(data['hitl_live_execute_source'], dtype=np.int64))
             
             # 兼容旧格式: action = action_executed[:, 0, :]
             # 取每步的第一个 action 作为该步的 action
@@ -357,6 +446,11 @@ class InferenceRecorder:
             f.attrs['primary_camera'] = self.primary_camera or ''
             f.attrs['success'] = bool(success)
             f.attrs['outcome_label'] = outcome_label
+            f.attrs['hitl_enabled'] = bool(self.hitl_enabled)
+            f.attrs['hitl_mode'] = self.hitl_mode
+            f.attrs['hitl_signal_source'] = self.hitl_signal_source
+            f.attrs['hitl_arbitration_mode'] = self.hitl_arbitration_mode
+            f.attrs['hitl_live_execute_enabled'] = bool(self.hitl_mode == 'live')
         
         _log_info(
             f"Episode saved: {num_steps} steps, "

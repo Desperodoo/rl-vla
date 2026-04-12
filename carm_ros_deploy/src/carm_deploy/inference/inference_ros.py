@@ -54,6 +54,7 @@ from rlft.utils.pose_utils import (
 
 # 策略加载（从 policy_loader.py 导入）
 from inference.policy_loader import PolicyInterface, RealPolicy
+from inference.hitl_bridge import HumanChunkProposalBuilder, HitlArbitrationBridge
 from rlft.utils.model_factory import SUPPORTED_ALGORITHMS
 
 # 安全控制和日志
@@ -66,6 +67,7 @@ from core.env_ros import RealEnvironment
 from utils.trajectory_interpolator import VecTF, ActionChunkManager
 from utils.timeline_logger import TimelineLogger
 from utils.episode_keyboard import EpisodeKeyboardHandler
+from data.teleop_bridge import TeleopSignalClient
 
 
 class InferenceNode:
@@ -97,6 +99,12 @@ class InferenceNode:
         # inference_speed_scale: 推理时可选调速（独立于 teleop scale 语义）
         self.inference_speed_scale = config.get('inference_speed_scale', 1.0)
         self.control_freq = config.get('control_freq', 50)   # 默认 50Hz 对齐遥操
+        self.hitl_mode = config.get('hitl_mode', 'disabled')
+        self.hitl_enabled = self.hitl_mode != 'disabled'
+        self.hitl_signal_source = config.get('hitl_signal_source', 'teleop_v2_processed')
+        self.hitl_stale_timeout_ms = float(config.get('hitl_stale_timeout_ms', 150.0))
+        self.hitl_require_active = bool(config.get('hitl_require_active', True))
+        self.hitl_record_full_provenance = bool(config.get('hitl_record_full_provenance', True))
         
         # Action Chunk 执行模式参数
         # execution_mode: 'temporal_ensemble' (原始) 或 'receding_horizon' (标准 action chunking)
@@ -180,12 +188,60 @@ class InferenceNode:
             max_active_chunks=self.max_active_chunks,
             crossfade_steps=self.crossfade_steps,
         )
+        self.hitl_candidate_manager = None
+        if self.hitl_mode == 'candidate':
+            self.hitl_candidate_manager = ActionChunkManager(
+                temporal_factor_k=self.temporal_factor_k,
+                execution_mode=self.execution_mode,
+                max_active_chunks=self.max_active_chunks,
+                crossfade_steps=self.crossfade_steps,
+            )
         self.lock_tfs = threading.Lock()
+        self.hitl_state_lock = threading.Lock()
+        self.hitl_signal_client = None
+        self.hitl_human_builder = None
+        self.hitl_arbitration_bridge = None
+        self.hitl_policy_sequence = 0
+        self.hitl_candidate_state = {
+            'sched_action': None,
+            'exec_action': None,
+            'shared_source': 'policy',
+            'shared_source_code': 0,
+            'num_candidates': 0,
+        }
+        self.hitl_live_owner_active = False
+        self.hitl_live_last_error = None
+        self.hitl_live_state = {
+            'human_direct_target_abs': None,
+            'human_active': False,
+            'human_valid': False,
+            'human_stale': False,
+            'signal_age_ms': None,
+            'shared_source': 'policy',
+            'shared_source_code': 0,
+        }
+        if self.hitl_enabled:
+            self.hitl_signal_client = TeleopSignalClient(
+                robot_ip=config.get('robot_ip', '10.42.0.101'),
+                backend_url_v2=config.get('backend_url_v2', ''),
+                events_v2_url=config.get('events_v2_url', ''),
+                enable_sse=False,
+            )
+            self.hitl_human_builder = HumanChunkProposalBuilder(
+                pred_horizon=self._pred_horizon,
+                stale_timeout_ms=self.hitl_stale_timeout_ms,
+                require_active=self.hitl_require_active,
+            )
+            self.hitl_arbitration_bridge = HitlArbitrationBridge()
         
         rospy.loginfo(f"ActionChunkManager: mode={self.execution_mode}, "
                       f"max_active_chunks={self.max_active_chunks}, "
                       f"crossfade_steps={self.crossfade_steps}, "
                       f"truncate_at_act_horizon={self.truncate_at_act_horizon}")
+        rospy.loginfo(
+            f"HITL mode: {self.hitl_mode}, signal_source={self.hitl_signal_source}, "
+            f"stale_timeout_ms={self.hitl_stale_timeout_ms}, require_active={self.hitl_require_active}"
+        )
         
         # 控制变量
         self.running = True
@@ -268,6 +324,11 @@ class InferenceNode:
             camera_topics=self.camera_topics,
             camera_names=self.camera_names,
             primary_camera=self.primary_camera,
+            hitl_enabled=self.hitl_enabled,
+            hitl_mode=self.hitl_mode,
+            hitl_signal_source=self.hitl_signal_source,
+            hitl_arbitration_mode='source_select',
+            hitl_record_full_provenance=self.hitl_record_full_provenance,
         )
         rospy.loginfo(f"Inference recording enabled, output_dir: {record_dir}")
 
@@ -341,6 +402,12 @@ class InferenceNode:
         if hasattr(self, 'policy') and self.policy is not None:
             self.policy.reset()
             rospy.loginfo("Policy state reset")
+
+        if self.hitl_mode == 'live' and not self._activate_hitl_live_owner():
+            self.waiting_start = True
+            self.episode_paused = True
+            rospy.logerr("HITL live owner acquire failed, episode start aborted")
+            return
         
         # 最后才解除暂停，让推理线程开始工作
         self.waiting_start = False
@@ -360,6 +427,7 @@ class InferenceNode:
         """停止当前 episode，等待保存确认"""
         self.episode_paused = True
         self.pending_save = True
+        self._restore_hitl_live_owner()
         
         # 停止录制
         if self.inference_recorder:
@@ -402,6 +470,7 @@ class InferenceNode:
 
     def _finish_episode_cycle(self):
         """结束当前 episode 周期，机械臂回初始位并等待下一条。"""
+        self._restore_hitl_live_owner()
         rospy.loginfo("Returning to initial position...")
         self._reinitialize_arm()
 
@@ -524,6 +593,18 @@ class InferenceNode:
             'chunk_time_base': self.chunk_time_base,
             'desire_inference_freq': self.desire_inference_freq,
         }
+
+        hitl_config = {
+            'hitl_mode': self.hitl_mode,
+            'hitl_enabled': self.hitl_enabled,
+            'hitl_policy_version': 'hitl_inference_v1',
+            'hitl_human_signal_source': self.hitl_signal_source,
+            'hitl_arbitration_mode': 'source_select',
+            'hitl_live_execute_enabled': self.hitl_mode == 'live',
+            'hitl_stale_timeout_ms': self.hitl_stale_timeout_ms,
+            'hitl_require_active': self.hitl_require_active,
+            'hitl_record_full_provenance': self.hitl_record_full_provenance,
+        }
         
         # 安全配置
         safety_config = {
@@ -539,6 +620,7 @@ class InferenceNode:
             normalizer_config=normalizer_config,
             control_config=control_config,
             execution_config=execution_config,
+            hitl_config=hitl_config,
             safety_config=safety_config,
         )
         
@@ -582,6 +664,119 @@ class InferenceNode:
         image = rearrange(image, 'h w c -> c h w')
         
         return image
+
+    def _build_hitl_from_snapshot(self, policy_chunk_abs: np.ndarray, qpos_end: np.ndarray) -> Dict[str, Any]:
+        if not self.hitl_enabled or self.hitl_signal_client is None or self.hitl_human_builder is None:
+            return {
+                'teleop_snapshot': None,
+                'human_proposal': None,
+                'arbitration': {
+                    'shared_chunk': np.asarray(policy_chunk_abs, dtype=np.float64),
+                    'shared_source': 'policy',
+                    'shared_source_code': 0,
+                    'human_selected': False,
+                    'fallback_reason': '',
+                    'shared_valid': True,
+                },
+            }
+
+        teleop_snapshot = self.hitl_signal_client.fetch_snapshot()
+        human_proposal = self.hitl_human_builder.build(np.asarray(qpos_end, dtype=np.float64), teleop_snapshot)
+        arbitration = self.hitl_arbitration_bridge.arbitrate(policy_chunk_abs, human_proposal)
+        return {
+            'teleop_snapshot': teleop_snapshot,
+            'human_proposal': human_proposal,
+            'arbitration': arbitration,
+        }
+
+    def _activate_hitl_live_owner(self) -> bool:
+        if self.hitl_mode != 'live' or self.hitl_signal_client is None:
+            return True
+        try:
+            self.hitl_signal_client.set_control_state(False, "upper_machine", timeout_s=0.2)
+            with self.hitl_state_lock:
+                self.hitl_live_owner_active = True
+                self.hitl_live_last_error = None
+            return True
+        except Exception as exc:
+            with self.hitl_state_lock:
+                self.hitl_live_owner_active = False
+                self.hitl_live_last_error = str(exc)
+            rospy.logerr(f"Failed to acquire HITL live upper owner: {exc}")
+            return False
+
+    def _restore_hitl_live_owner(self):
+        if self.hitl_mode != 'live' or self.hitl_signal_client is None:
+            return
+        with self.hitl_state_lock:
+            had_owner = self.hitl_live_owner_active
+            self.hitl_live_owner_active = False
+        if not had_owner:
+            return
+        last_exc = None
+        for attempt in range(3):
+            try:
+                self.hitl_signal_client.set_control_state(True, "lower_machine", timeout_s=0.2)
+                with self.hitl_state_lock:
+                    self.hitl_live_last_error = None
+                return
+            except Exception as exc:
+                last_exc = exc
+                if attempt < 2:
+                    time.sleep(0.05)
+        with self.hitl_state_lock:
+            self.hitl_live_last_error = str(last_exc)
+        rospy.logerr(f"Failed to restore HITL live lower owner: {last_exc}")
+
+    def _update_hitl_live_state(self, human_proposal: Optional[Dict[str, Any]], arbitration: Dict[str, Any]):
+        direct_target = None
+        human_active = False
+        human_valid = False
+        human_stale = False
+        signal_age_ms = None
+        if human_proposal is not None:
+            processed_target_abs = human_proposal.get('processed_target_abs')
+            if processed_target_abs is not None:
+                direct_target = np.asarray(processed_target_abs, dtype=np.float64)
+            human_active = bool(human_proposal.get('human_active'))
+            human_valid = bool(human_proposal.get('human_valid'))
+            human_stale = bool(human_proposal.get('human_stale'))
+            signal_age_ms = human_proposal.get('signal_age_ms')
+        with self.hitl_state_lock:
+            self.hitl_live_state = {
+                'human_direct_target_abs': direct_target,
+                'human_active': human_active,
+                'human_valid': human_valid,
+                'human_stale': human_stale,
+                'signal_age_ms': None if signal_age_ms is None else float(signal_age_ms),
+                'shared_source': arbitration['shared_source'],
+                'shared_source_code': arbitration['shared_source_code'],
+            }
+
+    def _add_chunk_to_manager(self, manager, chunk_abs: np.ndarray, chunk_base_time: float):
+        tf = VecTF({})
+        action_interval = 1.0 / self.control_freq
+        if self.truncate_at_act_horizon:
+            num_actions_to_add = min(self._act_horizon, len(chunk_abs))
+        else:
+            num_actions_to_add = len(chunk_abs)
+
+        self.pos_lookahead_step_start_idx += 1
+        chunk_targets = []
+        for i in range(num_actions_to_add):
+            if self.pos_lookahead_step == 1:
+                target_time = chunk_base_time + i * action_interval
+                tf.append(target_time, chunk_abs[i].tolist())
+            else:
+                if self.pos_lookahead_step_start_idx % self.pos_lookahead_step == 0:
+                    target_time = chunk_base_time + i * action_interval
+                    tf.append(target_time, chunk_abs[i].tolist())
+                else:
+                    target_time = chunk_base_time + i * self.pos_lookahead_duration
+                    tf.append(target_time, chunk_abs[i].tolist())
+            chunk_targets.append(target_time)
+        chunk_id = manager.add_trajectory(tf)
+        return chunk_id, chunk_targets, action_interval, num_actions_to_add
     
     def _inference_loop(self):
         """推理线程主循环"""
@@ -792,16 +987,39 @@ class InferenceNode:
                         all_endactions.append(target_pose)
                     all_actions = np.array(all_endactions)
 
-                    # 生成 absolute target pose 语义的 recorder 快照
+                    # 生成 absolute target pose 语义的 policy chunk
                     if safety_reason_counts:
                         safety_clipped = True
-                    action_executed = all_actions.copy()
-                    action_model = np.array([
+                    policy_chunk_abs = np.array([
                         apply_relative_transform(step[rel_pose_start:rel_pose_end], qpos_end[:7], step[gripper_idx])
                         for step in debug_action_model_relative
                     ])
 
+                    hitl_bundle = self._build_hitl_from_snapshot(policy_chunk_abs, np.asarray(qpos_end, dtype=np.float64))
+                    teleop_snapshot = hitl_bundle['teleop_snapshot']
+                    human_proposal = hitl_bundle['human_proposal']
+                    arbitration = hitl_bundle['arbitration']
+                    self._update_hitl_live_state(human_proposal, arbitration)
+                    shared_chunk_abs = np.asarray(arbitration['shared_chunk'], dtype=np.float64)
+                    human_direct_target_abs = (
+                        None if human_proposal is None else np.asarray(human_proposal['processed_target_abs'], dtype=np.float64)
+                    )
+                    live_execute_target_abs = policy_chunk_abs[0].copy()
+                    if (
+                        self.hitl_mode == 'live'
+                        and arbitration['shared_source'] == 'human'
+                        and human_direct_target_abs is not None
+                    ):
+                        live_execute_target_abs = human_direct_target_abs.copy()
+
+                    action_model = policy_chunk_abs.copy()
+                    action_executed = shared_chunk_abs.copy() if self.hitl_mode == 'live' else policy_chunk_abs.copy()
+                    self.hitl_policy_sequence += 1
+
                     recorded_step = not self.record_inference_enabled
+                    with self.hitl_state_lock:
+                        sched_candidate = None if self.hitl_candidate_state.get('sched_action') is None else self.hitl_candidate_state['sched_action'].copy()
+                        exec_candidate = None if self.hitl_candidate_state.get('exec_action') is None else self.hitl_candidate_state['exec_action'].copy()
 
                     # 记录数据（如果启用采集）
                     if self.record_inference_enabled and self.inference_recorder is not None:
@@ -814,54 +1032,81 @@ class InferenceNode:
                                 action_model=action_model,
                                 action_executed=action_executed,
                                 timestamp=obs_stamp_ros,
+                                hitl_data={
+                                    'action_policy_chunk': policy_chunk_abs,
+                                    'action_human_chunk': None if human_proposal is None else human_proposal['human_chunk_proposal'],
+                                    'action_shared_chunk': shared_chunk_abs,
+                                    'action_sched_candidate': sched_candidate,
+                                    'action_exec_candidate': exec_candidate,
+                                    'action_human_direct_target': human_direct_target_abs,
+                                    'action_live_execute_target': live_execute_target_abs,
+                                    'hitl_human_active': False if human_proposal is None else human_proposal['human_active'],
+                                    'hitl_human_valid': False if human_proposal is None else human_proposal['human_valid'],
+                                    'hitl_signal_age_ms': None if human_proposal is None else human_proposal['signal_age_ms'],
+                                    'hitl_policy_sequence': self.hitl_policy_sequence,
+                                    'hitl_human_sequence': -1 if human_proposal is None else human_proposal['processed_sequence'],
+                                    'hitl_shared_source': arbitration['shared_source_code'],
+                                    'hitl_shared_valid_mask': arbitration['shared_valid'],
+                                    'hitl_live_execute_source': arbitration['shared_source_code'] if self.hitl_mode == 'live' else 0,
+                                },
                             )
 
                     # 记录第一个动作用于下一次参考
                     self.last_action = action_executed[0].copy()
                     
-                    # 创建轨迹并添加到管理器
+                    # 创建 policy 轨迹并添加到主管理器
                     obs_stamp_ros = self.latest_obs.get("stamp", None)
                     if self.chunk_time_base == 'obs_stamp' and obs_stamp_ros is not None:
                         chunk_base_time = obs_stamp_ros
                     else:
                         chunk_base_time = time.time()
-                    tf = VecTF({})
-                    
-                    # 动作执行间隔: 使用 control_freq (默认 50Hz 对齐 teleop)
-                    action_interval = 1.0 / self.control_freq
-                    
-                    # 根据 truncate_at_act_horizon 决定添加多少步动作到 chunk
-                    # 标准 action chunking: 只添加前 act_horizon 步
-                    # 旧行为: 添加所有 pred_horizon 步
-                    if self.truncate_at_act_horizon:
-                        num_actions_to_add = min(self._act_horizon, len(all_actions))
-                    else:
-                        num_actions_to_add = len(all_actions)
-                    
-                    self.pos_lookahead_step_start_idx += 1
-                    chunk_targets = []
-                    for i in range(num_actions_to_add):
-                        if self.pos_lookahead_step == 1:
-                            target_time = chunk_base_time + i * action_interval
-                            tf.append(target_time, all_actions[i].tolist())
-                        else:
-                            if self.pos_lookahead_step_start_idx % self.pos_lookahead_step == 0:
-                                target_time = chunk_base_time + i * action_interval
-                                tf.append(target_time, all_actions[i].tolist())
-                            else:
-                                target_time = chunk_base_time + i * self.pos_lookahead_duration
-                                tf.append(target_time, all_actions[i].tolist())
-
-                        chunk_targets.append(target_time)
+                    chunk_id, chunk_targets, action_interval, num_actions_to_add = self._add_chunk_to_manager(
+                        self.action_manager,
+                        action_executed,
+                        chunk_base_time,
+                    )
 
                     if self.timeline_logger is not None:
                         delta_chunk_obs = None
                         if obs_stamp_ros is not None:
                             delta_chunk_obs = chunk_base_time - obs_stamp_ros
-                        # chunk_id 在下方 add_trajectory 后获取
-                        
-                    with self.lock_tfs:
-                        chunk_id = self.action_manager.add_trajectory(tf)
+                        if teleop_snapshot is not None:
+                            self.timeline_logger.log(
+                                'hitl_signal',
+                                hitl_mode=self.hitl_mode,
+                                teleop_active=bool(teleop_snapshot.get('teleop_active')),
+                                teleop_processed_sequence=teleop_snapshot.get('processed_sequence'),
+                                teleop_raw_sequence=teleop_snapshot.get('raw_sequence'),
+                                teleop_signal_age_ms=teleop_snapshot.get('signal_age_ms'),
+                            )
+                        if human_proposal is not None:
+                            self.timeline_logger.log(
+                                'hitl_human_chunk',
+                                hitl_mode=self.hitl_mode,
+                                human_valid=bool(human_proposal['human_valid']),
+                                human_active=bool(human_proposal['human_active']),
+                                human_stale=bool(human_proposal['human_stale']),
+                                signal_age_ms=human_proposal['signal_age_ms'],
+                                processed_sequence=human_proposal['processed_sequence'],
+                                abs_reconstruction_pos_error=human_proposal['abs_reconstruction_pos_error'],
+                                abs_reconstruction_rot_error=human_proposal['abs_reconstruction_rot_error'],
+                                horizon=int(len(human_proposal['human_chunk_proposal'])),
+                            )
+                        self.timeline_logger.log(
+                            'hitl_arbitration',
+                            hitl_mode=self.hitl_mode,
+                            shared_source=arbitration['shared_source'],
+                            fallback_reason=arbitration['fallback_reason'],
+                            human_selected=bool(arbitration['human_selected']),
+                        )
+                        if self.hitl_mode == 'live':
+                            self.timeline_logger.log(
+                                'hitl_live_execute',
+                                hitl_mode=self.hitl_mode,
+                                shared_source=arbitration['shared_source'],
+                                human_direct_target_abs=None if human_direct_target_abs is None else human_direct_target_abs.tolist(),
+                                live_execute_target_abs=live_execute_target_abs.tolist(),
+                            )
                     
                     if self.timeline_logger is not None:
                         self.timeline_logger.log(
@@ -878,6 +1123,22 @@ class InferenceNode:
                             delta_chunk_obs=delta_chunk_obs,
                             chunk_targets=chunk_targets,
                         )
+                    if self.hitl_mode == 'candidate' and self.hitl_candidate_manager is not None:
+                        candidate_chunk_id, candidate_chunk_targets, _, candidate_actions_added = self._add_chunk_to_manager(
+                            self.hitl_candidate_manager,
+                            shared_chunk_abs,
+                            chunk_base_time,
+                        )
+                        if self.timeline_logger is not None:
+                            self.timeline_logger.log(
+                                'hitl_candidate_chunk',
+                                hitl_mode=self.hitl_mode,
+                                chunk_id=candidate_chunk_id,
+                                chunk_base_time=chunk_base_time,
+                                shared_source=arbitration['shared_source'],
+                                num_actions_added=candidate_actions_added,
+                                chunk_targets=candidate_chunk_targets,
+                            )
                     
                     if recorded_step:
                         # 记录步骤日志（在动作转换后，包含 raw_action 和 executed_action）
@@ -885,7 +1146,7 @@ class InferenceNode:
                             timestamp=time.time(),
                             obs=self.latest_obs,  # 包含 images, qpos_joint, qpos_end
                             raw_action=raw_action_for_log,  # 模型输出的相对位姿
-                            executed_action=all_actions[0],  # 转换后的绝对位姿/关节角度
+                            executed_action=action_executed[0],
                             inference_time=inference_time,
                             safety_clipped=safety_clipped,
                             safety_warnings=safety_events if safety_events else None,
@@ -950,10 +1211,25 @@ class InferenceNode:
                         self._control_hz_ema = 0.2 * inst_hz + 0.8 * self._control_hz_ema
             self._last_control_time = tm
 
+            execute_action = action
+            execute_source = 'policy'
+            if self.hitl_mode == 'live':
+                with self.hitl_state_lock:
+                    live_owner_active = self.hitl_live_owner_active
+                    live_state = dict(self.hitl_live_state)
+                if (
+                    live_owner_active
+                    and live_state.get('shared_source') == 'human'
+                    and live_state.get('human_valid')
+                    and live_state.get('human_direct_target_abs') is not None
+                ):
+                    execute_action = np.asarray(live_state['human_direct_target_abs'], dtype=np.float64)
+                    execute_source = 'human'
+
             # 打印夹爪下发值与频率（节流）
             grip_val = None
-            if len(action) > 0:
-                grip_val = float(action[-1])
+            if len(execute_action) > 0:
+                grip_val = float(execute_action[-1])
 
             now = time.time()
             if grip_val is not None and (now - self._last_gripper_log_time) >= 5.0:
@@ -967,13 +1243,38 @@ class InferenceNode:
             
             # 执行控制 (末端位姿模式)
             rospy.logdebug("End pose control")
-            self.env.end_control_nostep(action)
+            self.env.end_control_nostep(execute_action)
+
+            candidate_action = None
+            candidate_meta = None
+            if self.hitl_mode == 'candidate' and self.hitl_candidate_manager is not None:
+                with self.lock_tfs:
+                    candidate_action, candidate_meta = self.hitl_candidate_manager.get_fused_action_with_meta(tm)
+                with self.hitl_state_lock:
+                    self.hitl_candidate_state = {
+                        'sched_action': None if candidate_action is None else np.asarray(candidate_action, dtype=np.float64),
+                        'exec_action': None if candidate_action is None else np.asarray(candidate_action, dtype=np.float64),
+                        'shared_source': 'policy' if candidate_meta is None else 'candidate',
+                        'shared_source_code': 0,
+                        'num_candidates': 0 if candidate_meta is None else int(candidate_meta.get('num_candidates', 0)),
+                    }
+                if self.timeline_logger is not None and candidate_action is not None and (
+                    self.control_step_count % self.timeline_control_stride == 0
+                ):
+                    self.timeline_logger.log(
+                        'hitl_candidate_control',
+                        query_time=tm,
+                        t_send_sys=time.time(),
+                        num_candidates=0 if candidate_meta is None else int(candidate_meta.get('num_candidates', 0)),
+                        used_chunk_ids=[] if candidate_meta is None else candidate_meta.get('used_chunk_ids', []),
+                    )
 
             if self.timeline_logger is not None and (self.control_step_count % self.timeline_control_stride == 0):
                 self.timeline_logger.log(
                     'control',
                     query_time=tm,
                     t_send_sys=time.time(),
+                    execute_source=execute_source,
                     candidate_timestamps=meta.get('candidate_timestamps', []) if meta else [],
                     weights=meta.get('weights', []) if meta else [],
                     num_candidates=meta.get('num_candidates', 0) if meta else 0,
@@ -998,6 +1299,8 @@ class InferenceNode:
         
         if self.episode_keyboard is not None:
             self.episode_keyboard.stop()
+
+        self._restore_hitl_live_owner()
         
         # 处理未保存的录制数据
         if self.inference_recorder is not None:
@@ -1015,6 +1318,9 @@ class InferenceNode:
 
         if self.timeline_logger is not None:
             self.timeline_logger.close()
+
+        if self.hitl_signal_client is not None:
+            self.hitl_signal_client.close()
         
         self.env.shutdown()
         rospy.loginfo("InferenceNode shutdown complete")
@@ -1111,6 +1417,23 @@ def parse_args():
                         help='Control loop frequency in Hz (default: 50, aligned with joystick)')
     parser.add_argument('--gripper_hysteresis_window', type=int, default=1,
                         help='Gripper hysteresis window size for voting (default: 1 = no hysteresis)')
+
+    # HITL inference 参数
+    parser.add_argument('--hitl_mode', type=str, default='disabled',
+                        choices=['disabled', 'shadow', 'candidate', 'live'],
+                        help='Human-in-the-loop inference mode')
+    parser.add_argument('--hitl_signal_source', type=str, default='teleop_v2_processed',
+                        help='Human signal source for HITL proposal building')
+    parser.add_argument('--hitl_stale_timeout_ms', type=float, default=150.0,
+                        help='Signal stale timeout for HITL teleop snapshots')
+    parser.add_argument('--hitl_require_active', action=argparse.BooleanOptionalAction, default=True,
+                        help='Require teleop active=true before enabling human proposal')
+    parser.add_argument('--hitl_record_full_provenance', action=argparse.BooleanOptionalAction, default=True,
+                        help='Record full HITL chunk-level provenance into inference rollout HDF5')
+    parser.add_argument('--backend_url_v2', type=str, default='',
+                        help='Optional teleop_target_v2 URL override for HITL')
+    parser.add_argument('--events_v2_url', type=str, default='',
+                        help='Optional events_v2 URL override for HITL')
     
     # 安全控制参数
     parser.add_argument('--safety_config', type=str, default='',
@@ -1165,6 +1488,9 @@ def main():
         'truncate_at_act_horizon', 'act_horizon',
         # Teleop 对齐模式参数
         'teleop_scale', 'inference_speed_scale', 'control_freq', 'gripper_hysteresis_window',
+        # HITL inference 参数
+        'hitl_mode', 'hitl_signal_source', 'hitl_stale_timeout_ms', 'hitl_require_active',
+        'hitl_record_full_provenance', 'backend_url_v2', 'events_v2_url',
         # inference rollout 采集参数
         'record_inference',
         'record_dir', 'max_steps',
@@ -1243,6 +1569,9 @@ def main():
     rospy.loginfo(f"  inference_speed_scale: {config.get('inference_speed_scale', 1.0)} (runtime speed control)")
     rospy.loginfo(f"  control_freq: {config.get('control_freq', 50)}Hz")
     rospy.loginfo(f"  gripper_hysteresis_window: {config.get('gripper_hysteresis_window', 1)}")
+    rospy.loginfo(f"  hitl_mode: {config.get('hitl_mode', 'disabled')}")
+    rospy.loginfo(f"  hitl_signal_source: {config.get('hitl_signal_source', 'teleop_v2_processed')}")
+    rospy.loginfo(f"  hitl_stale_timeout_ms: {config.get('hitl_stale_timeout_ms', 150.0)}")
     rospy.loginfo("-" * 60)
     rospy.loginfo(f"  log_dir: {config['log_dir'] or '~/rl-vla/inference_logs'}")
     rospy.loginfo("-" * 60)

@@ -154,6 +154,63 @@ def test_inference_dataset_converter_uses_action_executed_schema(tmp_path):
     assert sidecar['stats']['action_source_used'] == 'action_executed[:,0,:]'
 
 
+def test_inference_recorder_writes_hitl_provenance(tmp_path):
+    recorder = InferenceRecorder(
+        output_dir=str(tmp_path),
+        pred_horizon=4,
+        action_dim=8,
+        image_size=(8, 8),
+        max_steps=16,
+        camera_topics=['/cam0'],
+        camera_names=['cam0'],
+        primary_camera='cam0',
+        hitl_enabled=True,
+        hitl_mode='candidate',
+    )
+
+    assert recorder.start_recording() is True
+    model = _make_action_chunk(offset=0.0)
+    executed = model.copy()
+    human = np.full((4, 8), 0.2, dtype=np.float32)
+    shared = np.full((4, 8), 0.3, dtype=np.float32)
+    hitl_data = {
+        'action_policy_chunk': model,
+        'action_human_chunk': human,
+        'action_shared_chunk': shared,
+        'action_sched_candidate': np.full((8,), 0.4, dtype=np.float32),
+        'action_exec_candidate': np.full((8,), 0.5, dtype=np.float32),
+        'action_human_direct_target': np.full((8,), 0.6, dtype=np.float32),
+        'action_live_execute_target': np.full((8,), 0.7, dtype=np.float32),
+        'hitl_human_active': True,
+        'hitl_human_valid': True,
+        'hitl_signal_age_ms': 12.0,
+        'hitl_policy_sequence': 3,
+        'hitl_human_sequence': 7,
+        'hitl_shared_source': 1,
+        'hitl_shared_valid_mask': True,
+        'hitl_live_execute_source': 1,
+    }
+    assert recorder.record_step(_make_obs(), model, executed, timestamp=0.0, hitl_data=hitl_data) is True
+    assert recorder.stop_recording() is True
+    path = recorder.confirm_save(success=True, outcome_label='success')
+
+    with h5py.File(path, 'r') as f:
+        assert bool(f.attrs['hitl_enabled']) is True
+        assert f.attrs['hitl_mode'] == 'candidate'
+        assert f.attrs['hitl_arbitration_mode'] == 'source_select'
+        np.testing.assert_allclose(f['action_policy_chunk'][0], model)
+        np.testing.assert_allclose(f['action_human_chunk'][0], human)
+        np.testing.assert_allclose(f['action_shared_chunk'][0], shared)
+        np.testing.assert_allclose(f['action_sched_candidate'][0], np.full((8,), 0.4))
+        np.testing.assert_allclose(f['action_exec_candidate'][0], np.full((8,), 0.5))
+        np.testing.assert_allclose(f['action_human_direct_target'][0], np.full((8,), 0.6))
+        np.testing.assert_allclose(f['action_live_execute_target'][0], np.full((8,), 0.7))
+        assert bool(f['hitl_human_active'][0]) is True
+        assert bool(f['hitl_human_valid'][0]) is True
+        assert int(f['hitl_shared_source'][0]) == 1
+        assert int(f['hitl_live_execute_source'][0]) == 1
+
+
 def test_convert_directory_skips_old_incompatible_rollout(tmp_path):
     input_dir = tmp_path / 'input'
     input_dir.mkdir()

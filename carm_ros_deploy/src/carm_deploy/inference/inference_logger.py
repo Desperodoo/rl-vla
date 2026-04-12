@@ -57,6 +57,7 @@ class InferenceLogger:
             'normalizer': {},
             'control': {},
             'execution': {},
+            'hitl': {},
             'safety': {},
             'files': {
                 'episode_hdf5': [],
@@ -83,6 +84,7 @@ class InferenceLogger:
         normalizer_config: Dict = None,
         control_config: Dict = None,
         execution_config: Dict = None,
+        hitl_config: Dict = None,
         safety_config: Dict = None,
     ):
         """设置运行信息与配置快照。"""
@@ -100,6 +102,8 @@ class InferenceLogger:
             self.run_info['control'].update(control_config)
         if execution_config:
             self.run_info['execution'].update(execution_config)
+        if hitl_config:
+            self.run_info['hitl'].update(hitl_config)
         if safety_config:
             self.run_info['safety'].update(safety_config)
 
