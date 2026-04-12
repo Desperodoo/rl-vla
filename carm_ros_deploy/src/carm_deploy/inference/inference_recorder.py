@@ -32,6 +32,7 @@ import glob
 import os
 import time
 import json
+import threading
 import numpy as np
 import h5py
 from datetime import datetime
@@ -115,6 +116,7 @@ class InferenceRecorder:
         if self.primary_camera is not None and self.primary_camera not in self.camera_index:
             raise ValueError(f"normalized primary_camera '{self.primary_camera}' not found in camera_names")
         self.primary_camera_idx = self.camera_index[self.primary_camera] if self.primary_camera is not None else 0
+        self._lock = threading.RLock()
         
         # 状态
         self.recording = False
@@ -153,17 +155,46 @@ class InferenceRecorder:
             'action_sched_candidate': [],
             'action_exec_candidate': [],
             'action_human_direct_target': [],
+            'action_human_sched_target': [],
+            'action_human_exec_target': [],
             'action_live_execute_target': [],
             'hitl_human_active': [],
             'hitl_human_valid': [],
             'hitl_signal_age_ms': [],
+            'hitl_human_history_count': [],
+            'hitl_human_history_span_ms': [],
+            'hitl_human_history_usable': [],
+            'hitl_human_rollout_step_count': [],
+            'hitl_human_rollout_dt_ms': [],
+            'hitl_human_linear_velocity': [],
+            'hitl_human_angular_velocity': [],
+            'hitl_human_gripper_velocity': [],
             'hitl_policy_sequence': [],
             'hitl_human_sequence': [],
             'hitl_shared_source': [],
             'hitl_shared_valid_mask': [],
             'hitl_live_execute_source': [],
         }
+        self.control_data = {
+            'timestamps': [],
+            't_send_sys': [],
+            'execute_source': [],
+            'human_execute_mode': [],
+            'live_execute_target': [],
+            'human_direct_target': [],
+            'human_sched_target': [],
+            'human_exec_target': [],
+            'shared_source': [],
+        }
         self.step_count = 0
+
+    @staticmethod
+    def _copy_pending_value(value):
+        if isinstance(value, list):
+            return value.copy()
+        if isinstance(value, dict):
+            return {k: InferenceRecorder._copy_pending_value(v) for k, v in value.items()}
+        return value
     
     def start_recording(self) -> bool:
         """
@@ -172,17 +203,18 @@ class InferenceRecorder:
         Returns:
             是否成功开始
         """
-        if self.recording:
-            _log_warn("Already recording")
-            return False
-        
-        if self.pending_save:
-            _log_warn("Please confirm save first (y/n)")
-            return False
-        
-        self.recording = True
-        self._reset_buffer()
-        self.episode_count += 1
+        with self._lock:
+            if self.recording:
+                _log_warn("Already recording")
+                return False
+            
+            if self.pending_save:
+                _log_warn("Please confirm save first (y/n)")
+                return False
+            
+            self.recording = True
+            self._reset_buffer()
+            self.episode_count += 1
         
         _log_info(f"Recording started - Episode {self.episode_count}")
         return True
@@ -194,21 +226,24 @@ class InferenceRecorder:
         Returns:
             是否有数据等待保存
         """
-        if not self.recording:
-            _log_warn("Not recording")
-            return False
-        
-        self.recording = False
-        _log_info(f"Recording stopped - {self.step_count} steps collected")
-        
-        if self.step_count == 0:
-            _log_warn("No data recorded, nothing to save")
-            return False
-        
-        # 保存到待确认状态
-        self.pending_data = {k: v.copy() if isinstance(v, list) else v 
-                           for k, v in self.episode_data.items()}
-        self.pending_save = True
+        with self._lock:
+            if not self.recording:
+                _log_warn("Not recording")
+                return False
+            
+            self.recording = False
+            _log_info(f"Recording stopped - {self.step_count} steps collected")
+            
+            if self.step_count == 0:
+                _log_warn("No data recorded, nothing to save")
+                return False
+            
+            # 保存到待确认状态
+            self.pending_data = {
+                'episode_data': self._copy_pending_value(self.episode_data),
+                'control_data': self._copy_pending_value(self.control_data),
+            }
+            self.pending_save = True
         
         _log_info("=" * 50)
         _log_info(f"Episode {self.episode_count}: {self.step_count} steps")
@@ -228,24 +263,66 @@ class InferenceRecorder:
         Returns:
             保存的文件路径，如果没有数据返回 None
         """
-        if not self.pending_save or self.pending_data is None:
-            _log_warn("No pending data to save")
-            return None
+        with self._lock:
+            if not self.pending_save or self.pending_data is None:
+                _log_warn("No pending data to save")
+                return None
 
-        filepath = self._do_save(success=success, outcome_label=outcome_label)
-        self.pending_save = False
-        self.pending_data = None
+            filepath = self._do_save(success=success, outcome_label=outcome_label)
+            self.pending_save = False
+            self.pending_data = None
 
-        return filepath
+            return filepath
     
     def discard(self):
         """丢弃当前待保存的 episode"""
-        if not self.pending_save:
-            return
-        
-        _log_info("Episode discarded")
-        self.pending_save = False
-        self.pending_data = None
+        with self._lock:
+            if not self.pending_save:
+                return
+            
+            _log_info("Episode discarded")
+            self.pending_save = False
+            self.pending_data = None
+
+    def record_control_step(
+        self,
+        *,
+        query_time: float,
+        t_send_sys: Optional[float] = None,
+        execute_source: str = 'policy',
+        human_execute_mode: Optional[str] = None,
+        live_execute_target: Optional[np.ndarray] = None,
+        human_direct_target: Optional[np.ndarray] = None,
+        human_sched_target: Optional[np.ndarray] = None,
+        human_exec_target: Optional[np.ndarray] = None,
+        shared_source: Optional[str] = None,
+    ) -> bool:
+        """Record control-loop aligned provenance."""
+        with self._lock:
+            if not self.recording:
+                return False
+
+            zeros_step = np.zeros((self.action_dim,), dtype=np.float64)
+            self.control_data['timestamps'].append(float(query_time))
+            self.control_data['t_send_sys'].append(
+                float(time.time() if t_send_sys is None else t_send_sys)
+            )
+            self.control_data['execute_source'].append(str(execute_source or 'policy'))
+            self.control_data['human_execute_mode'].append('' if human_execute_mode is None else str(human_execute_mode))
+            self.control_data['live_execute_target'].append(
+                np.asarray(zeros_step if live_execute_target is None else live_execute_target, dtype=np.float64)
+            )
+            self.control_data['human_direct_target'].append(
+                np.asarray(zeros_step if human_direct_target is None else human_direct_target, dtype=np.float64)
+            )
+            self.control_data['human_sched_target'].append(
+                np.asarray(zeros_step if human_sched_target is None else human_sched_target, dtype=np.float64)
+            )
+            self.control_data['human_exec_target'].append(
+                np.asarray(zeros_step if human_exec_target is None else human_exec_target, dtype=np.float64)
+            )
+            self.control_data['shared_source'].append('' if shared_source is None else str(shared_source))
+            return True
     
     def record_step(
         self,
@@ -265,100 +342,134 @@ class InferenceRecorder:
             timestamp: 时间戳，None 使用当前系统时间
             hitl_data: HITL provenance 数据
         """
-        if not self.recording:
-            return False
-        
-        if self.step_count >= self.max_steps:
-            _log_warn(f"Reached max steps ({self.max_steps}), stopping recording")
-            self.stop_recording()
-            return False
-        
-        # 时间戳
-        if timestamp is None:
-            timestamp = time.time()
+        with self._lock:
+            if not self.recording:
+                return False
+            
+            if self.step_count >= self.max_steps:
+                _log_warn(f"Reached max steps ({self.max_steps}), stopping recording")
+                self.stop_recording()
+                return False
+            
+            # 时间戳
+            if timestamp is None:
+                timestamp = time.time()
+            obs_images = obs['images']
+            # 观测
+            if len(obs_images) == 0:
+                raise ValueError('obs["images"] is empty')
+            if self.primary_camera_idx >= len(obs_images):
+                _log_warn(
+                    f"Primary camera index {self.primary_camera_idx} out of range, fallback to index 0 (available={len(obs_images)})"
+                )
+                primary_img = obs_images[0]
+            else:
+                primary_img = obs_images[self.primary_camera_idx]
+            self.episode_data['images'].append(primary_img)  # 兼容字段：主视角
 
-        obs_images = obs['images']
-        # 观测
-        if len(obs_images) == 0:
-            raise ValueError('obs["images"] is empty')
-        if self.primary_camera_idx >= len(obs_images):
-            _log_warn(
-                f"Primary camera index {self.primary_camera_idx} out of range, fallback to index 0 (available={len(obs_images)})"
-            )
-            primary_img = obs_images[0]
-        else:
-            primary_img = obs_images[self.primary_camera_idx]
-        self.episode_data['images'].append(primary_img)  # 兼容字段：主视角
+            for camera_name, camera_idx in self.camera_index.items():
+                if camera_idx < len(obs_images):
+                    self.episode_data['images_by_camera'][camera_name].append(obs_images[camera_idx])
+            self.episode_data['qpos_joint'].append(np.array(obs['qpos_joint']))
+            self.episode_data['qpos_end'].append(np.array(obs['qpos_end']))
+            self.episode_data['qpos'].append(np.array(obs['qpos']))
+            self.episode_data['gripper'].append(float(obs['gripper']))
+            self.episode_data['timestamps'].append(timestamp)
+            
+            # Action
+            self.episode_data['action_model'].append(action_model.copy())
+            
+            if action_executed is not None:
+                self.episode_data['action_executed'].append(action_executed.copy())
+            else:
+                self.episode_data['action_executed'].append(action_model.copy())
 
-        for camera_name, camera_idx in self.camera_index.items():
-            if camera_idx < len(obs_images):
-                self.episode_data['images_by_camera'][camera_name].append(obs_images[camera_idx])
-        self.episode_data['qpos_joint'].append(np.array(obs['qpos_joint']))
-        self.episode_data['qpos_end'].append(np.array(obs['qpos_end']))
-        self.episode_data['qpos'].append(np.array(obs['qpos']))
-        self.episode_data['gripper'].append(float(obs['gripper']))
-        self.episode_data['timestamps'].append(timestamp)
-        
-        # Action
-        self.episode_data['action_model'].append(action_model.copy())
-        
-        if action_executed is not None:
-            self.episode_data['action_executed'].append(action_executed.copy())
-        else:
-            self.episode_data['action_executed'].append(action_model.copy())
-
-        if self.hitl_enabled:
-            hitl_data = hitl_data or {}
-            zeros_chunk = np.zeros_like(action_model, dtype=np.float64)
-            zeros_step = np.zeros((action_model.shape[-1],), dtype=np.float64)
-            self.episode_data['action_policy_chunk'].append(
-                np.asarray(hitl_data.get('action_policy_chunk', action_model), dtype=np.float64)
-            )
-            self.episode_data['action_human_chunk'].append(
-                np.asarray(hitl_data.get('action_human_chunk', zeros_chunk), dtype=np.float64)
-            )
-            self.episode_data['action_shared_chunk'].append(
-                np.asarray(hitl_data.get('action_shared_chunk', action_model), dtype=np.float64)
-            )
-            self.episode_data['action_sched_candidate'].append(
-                np.asarray(hitl_data.get('action_sched_candidate', zeros_step), dtype=np.float64)
-            )
-            self.episode_data['action_exec_candidate'].append(
-                np.asarray(hitl_data.get('action_exec_candidate', zeros_step), dtype=np.float64)
-            )
-            self.episode_data['action_human_direct_target'].append(
-                np.asarray(hitl_data.get('action_human_direct_target', zeros_step), dtype=np.float64)
-            )
-            live_execute_target = hitl_data.get('action_live_execute_target')
-            if live_execute_target is None:
-                if action_executed is not None:
-                    live_execute_target = np.asarray(action_executed[0], dtype=np.float64)
-                else:
-                    live_execute_target = np.asarray(action_model[0], dtype=np.float64)
-            self.episode_data['action_live_execute_target'].append(
-                np.asarray(live_execute_target, dtype=np.float64)
-            )
-            self.episode_data['hitl_human_active'].append(bool(hitl_data.get('hitl_human_active', False)))
-            self.episode_data['hitl_human_valid'].append(bool(hitl_data.get('hitl_human_valid', False)))
-            signal_age_ms = hitl_data.get('hitl_signal_age_ms')
-            self.episode_data['hitl_signal_age_ms'].append(
-                np.nan if signal_age_ms is None else float(signal_age_ms)
-            )
-            self.episode_data['hitl_policy_sequence'].append(int(hitl_data.get('hitl_policy_sequence', self.step_count)))
-            self.episode_data['hitl_human_sequence'].append(int(hitl_data.get('hitl_human_sequence', -1)))
-            self.episode_data['hitl_shared_source'].append(int(hitl_data.get('hitl_shared_source', 0)))
-            self.episode_data['hitl_shared_valid_mask'].append(bool(hitl_data.get('hitl_shared_valid_mask', True)))
-            self.episode_data['hitl_live_execute_source'].append(int(hitl_data.get('hitl_live_execute_source', 0)))
-        
-        self.step_count += 1
-        return True
+            if self.hitl_enabled:
+                hitl_data = hitl_data or {}
+                zeros_chunk = np.zeros_like(action_model, dtype=np.float64)
+                zeros_step = np.zeros((action_model.shape[-1],), dtype=np.float64)
+                self.episode_data['action_policy_chunk'].append(
+                    np.asarray(hitl_data.get('action_policy_chunk', action_model), dtype=np.float64)
+                )
+                self.episode_data['action_human_chunk'].append(
+                    np.asarray(hitl_data.get('action_human_chunk', zeros_chunk), dtype=np.float64)
+                )
+                self.episode_data['action_shared_chunk'].append(
+                    np.asarray(hitl_data.get('action_shared_chunk', action_model), dtype=np.float64)
+                )
+                self.episode_data['action_sched_candidate'].append(
+                    np.asarray(hitl_data.get('action_sched_candidate', zeros_step), dtype=np.float64)
+                )
+                self.episode_data['action_exec_candidate'].append(
+                    np.asarray(hitl_data.get('action_exec_candidate', zeros_step), dtype=np.float64)
+                )
+                self.episode_data['action_human_direct_target'].append(
+                    np.asarray(hitl_data.get('action_human_direct_target', zeros_step), dtype=np.float64)
+                )
+                human_sched_target = hitl_data.get('action_human_sched_target')
+                if human_sched_target is None:
+                    human_sched_target = zeros_step
+                self.episode_data['action_human_sched_target'].append(
+                    np.asarray(human_sched_target, dtype=np.float64)
+                )
+                human_exec_target = hitl_data.get('action_human_exec_target')
+                if human_exec_target is None:
+                    human_exec_target = zeros_step
+                self.episode_data['action_human_exec_target'].append(
+                    np.asarray(human_exec_target, dtype=np.float64)
+                )
+                live_execute_target = hitl_data.get('action_live_execute_target')
+                if live_execute_target is None:
+                    if action_executed is not None:
+                        live_execute_target = np.asarray(action_executed[0], dtype=np.float64)
+                    else:
+                        live_execute_target = np.asarray(action_model[0], dtype=np.float64)
+                self.episode_data['action_live_execute_target'].append(
+                    np.asarray(live_execute_target, dtype=np.float64)
+                )
+                self.episode_data['hitl_human_active'].append(bool(hitl_data.get('hitl_human_active', False)))
+                self.episode_data['hitl_human_valid'].append(bool(hitl_data.get('hitl_human_valid', False)))
+                signal_age_ms = hitl_data.get('hitl_signal_age_ms')
+                self.episode_data['hitl_signal_age_ms'].append(
+                    np.nan if signal_age_ms is None else float(signal_age_ms)
+                )
+                self.episode_data['hitl_human_history_count'].append(int(hitl_data.get('hitl_human_history_count', 0)))
+                history_span_ms = hitl_data.get('hitl_human_history_span_ms')
+                self.episode_data['hitl_human_history_span_ms'].append(
+                    np.nan if history_span_ms is None else float(history_span_ms)
+                )
+                self.episode_data['hitl_human_history_usable'].append(bool(hitl_data.get('hitl_human_history_usable', False)))
+                self.episode_data['hitl_human_rollout_step_count'].append(int(hitl_data.get('hitl_human_rollout_step_count', 0)))
+                rollout_dt_ms = hitl_data.get('hitl_human_rollout_dt_ms')
+                self.episode_data['hitl_human_rollout_dt_ms'].append(
+                    np.nan if rollout_dt_ms is None else float(rollout_dt_ms)
+                )
+                self.episode_data['hitl_human_linear_velocity'].append(
+                    np.asarray(hitl_data.get('hitl_human_linear_velocity', np.zeros((3,), dtype=np.float64)), dtype=np.float64)
+                )
+                self.episode_data['hitl_human_angular_velocity'].append(
+                    np.asarray(hitl_data.get('hitl_human_angular_velocity', np.zeros((3,), dtype=np.float64)), dtype=np.float64)
+                )
+                gripper_velocity = hitl_data.get('hitl_human_gripper_velocity')
+                self.episode_data['hitl_human_gripper_velocity'].append(
+                    np.nan if gripper_velocity is None else float(gripper_velocity)
+                )
+                self.episode_data['hitl_policy_sequence'].append(int(hitl_data.get('hitl_policy_sequence', self.step_count)))
+                self.episode_data['hitl_human_sequence'].append(int(hitl_data.get('hitl_human_sequence', -1)))
+                self.episode_data['hitl_shared_source'].append(int(hitl_data.get('hitl_shared_source', 0)))
+                self.episode_data['hitl_shared_valid_mask'].append(bool(hitl_data.get('hitl_shared_valid_mask', True)))
+                self.episode_data['hitl_live_execute_source'].append(int(hitl_data.get('hitl_live_execute_source', 0)))
+            
+            self.step_count += 1
+            return True
     
     def _do_save(self, success: bool, outcome_label: Optional[str] = None) -> str:
         """实际执行保存"""
         if self.pending_data is None:
             return None
         
-        data = self.pending_data
+        data = self.pending_data['episode_data']
+        control_data = self.pending_data.get('control_data', {})
         outcome_label = outcome_label or ('success' if success else 'failure')
         
         # 生成文件名
@@ -414,15 +525,35 @@ class InferenceRecorder:
                 f.create_dataset('action_sched_candidate', data=np.array(data['action_sched_candidate']))
                 f.create_dataset('action_exec_candidate', data=np.array(data['action_exec_candidate']))
                 f.create_dataset('action_human_direct_target', data=np.array(data['action_human_direct_target']))
+                f.create_dataset('action_human_sched_target', data=np.array(data['action_human_sched_target']))
+                f.create_dataset('action_human_exec_target', data=np.array(data['action_human_exec_target']))
                 f.create_dataset('action_live_execute_target', data=np.array(data['action_live_execute_target']))
                 f.create_dataset('hitl_human_active', data=np.array(data['hitl_human_active'], dtype=np.bool_))
                 f.create_dataset('hitl_human_valid', data=np.array(data['hitl_human_valid'], dtype=np.bool_))
                 f.create_dataset('hitl_signal_age_ms', data=np.array(data['hitl_signal_age_ms'], dtype=np.float64))
+                f.create_dataset('hitl_human_history_count', data=np.array(data['hitl_human_history_count'], dtype=np.int64))
+                f.create_dataset('hitl_human_history_span_ms', data=np.array(data['hitl_human_history_span_ms'], dtype=np.float64))
+                f.create_dataset('hitl_human_history_usable', data=np.array(data['hitl_human_history_usable'], dtype=np.bool_))
+                f.create_dataset('hitl_human_rollout_step_count', data=np.array(data['hitl_human_rollout_step_count'], dtype=np.int64))
+                f.create_dataset('hitl_human_rollout_dt_ms', data=np.array(data['hitl_human_rollout_dt_ms'], dtype=np.float64))
+                f.create_dataset('hitl_human_linear_velocity', data=np.array(data['hitl_human_linear_velocity'], dtype=np.float64))
+                f.create_dataset('hitl_human_angular_velocity', data=np.array(data['hitl_human_angular_velocity'], dtype=np.float64))
+                f.create_dataset('hitl_human_gripper_velocity', data=np.array(data['hitl_human_gripper_velocity'], dtype=np.float64))
                 f.create_dataset('hitl_policy_sequence', data=np.array(data['hitl_policy_sequence'], dtype=np.int64))
                 f.create_dataset('hitl_human_sequence', data=np.array(data['hitl_human_sequence'], dtype=np.int64))
                 f.create_dataset('hitl_shared_source', data=np.array(data['hitl_shared_source'], dtype=np.int64))
                 f.create_dataset('hitl_shared_valid_mask', data=np.array(data['hitl_shared_valid_mask'], dtype=np.bool_))
                 f.create_dataset('hitl_live_execute_source', data=np.array(data['hitl_live_execute_source'], dtype=np.int64))
+                control_grp = f.create_group('control_provenance')
+                control_grp.create_dataset('timestamps', data=np.array(control_data.get('timestamps', []), dtype=np.float64))
+                control_grp.create_dataset('t_send_sys', data=np.array(control_data.get('t_send_sys', []), dtype=np.float64))
+                control_grp.create_dataset('execute_source', data=np.array(control_data.get('execute_source', []), dtype=h5py.string_dtype(encoding='utf-8')))
+                control_grp.create_dataset('human_execute_mode', data=np.array(control_data.get('human_execute_mode', []), dtype=h5py.string_dtype(encoding='utf-8')))
+                control_grp.create_dataset('live_execute_target', data=np.array(control_data.get('live_execute_target', []), dtype=np.float64))
+                control_grp.create_dataset('human_direct_target', data=np.array(control_data.get('human_direct_target', []), dtype=np.float64))
+                control_grp.create_dataset('human_sched_target', data=np.array(control_data.get('human_sched_target', []), dtype=np.float64))
+                control_grp.create_dataset('human_exec_target', data=np.array(control_data.get('human_exec_target', []), dtype=np.float64))
+                control_grp.create_dataset('shared_source', data=np.array(control_data.get('shared_source', []), dtype=h5py.string_dtype(encoding='utf-8')))
             
             # 兼容旧格式: action = action_executed[:, 0, :]
             # 取每步的第一个 action 作为该步的 action
@@ -451,6 +582,8 @@ class InferenceRecorder:
             f.attrs['hitl_signal_source'] = self.hitl_signal_source
             f.attrs['hitl_arbitration_mode'] = self.hitl_arbitration_mode
             f.attrs['hitl_live_execute_enabled'] = bool(self.hitl_mode == 'live')
+            f.attrs['control_provenance_aligned'] = bool(self.hitl_enabled and self.hitl_record_full_provenance)
+            f.attrs['num_control_steps'] = int(len(control_data.get('timestamps', [])))
         
         _log_info(
             f"Episode saved: {num_steps} steps, "

@@ -71,11 +71,21 @@ class RealEnvironment:
         self.skip_init_confirm = config.get('skip_init_confirm', False)  # 跳过初始化确认
         self.return_to_zero = config.get('return_to_zero', True)  # 退出时回到零位(关节角度全为0)
         
-        # 速度限制: 最大速度不超过 3 (0-10 范围)
-        MAX_SAFE_SPEED = 3.0
-        self.init_speed = min(config.get('init_speed', 3.0), MAX_SAFE_SPEED)
-        if config.get('init_speed', 3.0) > MAX_SAFE_SPEED:
-            rospy.logwarn(f"⚠️  速度限制: init_speed 从 {config.get('init_speed')} 降至 {MAX_SAFE_SPEED}")
+        # 速度语义拆分为：
+        # - init_speed: 初始化/回位等大动作的速度
+        # - normal_speed_level: 运行阶段与退出恢复后的默认速度
+        self.init_speed = float(config.get('init_speed', 2.0))
+        self.normal_speed_level = float(config.get('normal_speed_level', 10.0))
+        for key, value in (
+            ('init_speed', self.init_speed),
+            ('normal_speed_level', self.normal_speed_level),
+        ):
+            if value < 0.0:
+                rospy.logwarn(f"⚠️  {key} 从 {value} 提升到 0.0")
+            if value > 10.0:
+                rospy.logwarn(f"⚠️  {key} 从 {value} 限制到 10.0")
+        self.init_speed = min(max(self.init_speed, 0.0), 10.0)
+        self.normal_speed_level = min(max(self.normal_speed_level, 0.0), 10.0)
         
         # backend 请求显式禁用环境代理，避免 10.42.x.x 内网地址被 http_proxy/https_proxy 误转发
         self._teleop_http = requests.Session()
@@ -182,9 +192,9 @@ class RealEnvironment:
         self.arm.move_pose(self.arm_init_pose)
         time.sleep(0.5)
         
-        # 恢复默认速度 (最大不超过 3)
-        self.arm.set_speed_level(3.0)
-        rospy.loginfo("Arm position initialized, speed set to 3.0")
+        # 恢复运行期默认速度，对齐 teleop 正常控制
+        self.arm.set_speed_level(self.normal_speed_level)
+        rospy.loginfo(f"Arm position initialized, speed restored to {self.normal_speed_level}")
     
     def _arm_status_thread(self):
         """机械臂状态更新线程"""
@@ -443,6 +453,8 @@ class RealEnvironment:
                     self.arm.set_gripper(self.arm_init_gripper, self.tau)
                 
                 time.sleep(0.5)
+                # 恢复运行期默认速度，避免 lower-machine teleop 延续慢速档位
+                self.arm.set_speed_level(self.normal_speed_level)
                 rospy.loginfo("Returned to position")
             except Exception as e:
                 rospy.logwarn(f"Error returning to position: {e}")
@@ -467,6 +479,8 @@ def create_environment_from_args(args):
         'robot_tau': getattr(args, 'robot_tau', 10.0),
         'arm_init_pose': getattr(args, 'arm_init_pose', [0.26, -0.02, 0.22, 1, 0, 0, 0]),
         'arm_init_gripper': getattr(args, 'arm_init_gripper', 0.05),
+        'init_speed': getattr(args, 'init_speed', 2.0),
+        'normal_speed_level': getattr(args, 'normal_speed_level', 10.0),
         'camera_topics': normalize_camera_topics(getattr(args, 'camera_topics', None)),
         'sync_slop': float(getattr(args, 'sync_slop', DEFAULT_SYNC_SLOP)),
         'vis': getattr(args, 'vis', False),

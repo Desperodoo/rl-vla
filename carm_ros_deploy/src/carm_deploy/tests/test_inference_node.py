@@ -225,6 +225,7 @@ class TestNodeConfigPropagation:
         node = _make_node()
         assert node.hitl_mode == "disabled"
         assert node.hitl_enabled is False
+        assert node.hitl_human_execute_mode == "direct"
 
     def test_hitl_candidate_initializes_candidate_manager(self):
         node = _make_node({"hitl_mode": "candidate"})
@@ -236,3 +237,8 @@ class TestNodeConfigPropagation:
         assert node.hitl_enabled is True
         assert node.hitl_live_owner_active is False
         assert node.hitl_live_state["shared_source"] == "policy"
+
+    def test_hitl_human_execute_mode_configurable(self):
+        node = _make_node({"hitl_mode": "live", "hitl_human_execute_mode": "scheduled"})
+        assert node.hitl_human_execute_mode == "scheduled"
+        assert node.hitl_live_state["human_execute_mode"] == "scheduled"

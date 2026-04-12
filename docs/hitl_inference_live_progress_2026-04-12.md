@@ -197,7 +197,218 @@ episode 2 没有发生 `human -> policy` 回切，只发生了一次 `policy -> 
 
 ---
 
-## 8. 下一步建议
+## 8. 速度问题排查与修复
+
+在继续推进 `human_chunk / human_sched_t / human_exec_t` 之前，我们额外排查了一个会干扰主观手感判断的问题：
+
+- 开启 `inference_ros` 后，teleop 手感会明显变慢
+- 停掉 `inference_ros` 后，teleop 仍然维持慢速
+
+这部分最终确认不是 HITL source-select 逻辑导致的，而是速度档位残留问题。
+
+### 8.1 下位机实测事实
+
+通过下位机状态与 SDK 状态核对，确认到：
+
+- lower-machine teleop 初始化后，`speed_percentage` 可到 `1.0`
+- inference 运行期间，`speed_percentage` 会降到约 `0.3`
+- inference 退出后，机械臂仍可能停留在约 `0.2`
+- lower-machine teleop 本身不会主动把该档位恢复到正常速度
+
+也就是说：
+
+> teleop 变慢的直接原因，不是 inference 和 teleop 同时写控制，而是 inference/`env_ros` 修改了速度相关状态，退出后又把机械臂留在了低速档位。
+
+### 8.2 代码修复方向
+
+本轮把环境速度语义拆成了两层：
+
+- `init_speed`
+  仅用于初始化 / 回位等大动作
+- `normal_speed_level`
+  用于运行阶段与退出恢复后的默认速度
+
+当前默认约定为：
+
+- `init_speed = 2.0`
+- `normal_speed_level = 10.0`
+
+这对应的目标是：
+
+- 初始化仍保持保守慢速
+- 进入正常推理后恢复到与 teleop 一致的正常速度语义
+- inference 退出后也恢复到正常速度，而不是把 lower teleop 留在低速档位
+
+### 8.3 2026-04-12 复测结果
+
+复测样本：
+
+- [inference_episode_0001_20260412_173714.hdf5](/home/amax/rl-vla/inference_logs/inference_episode_0001_20260412_173714.hdf5)
+- [run_info_20260412_173632.json](/home/amax/rl-vla/inference_logs/run_info_20260412_173632.json)
+- [timeline_20260412_173627.jsonl](/home/amax/rl-vla/inference_logs/timeline_20260412_173627.jsonl)
+
+操作者反馈：
+
+- teleop 手感已恢复正常
+
+这轮数据本身显示：
+
+- `hitl_mode=live`
+- HDF5 attrs 中 `hitl_live_execute_enabled=True`
+- `run_info.control.init_speed=2.0`
+- `run_info.control.normal_speed_level=10.0`
+
+同时这轮 rollout 没有发生 `human` takeover：
+
+- `hitl_live_execute_source` 全程为 `policy_fallback`
+- `hitl_human_active=0`
+- `hitl_human_valid=0`
+
+因此这轮样本的定位应当是：
+
+- speed 修复后的 live 结构回归验证
+- 不是新的 human 接管质量验证
+
+### 8.4 当前结论
+
+到目前为止，可以把这条问题收敛为：
+
+1. “inference 开过之后 teleop 一直变慢”的主因已经明确
+2. 根因是 speed state 残留，不是 owner/source 架构本身
+3. 当前修复方向与复测主观反馈一致
+4. 后续再讨论 human/policy 语义对齐时，可以把“速度档位残留”从 HITL 架构问题中剥离开
+
+## 9. Scheduled Human 链路推进
+
+在 speed 问题收敛后，本轮继续推进了 `human_chunk / human_sched_t / human_exec_t` 的对齐工作。
+
+### 9.1 Human Chunk Online Rollout
+
+新增了独立计划文档：
+
+- [human_chunk_online_rollout_plan_2026-04-12.md](/home/amax/rl-vla/docs/human_chunk_online_rollout_plan_2026-04-12.md)
+
+并实现了第一版 `HumanChunkProposalBuilder` 升级：
+
+- 引入 processed teleop target 的 history buffer
+- 用短窗口历史估计 human intent velocity
+- 对前 `act_horizon` 做 short-horizon rollout
+- 对后续 `pred_horizon - act_horizon` 做 hold
+
+同时新增了一组 diagnostics，用于解释 proposal 是如何构造出来的：
+
+- `hitl_human_history_count`
+- `hitl_human_history_span_ms`
+- `hitl_human_history_usable`
+- `hitl_human_rollout_step_count`
+- `hitl_human_rollout_dt_ms`
+- `hitl_human_linear_velocity`
+- `hitl_human_angular_velocity`
+- `hitl_human_gripper_velocity`
+
+### 9.2 引入 scheduled execute path
+
+在 `live` 模式下，为 human source 新增了显式执行开关：
+
+- `--hitl_human_execute_mode direct`
+- `--hitl_human_execute_mode scheduled`
+
+其中：
+
+- `direct`
+  保留 current-version 路径，继续直接执行 current processed teleop absolute target
+- `scheduled`
+  让 human source 经过：
+  - `human_chunk`
+  - `ActionChunkManager`
+  - `human_sched_t`
+  - `human_exec_t`
+
+这一步的关键结论是：
+
+> `scheduled` 模式已经可以稳定工作，而且从操作者主观手感上看，与 `direct` 基本没有明显差异。
+
+### 9.3 真机验证结论
+
+后续多轮真机验证表明：
+
+1. `policy -> human` 切换时，human takeover 仍然丝滑
+2. `human -> policy` 回切时，存在轻微不顺，但通常表现为“停顿感”而不是明显大跳变
+3. 当前体感上的主要残余问题，不在 human scheduler 本体，而在 source boundary
+
+进一步地，基于 `scheduled` rollout 的分析可以明确判断：
+
+- `policy -> human` 的边界跳变，不是 `human_chunk -> ActionChunkManager -> human_sched_t` 这条链额外引入的
+- `human -> policy` 的不顺，也不是 human scheduler/query 的稳定性问题
+- 剩余问题主要来自 policy 恢复时，policy 当前执行点与 human 末目标之间的接续关系
+
+### 9.4 Control-loop 对齐 provenance
+
+为了把 `human_sched_t / human_exec_t` 从“最新状态快照”升级成真正可分析的数据，本轮又继续补了严格按 control loop 对齐的记录。
+
+HDF5 新增独立组：
+
+- `control_provenance/`
+
+其中包含：
+
+- `timestamps`
+- `t_send_sys`
+- `execute_source`
+- `human_execute_mode`
+- `live_execute_target`
+- `human_direct_target`
+- `human_sched_target`
+- `human_exec_target`
+- `shared_source`
+
+新增这层以后，可以明确看到：
+
+- 在 `human_scheduled` 控制段里：
+  - `human_sched_t == human_exec_t`
+  - `live_execute_target == human_exec_t`
+- 因此当前 `scheduled` 路径本身没有额外 execute 偏移
+
+这一步非常重要，因为它把剩余问题进一步收敛到了：
+
+- source 切换边界
+- 特别是 `human -> policy` 恢复点的接续逻辑
+
+### 9.5 本轮停点
+
+到当前为止，`scheduled` human 链路已经完成了：
+
+- online human chunk proposal
+- scheduled execute path
+- control-loop aligned provenance
+
+因此本轮决定：
+
+- 暂时不再继续修 HITL 主链
+- 先把当前进展冻结
+- 将剩余的 `human -> policy` 边界跳变问题保留为后续待解决事项
+
+当前明确列为待办的问题是：
+
+1. `human -> policy` 回切时，policy 恢复点与 human 末目标之间仍存在接续不自然
+2. 该问题更像 source boundary 对齐问题，而不是 human scheduler 稳定性问题
+3. 后续若继续推进，优先方向应是：
+   - policy 恢复前的 warm-start / re-anchor
+   - 边界对齐策略
+   - 而不是继续修改 human scheduler 本体
+
+## 10. 当前状态
+
+截至当前，HITL inference live 的结论可以压缩为：
+
+1. owner uplift 与 lower-owner 恢复语义已验证
+2. speed 残留问题已排查并修复
+3. `direct` 与 `scheduled` 两条 human execute path 都已验证
+4. `scheduled` 已具备语义上的价值，且没有明显损伤手感
+5. 当前未解决问题主要只剩：
+   - `human -> policy` 边界接续
+
+## 11. 下一步建议
 
 当前最合理的下一步不是再改 owner 架构，而是针对回切边界做小步优化。
 
@@ -212,9 +423,10 @@ episode 2 没有发生 `human -> policy` 回切，只发生了一次 `policy -> 
 
 ---
 
-## 9. 相关文档
+## 12. 相关文档
 
 - [hitl_inference_live_owner_source_plan_2026-04-12.md](/home/amax/rl-vla/docs/hitl_inference_live_owner_source_plan_2026-04-12.md)
+- [human_chunk_online_rollout_plan_2026-04-12.md](/home/amax/rl-vla/docs/human_chunk_online_rollout_plan_2026-04-12.md)
 - [project_memory_baseline_2026-04-11.md](/home/amax/rl-vla/docs/project_memory_baseline_2026-04-11.md)
 - [chunk_action_semantics_and_teleop_alignment.md](/home/amax/rl-vla/docs/chunk_action_semantics_and_teleop_alignment.md)
 - [teleop_uplift_progress_2026-04-11.md](/home/amax/rl-vla/docs/teleop_uplift_progress_2026-04-11.md)

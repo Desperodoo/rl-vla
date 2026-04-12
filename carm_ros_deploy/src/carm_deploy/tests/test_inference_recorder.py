@@ -180,10 +180,20 @@ def test_inference_recorder_writes_hitl_provenance(tmp_path):
         'action_sched_candidate': np.full((8,), 0.4, dtype=np.float32),
         'action_exec_candidate': np.full((8,), 0.5, dtype=np.float32),
         'action_human_direct_target': np.full((8,), 0.6, dtype=np.float32),
+        'action_human_sched_target': np.full((8,), 0.65, dtype=np.float32),
+        'action_human_exec_target': np.full((8,), 0.66, dtype=np.float32),
         'action_live_execute_target': np.full((8,), 0.7, dtype=np.float32),
         'hitl_human_active': True,
         'hitl_human_valid': True,
         'hitl_signal_age_ms': 12.0,
+        'hitl_human_history_count': 3,
+        'hitl_human_history_span_ms': 80.0,
+        'hitl_human_history_usable': True,
+        'hitl_human_rollout_step_count': 4,
+        'hitl_human_rollout_dt_ms': 20.0,
+        'hitl_human_linear_velocity': np.array([0.1, 0.0, 0.0], dtype=np.float32),
+        'hitl_human_angular_velocity': np.array([0.0, 0.0, 0.2], dtype=np.float32),
+        'hitl_human_gripper_velocity': 0.03,
         'hitl_policy_sequence': 3,
         'hitl_human_sequence': 7,
         'hitl_shared_source': 1,
@@ -191,6 +201,17 @@ def test_inference_recorder_writes_hitl_provenance(tmp_path):
         'hitl_live_execute_source': 1,
     }
     assert recorder.record_step(_make_obs(), model, executed, timestamp=0.0, hitl_data=hitl_data) is True
+    assert recorder.record_control_step(
+        query_time=1.25,
+        t_send_sys=1.30,
+        execute_source='human_scheduled',
+        human_execute_mode='scheduled',
+        live_execute_target=np.full((8,), 0.7, dtype=np.float32),
+        human_direct_target=np.full((8,), 0.6, dtype=np.float32),
+        human_sched_target=np.full((8,), 0.65, dtype=np.float32),
+        human_exec_target=np.full((8,), 0.66, dtype=np.float32),
+        shared_source='human',
+    ) is True
     assert recorder.stop_recording() is True
     path = recorder.confirm_save(success=True, outcome_label='success')
 
@@ -204,11 +225,28 @@ def test_inference_recorder_writes_hitl_provenance(tmp_path):
         np.testing.assert_allclose(f['action_sched_candidate'][0], np.full((8,), 0.4))
         np.testing.assert_allclose(f['action_exec_candidate'][0], np.full((8,), 0.5))
         np.testing.assert_allclose(f['action_human_direct_target'][0], np.full((8,), 0.6))
+        np.testing.assert_allclose(f['action_human_sched_target'][0], np.full((8,), 0.65))
+        np.testing.assert_allclose(f['action_human_exec_target'][0], np.full((8,), 0.66))
         np.testing.assert_allclose(f['action_live_execute_target'][0], np.full((8,), 0.7))
         assert bool(f['hitl_human_active'][0]) is True
         assert bool(f['hitl_human_valid'][0]) is True
+        assert int(f['hitl_human_history_count'][0]) == 3
+        assert bool(f['hitl_human_history_usable'][0]) is True
+        np.testing.assert_allclose(f['hitl_human_linear_velocity'][0], np.array([0.1, 0.0, 0.0]))
+        np.testing.assert_allclose(f['hitl_human_angular_velocity'][0], np.array([0.0, 0.0, 0.2]))
+        assert float(f['hitl_human_gripper_velocity'][0]) == 0.03
         assert int(f['hitl_shared_source'][0]) == 1
         assert int(f['hitl_live_execute_source'][0]) == 1
+        assert bool(f.attrs['control_provenance_aligned']) is True
+        assert int(f.attrs['num_control_steps']) == 1
+        control_grp = f['control_provenance']
+        assert control_grp['execute_source'][0].decode('utf-8') == 'human_scheduled'
+        assert control_grp['human_execute_mode'][0].decode('utf-8') == 'scheduled'
+        assert control_grp['shared_source'][0].decode('utf-8') == 'human'
+        np.testing.assert_allclose(control_grp['human_direct_target'][0], np.full((8,), 0.6))
+        np.testing.assert_allclose(control_grp['human_sched_target'][0], np.full((8,), 0.65))
+        np.testing.assert_allclose(control_grp['human_exec_target'][0], np.full((8,), 0.66))
+        np.testing.assert_allclose(control_grp['live_execute_target'][0], np.full((8,), 0.7))
 
 
 def test_convert_directory_skips_old_incompatible_rollout(tmp_path):

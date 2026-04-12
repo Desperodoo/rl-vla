@@ -105,6 +105,9 @@ class InferenceNode:
         self.hitl_stale_timeout_ms = float(config.get('hitl_stale_timeout_ms', 150.0))
         self.hitl_require_active = bool(config.get('hitl_require_active', True))
         self.hitl_record_full_provenance = bool(config.get('hitl_record_full_provenance', True))
+        self.hitl_human_execute_mode = str(config.get('hitl_human_execute_mode', 'direct'))
+        if self.hitl_human_execute_mode not in ('direct', 'scheduled'):
+            raise ValueError(f"Unsupported hitl_human_execute_mode: {self.hitl_human_execute_mode}")
         
         # Action Chunk 执行模式参数
         # execution_mode: 'temporal_ensemble' (原始) 或 'receding_horizon' (标准 action chunking)
@@ -213,12 +216,16 @@ class InferenceNode:
         self.hitl_live_last_error = None
         self.hitl_live_state = {
             'human_direct_target_abs': None,
+            'human_sched_target_abs': None,
+            'human_exec_target_abs': None,
+            'human_execute_source': 'policy',
             'human_active': False,
             'human_valid': False,
             'human_stale': False,
             'signal_age_ms': None,
             'shared_source': 'policy',
             'shared_source_code': 0,
+            'human_execute_mode': self.hitl_human_execute_mode,
         }
         if self.hitl_enabled:
             self.hitl_signal_client = TeleopSignalClient(
@@ -229,6 +236,8 @@ class InferenceNode:
             )
             self.hitl_human_builder = HumanChunkProposalBuilder(
                 pred_horizon=self._pred_horizon,
+                control_freq=self.control_freq,
+                act_horizon=self._act_horizon,
                 stale_timeout_ms=self.hitl_stale_timeout_ms,
                 require_active=self.hitl_require_active,
             )
@@ -240,7 +249,8 @@ class InferenceNode:
                       f"truncate_at_act_horizon={self.truncate_at_act_horizon}")
         rospy.loginfo(
             f"HITL mode: {self.hitl_mode}, signal_source={self.hitl_signal_source}, "
-            f"stale_timeout_ms={self.hitl_stale_timeout_ms}, require_active={self.hitl_require_active}"
+            f"stale_timeout_ms={self.hitl_stale_timeout_ms}, require_active={self.hitl_require_active}, "
+            f"human_execute_mode={self.hitl_human_execute_mode}"
         )
         
         # 控制变量
@@ -579,6 +589,8 @@ class InferenceNode:
             'control_freq': self.control_freq,
             'teleop_scale': self.teleop_scale,
             'gripper_hysteresis_window': getattr(self.policy, 'gripper_hysteresis_window', 1),
+            'init_speed': config.get('init_speed', 2.0),
+            'normal_speed_level': config.get('normal_speed_level', 10.0),
         }
         
         # 执行配置
@@ -601,6 +613,7 @@ class InferenceNode:
             'hitl_human_signal_source': self.hitl_signal_source,
             'hitl_arbitration_mode': 'source_select',
             'hitl_live_execute_enabled': self.hitl_mode == 'live',
+            'hitl_human_execute_mode': self.hitl_human_execute_mode,
             'hitl_stale_timeout_ms': self.hitl_stale_timeout_ms,
             'hitl_require_active': self.hitl_require_active,
             'hitl_record_full_provenance': self.hitl_record_full_provenance,
@@ -745,12 +758,16 @@ class InferenceNode:
         with self.hitl_state_lock:
             self.hitl_live_state = {
                 'human_direct_target_abs': direct_target,
+                'human_sched_target_abs': None,
+                'human_exec_target_abs': None,
+                'human_execute_source': 'policy',
                 'human_active': human_active,
                 'human_valid': human_valid,
                 'human_stale': human_stale,
                 'signal_age_ms': None if signal_age_ms is None else float(signal_age_ms),
                 'shared_source': arbitration['shared_source'],
                 'shared_source_code': arbitration['shared_source_code'],
+                'human_execute_mode': self.hitl_human_execute_mode,
             }
 
     def _add_chunk_to_manager(self, manager, chunk_abs: np.ndarray, chunk_base_time: float):
@@ -1008,9 +1025,11 @@ class InferenceNode:
                     if (
                         self.hitl_mode == 'live'
                         and arbitration['shared_source'] == 'human'
-                        and human_direct_target_abs is not None
                     ):
-                        live_execute_target_abs = human_direct_target_abs.copy()
+                        if self.hitl_human_execute_mode == 'scheduled':
+                            live_execute_target_abs = shared_chunk_abs[0].copy()
+                        elif human_direct_target_abs is not None:
+                            live_execute_target_abs = human_direct_target_abs.copy()
 
                     action_model = policy_chunk_abs.copy()
                     action_executed = shared_chunk_abs.copy() if self.hitl_mode == 'live' else policy_chunk_abs.copy()
@@ -1020,6 +1039,8 @@ class InferenceNode:
                     with self.hitl_state_lock:
                         sched_candidate = None if self.hitl_candidate_state.get('sched_action') is None else self.hitl_candidate_state['sched_action'].copy()
                         exec_candidate = None if self.hitl_candidate_state.get('exec_action') is None else self.hitl_candidate_state['exec_action'].copy()
+                        human_sched_target_abs = None if self.hitl_live_state.get('human_sched_target_abs') is None else self.hitl_live_state['human_sched_target_abs'].copy()
+                        human_exec_target_abs = None if self.hitl_live_state.get('human_exec_target_abs') is None else self.hitl_live_state['human_exec_target_abs'].copy()
 
                     # 记录数据（如果启用采集）
                     if self.record_inference_enabled and self.inference_recorder is not None:
@@ -1039,10 +1060,20 @@ class InferenceNode:
                                     'action_sched_candidate': sched_candidate,
                                     'action_exec_candidate': exec_candidate,
                                     'action_human_direct_target': human_direct_target_abs,
+                                    'action_human_sched_target': human_sched_target_abs,
+                                    'action_human_exec_target': human_exec_target_abs,
                                     'action_live_execute_target': live_execute_target_abs,
                                     'hitl_human_active': False if human_proposal is None else human_proposal['human_active'],
                                     'hitl_human_valid': False if human_proposal is None else human_proposal['human_valid'],
                                     'hitl_signal_age_ms': None if human_proposal is None else human_proposal['signal_age_ms'],
+                                    'hitl_human_history_count': 0 if human_proposal is None else human_proposal['history_count'],
+                                    'hitl_human_history_span_ms': None if human_proposal is None else human_proposal['history_span_ms'],
+                                    'hitl_human_history_usable': False if human_proposal is None else human_proposal['history_usable'],
+                                    'hitl_human_rollout_step_count': 0 if human_proposal is None else human_proposal['rollout_step_count'],
+                                    'hitl_human_rollout_dt_ms': None if human_proposal is None else human_proposal['rollout_dt_ms'],
+                                    'hitl_human_linear_velocity': np.zeros((3,), dtype=np.float64) if human_proposal is None else human_proposal['linear_velocity'],
+                                    'hitl_human_angular_velocity': np.zeros((3,), dtype=np.float64) if human_proposal is None else human_proposal['angular_velocity'],
+                                    'hitl_human_gripper_velocity': None if human_proposal is None else human_proposal['gripper_velocity'],
                                     'hitl_policy_sequence': self.hitl_policy_sequence,
                                     'hitl_human_sequence': -1 if human_proposal is None else human_proposal['processed_sequence'],
                                     'hitl_shared_source': arbitration['shared_source_code'],
@@ -1090,6 +1121,14 @@ class InferenceNode:
                                 processed_sequence=human_proposal['processed_sequence'],
                                 abs_reconstruction_pos_error=human_proposal['abs_reconstruction_pos_error'],
                                 abs_reconstruction_rot_error=human_proposal['abs_reconstruction_rot_error'],
+                                history_count=int(human_proposal['history_count']),
+                                history_span_ms=float(human_proposal['history_span_ms']),
+                                history_usable=bool(human_proposal['history_usable']),
+                                rollout_step_count=int(human_proposal['rollout_step_count']),
+                                rollout_dt_ms=float(human_proposal['rollout_dt_ms']),
+                                linear_velocity=np.asarray(human_proposal['linear_velocity'], dtype=np.float64).tolist(),
+                                angular_velocity=np.asarray(human_proposal['angular_velocity'], dtype=np.float64).tolist(),
+                                gripper_velocity=float(human_proposal['gripper_velocity']),
                                 horizon=int(len(human_proposal['human_chunk_proposal'])),
                             )
                         self.timeline_logger.log(
@@ -1098,12 +1137,14 @@ class InferenceNode:
                             shared_source=arbitration['shared_source'],
                             fallback_reason=arbitration['fallback_reason'],
                             human_selected=bool(arbitration['human_selected']),
+                            human_execute_mode=self.hitl_human_execute_mode,
                         )
                         if self.hitl_mode == 'live':
                             self.timeline_logger.log(
                                 'hitl_live_execute',
                                 hitl_mode=self.hitl_mode,
                                 shared_source=arbitration['shared_source'],
+                                human_execute_mode=self.hitl_human_execute_mode,
                                 human_direct_target_abs=None if human_direct_target_abs is None else human_direct_target_abs.tolist(),
                                 live_execute_target_abs=live_execute_target_abs.tolist(),
                             )
@@ -1221,10 +1262,22 @@ class InferenceNode:
                     live_owner_active
                     and live_state.get('shared_source') == 'human'
                     and live_state.get('human_valid')
-                    and live_state.get('human_direct_target_abs') is not None
                 ):
-                    execute_action = np.asarray(live_state['human_direct_target_abs'], dtype=np.float64)
-                    execute_source = 'human'
+                    if self.hitl_human_execute_mode == 'scheduled':
+                        execute_action = np.asarray(action, dtype=np.float64)
+                        execute_source = 'human_scheduled'
+                    elif live_state.get('human_direct_target_abs') is not None:
+                        execute_action = np.asarray(live_state['human_direct_target_abs'], dtype=np.float64)
+                        execute_source = 'human_direct'
+                    with self.hitl_state_lock:
+                        self.hitl_live_state['human_sched_target_abs'] = np.asarray(action, dtype=np.float64).copy()
+                        self.hitl_live_state['human_exec_target_abs'] = np.asarray(execute_action, dtype=np.float64).copy()
+                        self.hitl_live_state['human_execute_source'] = execute_source
+                else:
+                    with self.hitl_state_lock:
+                        self.hitl_live_state['human_sched_target_abs'] = None
+                        self.hitl_live_state['human_exec_target_abs'] = None
+                        self.hitl_live_state['human_execute_source'] = 'policy'
 
             # 打印夹爪下发值与频率（节流）
             grip_val = None
@@ -1244,6 +1297,36 @@ class InferenceNode:
             # 执行控制 (末端位姿模式)
             rospy.logdebug("End pose control")
             self.env.end_control_nostep(execute_action)
+
+            if (
+                self.record_inference_enabled
+                and self.inference_recorder is not None
+                and self.inference_recorder.is_recording
+            ):
+                human_direct_target = None
+                human_sched_target = None
+                human_exec_target = None
+                shared_source = None
+                human_execute_mode = None
+                if self.hitl_mode == 'live':
+                    with self.hitl_state_lock:
+                        live_state = dict(self.hitl_live_state)
+                    human_direct_target = live_state.get('human_direct_target_abs')
+                    human_sched_target = live_state.get('human_sched_target_abs')
+                    human_exec_target = live_state.get('human_exec_target_abs')
+                    shared_source = live_state.get('shared_source')
+                    human_execute_mode = self.hitl_human_execute_mode
+                self.inference_recorder.record_control_step(
+                    query_time=tm,
+                    t_send_sys=time.time(),
+                    execute_source=execute_source,
+                    human_execute_mode=human_execute_mode,
+                    live_execute_target=np.asarray(execute_action, dtype=np.float64),
+                    human_direct_target=human_direct_target,
+                    human_sched_target=human_sched_target,
+                    human_exec_target=human_exec_target,
+                    shared_source=shared_source,
+                )
 
             candidate_action = None
             candidate_meta = None
@@ -1270,11 +1353,22 @@ class InferenceNode:
                     )
 
             if self.timeline_logger is not None and (self.control_step_count % self.timeline_control_stride == 0):
+                if self.hitl_mode == 'live' and execute_source.startswith('human'):
+                    self.timeline_logger.log(
+                        'hitl_human_control',
+                        query_time=tm,
+                        t_send_sys=time.time(),
+                        human_execute_mode=self.hitl_human_execute_mode,
+                        execute_source=execute_source,
+                        human_sched_target_abs=np.asarray(action, dtype=np.float64).tolist(),
+                        human_exec_target_abs=np.asarray(execute_action, dtype=np.float64).tolist(),
+                    )
                 self.timeline_logger.log(
                     'control',
                     query_time=tm,
                     t_send_sys=time.time(),
                     execute_source=execute_source,
+                    hitl_human_execute_mode=self.hitl_human_execute_mode if self.hitl_mode == 'live' else None,
                     candidate_timestamps=meta.get('candidate_timestamps', []) if meta else [],
                     weights=meta.get('weights', []) if meta else [],
                     num_candidates=meta.get('num_candidates', 0) if meta else 0,
@@ -1430,6 +1524,9 @@ def parse_args():
                         help='Require teleop active=true before enabling human proposal')
     parser.add_argument('--hitl_record_full_provenance', action=argparse.BooleanOptionalAction, default=True,
                         help='Record full HITL chunk-level provenance into inference rollout HDF5')
+    parser.add_argument('--hitl_human_execute_mode', type=str, default='direct',
+                        choices=['direct', 'scheduled'],
+                        help='Human live execute path: direct processed target or scheduled via ActionChunkManager')
     parser.add_argument('--backend_url_v2', type=str, default='',
                         help='Optional teleop_target_v2 URL override for HITL')
     parser.add_argument('--events_v2_url', type=str, default='',
@@ -1439,7 +1536,9 @@ def parse_args():
     parser.add_argument('--safety_config', type=str, default='',
                         help='Path to safety config JSON file (required)')
     parser.add_argument('--init_speed', type=float, default=2.0,
-                        help='Speed level for initialization movement (0-10, default: 2.0 = slow)')
+                        help='Speed level for initialization/home movement (0-10, default: 2.0 = slow)')
+    parser.add_argument('--normal_speed_level', type=float, default=10.0,
+                        help='Default runtime speed level restored after init/shutdown (0-10, default: 10.0 = teleop-aligned)')
     
     # 日志参数
     parser.add_argument('--log_dir', type=str, default='',
@@ -1490,10 +1589,11 @@ def main():
         'teleop_scale', 'inference_speed_scale', 'control_freq', 'gripper_hysteresis_window',
         # HITL inference 参数
         'hitl_mode', 'hitl_signal_source', 'hitl_stale_timeout_ms', 'hitl_require_active',
-        'hitl_record_full_provenance', 'backend_url_v2', 'events_v2_url',
+        'hitl_record_full_provenance', 'hitl_human_execute_mode', 'backend_url_v2', 'events_v2_url',
         # inference rollout 采集参数
         'record_inference',
         'record_dir', 'max_steps',
+        'init_speed', 'normal_speed_level',
     ]:
         if rospy.has_param(f'~{key}'):
             config[key] = rospy.get_param(f'~{key}')
@@ -1570,6 +1670,7 @@ def main():
     rospy.loginfo(f"  control_freq: {config.get('control_freq', 50)}Hz")
     rospy.loginfo(f"  gripper_hysteresis_window: {config.get('gripper_hysteresis_window', 1)}")
     rospy.loginfo(f"  hitl_mode: {config.get('hitl_mode', 'disabled')}")
+    rospy.loginfo(f"  hitl_human_execute_mode: {config.get('hitl_human_execute_mode', 'direct')}")
     rospy.loginfo(f"  hitl_signal_source: {config.get('hitl_signal_source', 'teleop_v2_processed')}")
     rospy.loginfo(f"  hitl_stale_timeout_ms: {config.get('hitl_stale_timeout_ms', 150.0)}")
     rospy.loginfo("-" * 60)
@@ -1581,6 +1682,8 @@ def main():
     rospy.loginfo("-" * 60)
     rospy.loginfo("Safety Configuration:")
     rospy.loginfo(f"  safety_config: {config['safety_config'] or 'default'}")
+    rospy.loginfo(f"  init_speed: {config.get('init_speed', 2.0)}")
+    rospy.loginfo(f"  normal_speed_level: {config.get('normal_speed_level', 10.0)}")
     rospy.loginfo("=" * 60)
     
     # 创建推理节点
