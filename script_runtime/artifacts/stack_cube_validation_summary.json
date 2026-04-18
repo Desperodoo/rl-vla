@@ -1,0 +1,57 @@
+{
+  "num_episodes": 3,
+  "runtime_successes": 2,
+  "sim_successes": 2,
+  "failure_code_counts": {
+    "NONE": 2,
+    "GRASP_FAIL": 1
+  },
+  "failed_skill_counts": {
+    "ExecuteGraspPhase": 6
+  },
+  "episode_results": [
+    {
+      "episode_index": 0,
+      "task_status": "SUCCESS",
+      "failure_code": "NONE",
+      "sim_success": true,
+      "trace_events": 14,
+      "failed_skills": [],
+      "trace_path": "script_runtime/artifacts/stack_cube_validation/episode_000.jsonl",
+      "rollout_gif": "script_runtime/artifacts/stack_cube_validation/episode_000_rollout.gif",
+      "grounding_json": "script_runtime/artifacts/stack_cube_validation/episode_000_grounding.json",
+      "grounding_topdown_png": "script_runtime/artifacts/stack_cube_validation/episode_000_grounding_topdown.png"
+    },
+    {
+      "episode_index": 1,
+      "task_status": "SUCCESS",
+      "failure_code": "NONE",
+      "sim_success": true,
+      "trace_events": 14,
+      "failed_skills": [],
+      "trace_path": "script_runtime/artifacts/stack_cube_validation/episode_001.jsonl",
+      "rollout_gif": "script_runtime/artifacts/stack_cube_validation/episode_001_rollout.gif",
+      "grounding_json": "script_runtime/artifacts/stack_cube_validation/episode_001_grounding.json",
+      "grounding_topdown_png": "script_runtime/artifacts/stack_cube_validation/episode_001_grounding_topdown.png"
+    },
+    {
+      "episode_index": 2,
+      "task_status": "FAILURE",
+      "failure_code": "GRASP_FAIL",
+      "sim_success": false,
+      "trace_events": 21,
+      "failed_skills": [
+        "ExecuteGraspPhase",
+        "ExecuteGraspPhase",
+        "ExecuteGraspPhase",
+        "ExecuteGraspPhase",
+        "ExecuteGraspPhase",
+        "ExecuteGraspPhase"
+      ],
+      "trace_path": "script_runtime/artifacts/stack_cube_validation/episode_002.jsonl",
+      "rollout_gif": "script_runtime/artifacts/stack_cube_validation/episode_002_rollout.gif",
+      "grounding_json": "script_runtime/artifacts/stack_cube_validation/episode_002_grounding.json",
+      "grounding_topdown_png": "script_runtime/artifacts/stack_cube_validation/episode_002_grounding_topdown.png"
+    }
+  ]
+}

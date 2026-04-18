@@ -1,0 +1,69 @@
+runtime:
+  task_id: ""
+  trace_path: script_runtime/artifacts/pick_cube_maniskill_trace.jsonl
+
+validation:
+  num_episodes: 3
+  seed: 0
+  output_dir: script_runtime/artifacts/maniskill_validation
+  summary_path: script_runtime/artifacts/maniskill_validation_summary.json
+  report_dir: script_runtime/artifacts/maniskill_report
+
+maniskill:
+  env_id: PickCube-v1
+  obs_mode: state
+  control_mode: pd_ee_pose
+  sim_backend: physx_cpu
+  num_envs: 1
+  max_episode_steps: 300
+  render_mode: rgb_array
+  reset_options: {}
+  grasp_height_offset: 0.0
+  place_height_offset: 0.06
+  place_release_height_offset: 0.015
+  retreat_height_offset: 0.08
+  pose_substeps: 60
+  gripper_substeps: 15
+  settle_substeps: 25
+  position_tolerance: 0.01
+  pregrasp_height_offset: 0.08
+  guarded_close_descend_delta: 0.02
+  guarded_close_descent_steps: 6
+  guarded_close_hold_steps: 10
+  grasp_phase_descend_segments: 5
+  grasp_phase_close_hold_steps: 12
+  grasp_phase_lift_delta: 0.03
+  grasp_phase_lift_steps: 6
+  lock_orientation: true
+  delta_translation_limit: 0.02
+  delta_rotation_limit: 0.05
+  capture_video: true
+  capture_every_n_steps: 2
+
+execution:
+  active_source: policy
+  control_owner: script_runtime
+
+task_goal:
+  task_name: pick_cube_validation
+  validation_mode: oracle_state
+
+scene:
+  workspace_ready: true
+  tracking_lost: false
+  depth_anomaly: false
+  detection_confidence: 1.0
+  calibration_version: oracle_state
+
+poses:
+  home_joints: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+  reset_joints: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+  pregrasp_pose: [0.0, 0.0, 0.2, 0.0, 0.0, 0.0, 1.0]
+  lift_pose: [0.0, 0.0, 0.3, 0.0, 0.0, 0.0, 1.0]
+  place_pose: [0.15, 0.15, 0.2, 0.0, 0.0, 0.0, 1.0]
+  retreat_pose: [0.15, 0.15, 0.3, 0.0, 0.0, 0.0, 1.0]
+
+gripper:
+  open_width: 0.04
+  close_width: 0.0
+  tau: 1.0

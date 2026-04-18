@@ -1,0 +1,5 @@
+task_name: pick_place
+max_retries: 2
+use_learned_ranking: true
+default_active_source: policy
+default_control_owner: upper_machine

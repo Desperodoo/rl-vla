@@ -1,0 +1,51 @@
+runtime:
+  task_id: ""
+  trace_path: script_runtime/artifacts/pick_place_trace.jsonl
+  ready_on_initialize: true
+  servo_enable_on_initialize: true
+
+robot:
+  robot_ip: 10.42.0.101
+  port: 8090
+  timeout: 1.0
+  control_mode: 1
+  speed_level: 3.0
+  response_level: 20
+  tool_index: 0
+  collision_enable: true
+  collision_sensitivity: 0
+  use_linear_for_move_l: true
+  sync: true
+
+gripper:
+  open_width: 0.08
+  close_width: 0.01
+  tau: 10.0
+
+execution:
+  active_source: policy
+  control_owner: script_runtime
+
+task_goal:
+  task_name: pick_place
+  target_object: demo_object
+  target_bin: demo_bin
+
+scene:
+  workspace_ready: true
+  tracking_lost: false
+  depth_anomaly: false
+  detection_confidence: 1.0
+  calibration_version: static-sdk
+  object_pose: [0.42, -0.04, 0.11, 0.0, 0.0, 0.0, 1.0]
+  grasp_candidates:
+    - pose: [0.42, -0.04, 0.11, 0.0, 0.0, 0.0, 1.0]
+      score: 1.0
+
+poses:
+  home_joints: [0.0, -0.6, 1.1, 0.0, 1.45, 0.0]
+  reset_joints: [0.0, -0.6, 1.1, 0.0, 1.45, 0.0]
+  pregrasp_pose: [0.42, -0.04, 0.21, 0.0, 0.0, 0.0, 1.0]
+  lift_pose: [0.42, -0.04, 0.28, 0.0, 0.0, 0.0, 1.0]
+  place_pose: [0.25, 0.22, 0.18, 0.0, 0.0, 0.0, 1.0]
+  retreat_pose: [0.25, 0.22, 0.28, 0.0, 0.0, 0.0, 1.0]

@@ -1,0 +1,3 @@
+primary_camera: wrist
+use_depth: true
+calibration_version: unknown

@@ -1,0 +1,5 @@
+robot_name: carm
+control_stack: ros1_sdk
+home_joints: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+default_joint_speed: 0.8
+default_cartesian_speed: 0.5
