@@ -249,6 +249,54 @@ def test_inference_recorder_writes_hitl_provenance(tmp_path):
         np.testing.assert_allclose(control_grp['live_execute_target'][0], np.full((8,), 0.7))
 
 
+def test_inference_recorder_writes_start_transition_events(tmp_path):
+    recorder = InferenceRecorder(
+        output_dir=str(tmp_path),
+        pred_horizon=4,
+        action_dim=8,
+        image_size=(8, 8),
+        max_steps=16,
+        camera_topics=['/cam0'],
+        camera_names=['cam0'],
+        primary_camera='cam0',
+        hitl_enabled=True,
+        hitl_mode='live',
+    )
+
+    assert recorder.start_recording() is True
+    model = _make_action_chunk(offset=0.0)
+    assert recorder.record_step(_make_obs(), model, model.copy(), timestamp=0.0) is True
+    assert recorder.record_start_transition_event(
+        event_name='start_requested',
+        timestamp=1.0,
+        owner_active=False,
+        current_qpos_end=np.array([0.1, 0.2, 0.3, 0.0, 0.0, 0.0, 1.0, 0.5], dtype=np.float32),
+        hold_target=np.array([0.1, 0.2, 0.3, 0.0, 0.0, 0.0, 1.0, 0.5], dtype=np.float32),
+        note='hitl_mode=live',
+    ) is True
+    assert recorder.record_start_transition_event(
+        event_name='first_control_sent',
+        timestamp=1.2,
+        owner_active=True,
+        current_qpos_end=np.array([0.1, 0.2, 0.29, 0.0, 0.0, 0.0, 1.0, 0.5], dtype=np.float32),
+        hold_target=np.array([0.1, 0.2, 0.29, 0.0, 0.0, 0.0, 1.0, 0.0], dtype=np.float32),
+        note='execute_source=policy',
+    ) is True
+    assert recorder.stop_recording() is True
+    path = recorder.confirm_save(success=True, outcome_label='success')
+
+    with h5py.File(path, 'r') as f:
+        assert int(f.attrs['num_start_transition_events']) == 2
+        grp = f['start_transition']
+        assert grp['event_name'][0].decode('utf-8') == 'start_requested'
+        assert grp['event_name'][1].decode('utf-8') == 'first_control_sent'
+        assert bool(grp['owner_active'][0]) is False
+        assert bool(grp['owner_active'][1]) is True
+        np.testing.assert_allclose(grp['current_qpos_end'][0], np.array([0.1, 0.2, 0.3, 0.0, 0.0, 0.0, 1.0, 0.5]))
+        np.testing.assert_allclose(grp['hold_target'][1], np.array([0.1, 0.2, 0.29, 0.0, 0.0, 0.0, 1.0, 0.0]))
+        assert grp['note'][1].decode('utf-8') == 'execute_source=policy'
+
+
 def test_convert_directory_skips_old_incompatible_rollout(tmp_path):
     input_dir = tmp_path / 'input'
     input_dir.mkdir()

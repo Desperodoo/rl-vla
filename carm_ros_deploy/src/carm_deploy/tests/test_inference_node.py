@@ -242,3 +242,37 @@ class TestNodeConfigPropagation:
         node = _make_node({"hitl_mode": "live", "hitl_human_execute_mode": "scheduled"})
         assert node.hitl_human_execute_mode == "scheduled"
         assert node.hitl_live_state["human_execute_mode"] == "scheduled"
+
+    def test_hitl_episode_state_reset_restores_policy_defaults(self):
+        node = _make_node({"hitl_mode": "live"})
+        node.hitl_candidate_state["shared_source"] = "candidate"
+        node.hitl_live_state["shared_source"] = "human"
+        node.hitl_live_state["human_valid"] = True
+        node.hitl_human_builder = mock.MagicMock()
+        node._reset_hitl_episode_state()
+        assert node.hitl_candidate_state["shared_source"] == "policy"
+        assert node.hitl_live_state["shared_source"] == "policy"
+        assert node.hitl_live_state["human_valid"] is False
+        node.hitl_human_builder.reset.assert_called_once()
+
+    def test_start_episode_prefers_fresh_state_observation_for_hold_seed(self):
+        node = _make_node({"hitl_mode": "live", "record_inference": True})
+        node.inference_recorder = mock.MagicMock()
+        node.latest_obs = {
+            "qpos_end": np.array([0.1, 0.0, 0.23, 0.0, 0.0, 0.0, 1.0, 0.07], dtype=np.float64)
+        }
+        node.env.get_state_observation.return_value = {
+            "qpos_end": np.array([0.2, 0.0, 0.325, 0.0, 0.0, 0.0, 1.0, 0.08], dtype=np.float64)
+        }
+        node._activate_hitl_live_owner = mock.MagicMock(return_value=True)
+        node._record_start_transition_event = mock.MagicMock()
+        node._add_chunk_to_manager = mock.MagicMock(return_value=(123, [], 0.02, 8))
+        node.policy.reset = mock.MagicMock()
+        node._reset_hitl_episode_state = mock.MagicMock()
+
+        node._start_new_episode()
+
+        seeded_chunk = node._add_chunk_to_manager.call_args.args[1]
+        assert seeded_chunk.shape[1] == 8
+        assert seeded_chunk[0, 2] == pytest.approx(0.325)
+        assert seeded_chunk[0, 7] == pytest.approx(0.08)

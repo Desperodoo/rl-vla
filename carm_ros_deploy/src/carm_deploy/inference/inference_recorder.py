@@ -186,6 +186,14 @@ class InferenceRecorder:
             'human_exec_target': [],
             'shared_source': [],
         }
+        self.start_transition_data = {
+            'event_name': [],
+            'timestamps': [],
+            'owner_active': [],
+            'current_qpos_end': [],
+            'hold_target': [],
+            'note': [],
+        }
         self.step_count = 0
 
     @staticmethod
@@ -242,6 +250,7 @@ class InferenceRecorder:
             self.pending_data = {
                 'episode_data': self._copy_pending_value(self.episode_data),
                 'control_data': self._copy_pending_value(self.control_data),
+                'start_transition_data': self._copy_pending_value(self.start_transition_data),
             }
             self.pending_save = True
         
@@ -322,6 +331,36 @@ class InferenceRecorder:
                 np.asarray(zeros_step if human_exec_target is None else human_exec_target, dtype=np.float64)
             )
             self.control_data['shared_source'].append('' if shared_source is None else str(shared_source))
+            return True
+
+    def record_start_transition_event(
+        self,
+        *,
+        event_name: str,
+        timestamp: Optional[float] = None,
+        owner_active: bool = False,
+        current_qpos_end: Optional[np.ndarray] = None,
+        hold_target: Optional[np.ndarray] = None,
+        note: Optional[str] = None,
+    ) -> bool:
+        """Record episode-start transition events for owner handoff diagnosis."""
+        with self._lock:
+            if not self.recording:
+                return False
+
+            zeros_step = np.zeros((self.action_dim,), dtype=np.float64)
+            self.start_transition_data['event_name'].append(str(event_name))
+            self.start_transition_data['timestamps'].append(
+                float(time.time() if timestamp is None else timestamp)
+            )
+            self.start_transition_data['owner_active'].append(bool(owner_active))
+            self.start_transition_data['current_qpos_end'].append(
+                np.asarray(zeros_step if current_qpos_end is None else current_qpos_end, dtype=np.float64)
+            )
+            self.start_transition_data['hold_target'].append(
+                np.asarray(zeros_step if hold_target is None else hold_target, dtype=np.float64)
+            )
+            self.start_transition_data['note'].append('' if note is None else str(note))
             return True
     
     def record_step(
@@ -470,6 +509,7 @@ class InferenceRecorder:
         
         data = self.pending_data['episode_data']
         control_data = self.pending_data.get('control_data', {})
+        start_transition_data = self.pending_data.get('start_transition_data', {})
         outcome_label = outcome_label or ('success' if success else 'failure')
         
         # 生成文件名
@@ -554,6 +594,13 @@ class InferenceRecorder:
                 control_grp.create_dataset('human_sched_target', data=np.array(control_data.get('human_sched_target', []), dtype=np.float64))
                 control_grp.create_dataset('human_exec_target', data=np.array(control_data.get('human_exec_target', []), dtype=np.float64))
                 control_grp.create_dataset('shared_source', data=np.array(control_data.get('shared_source', []), dtype=h5py.string_dtype(encoding='utf-8')))
+                start_grp = f.create_group('start_transition')
+                start_grp.create_dataset('event_name', data=np.array(start_transition_data.get('event_name', []), dtype=h5py.string_dtype(encoding='utf-8')))
+                start_grp.create_dataset('timestamps', data=np.array(start_transition_data.get('timestamps', []), dtype=np.float64))
+                start_grp.create_dataset('owner_active', data=np.array(start_transition_data.get('owner_active', []), dtype=np.bool_))
+                start_grp.create_dataset('current_qpos_end', data=np.array(start_transition_data.get('current_qpos_end', []), dtype=np.float64))
+                start_grp.create_dataset('hold_target', data=np.array(start_transition_data.get('hold_target', []), dtype=np.float64))
+                start_grp.create_dataset('note', data=np.array(start_transition_data.get('note', []), dtype=h5py.string_dtype(encoding='utf-8')))
             
             # 兼容旧格式: action = action_executed[:, 0, :]
             # 取每步的第一个 action 作为该步的 action
@@ -584,6 +631,7 @@ class InferenceRecorder:
             f.attrs['hitl_live_execute_enabled'] = bool(self.hitl_mode == 'live')
             f.attrs['control_provenance_aligned'] = bool(self.hitl_enabled and self.hitl_record_full_provenance)
             f.attrs['num_control_steps'] = int(len(control_data.get('timestamps', [])))
+            f.attrs['num_start_transition_events'] = int(len(start_transition_data.get('timestamps', [])))
         
         _log_info(
             f"Episode saved: {num_steps} steps, "

@@ -53,6 +53,10 @@ class HumanChunkProposalBuilder:
         self.shadow_transformer = TeleopShadowTransformer(self.pred_horizon)
         self.history: Deque[Dict[str, Any]] = deque()
 
+    def reset(self):
+        """Reset cross-episode teleop history to avoid stale rollout leakage."""
+        self.history.clear()
+
     @staticmethod
     def _normalize_quat(quat: np.ndarray) -> np.ndarray:
         quat = np.asarray(quat, dtype=np.float64)

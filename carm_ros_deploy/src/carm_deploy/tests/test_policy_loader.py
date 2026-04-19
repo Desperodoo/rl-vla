@@ -190,6 +190,11 @@ class TestLoadModel:
         policy.load_model(str(ckpt_dir / "model.pt"))
         assert policy.loaded
 
+    def test_runtime_gripper_config_overrides_args_json(self, default_policy_config, fake_checkpoint_dir):
+        policy = RealPolicy({**default_policy_config, "gripper_close_val": 0.0})
+        policy.load_model(str(fake_checkpoint_dir / "model.pt"))
+        assert policy.gripper_close_val == pytest.approx(0.0)
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # _encode_observations
@@ -252,12 +257,12 @@ class TestReconstructFullAction:
         policy = RealPolicy({"action_dim": 13, "action_dim_full": 15})
         policy.device = device
         actions_cont = torch.randn(16, 13, device=device)
-        gripper_vals = np.full(16, 0.04, dtype=np.float32)
+        gripper_vals = np.full(16, policy.gripper_close_val, dtype=np.float32)
         result = policy._reconstruct_full_action(actions_cont, gripper_vals)
         assert result.shape == (16, 15)
         # Gripper slots
-        np.testing.assert_allclose(result[:, 6].cpu().numpy(), 0.04, atol=1e-6)
-        np.testing.assert_allclose(result[:, 14].cpu().numpy(), 0.04, atol=1e-6)
+        np.testing.assert_allclose(result[:, 6].cpu().numpy(), policy.gripper_close_val, atol=1e-6)
+        np.testing.assert_allclose(result[:, 14].cpu().numpy(), policy.gripper_close_val, atol=1e-6)
         # Joint actions preserved
         torch.testing.assert_close(result[:, :6], actions_cont[:, :6])
 

@@ -264,6 +264,9 @@ class InferenceNode:
         self._control_hz_ema = None
         self._last_gripper_value = None
         self._last_gripper_log_time = 0.0
+        self._start_transition_first_chunk_logged = False
+        self._start_transition_first_control_logged = False
+        self._episode_policy_ready = False
         
         # Episode 状态（用于多 episode 采集）
         # 只有启用 record_inference 时才等待按键开始
@@ -402,30 +405,89 @@ class InferenceNode:
     def _start_new_episode(self):
         """开始新的 episode"""
         self.pending_save = False
+        self._start_transition_first_chunk_logged = False
+        self._start_transition_first_control_logged = False
+        self._episode_policy_ready = False
+
+        current_qpos_end = None
+        hold_target = None
+        state_obs = None
+        if hasattr(self.env, 'get_state_observation'):
+            try:
+                state_obs = self.env.get_state_observation()
+            except Exception as exc:
+                rospy.logwarn(f"Failed to fetch state-only observation for episode start: {exc}")
+        if state_obs is not None and state_obs.get('qpos_end') is not None:
+            current_qpos_end = np.asarray(state_obs['qpos_end'], dtype=np.float64).copy()
+            hold_target = current_qpos_end.copy()
+        elif self.latest_obs is not None and self.latest_obs.get('qpos_end') is not None:
+            current_qpos_end = np.asarray(self.latest_obs['qpos_end'], dtype=np.float64).copy()
+            hold_target = current_qpos_end.copy()
+
+        if self.inference_recorder:
+            self.inference_recorder.start_recording()
+            self._record_start_transition_event(
+                'start_requested',
+                current_qpos_end=current_qpos_end,
+                hold_target=hold_target,
+                note=f"hitl_mode={self.hitl_mode}",
+            )
         
         # 清空 action chunk 管理器（推理线程仍被 episode_paused 阻塞）
         with self.lock_tfs:
             self.action_manager.clear()
-        
+            if self.hitl_candidate_manager is not None:
+                self.hitl_candidate_manager.clear()
+
         # 重置策略状态（观测历史、gripper 历史等）
         # 必须在 episode_paused = False 之前完成，否则推理线程可能访问空的 obs_history
         if hasattr(self, 'policy') and self.policy is not None:
             self.policy.reset()
             rospy.loginfo("Policy state reset")
 
+        self._reset_hitl_episode_state()
+
+        # 先种入当前位姿 hold chunk，确保开始 episode 时 control loop
+        # 的第一条命令总是“保位”，而不是旧 episode 残留动作或空窗。
+        if hold_target is not None:
+            hold_chunk = np.repeat(hold_target[None, :], self._pred_horizon, axis=0)
+            with self.lock_tfs:
+                hold_chunk_id, _, _, _ = self._add_chunk_to_manager(
+                    self.action_manager,
+                    hold_chunk,
+                    time.time(),
+                )
+            self._record_start_transition_event(
+                'hold_chunk_seeded',
+                current_qpos_end=current_qpos_end,
+                hold_target=hold_target,
+                note=f"chunk_id={hold_chunk_id}",
+            )
+
         if self.hitl_mode == 'live' and not self._activate_hitl_live_owner():
             self.waiting_start = True
             self.episode_paused = True
+            self._record_start_transition_event(
+                'owner_acquire_failed',
+                current_qpos_end=current_qpos_end,
+                hold_target=hold_target,
+                note=str(self.hitl_live_last_error),
+            )
+            if self.inference_recorder and self.inference_recorder.is_recording:
+                self.inference_recorder.stop_recording()
+                self.inference_recorder.discard()
             rospy.logerr("HITL live owner acquire failed, episode start aborted")
             return
         
         # 最后才解除暂停，让推理线程开始工作
         self.waiting_start = False
         self.episode_paused = False
-        
-        # 开始录制
-        if self.inference_recorder:
-            self.inference_recorder.start_recording()
+        self._record_start_transition_event(
+            'episode_unpaused',
+            owner_active=self.hitl_live_owner_active,
+            current_qpos_end=current_qpos_end,
+            hold_target=hold_target,
+        )
         
         self.step_count = 0
         rospy.loginfo("=" * 60)
@@ -437,6 +499,12 @@ class InferenceNode:
         """停止当前 episode，等待保存确认"""
         self.episode_paused = True
         self.pending_save = True
+        self._episode_policy_ready = False
+        with self.lock_tfs:
+            self.action_manager.clear()
+            if self.hitl_candidate_manager is not None:
+                self.hitl_candidate_manager.clear()
+        self._reset_hitl_episode_state()
         self._restore_hitl_live_owner()
         
         # 停止录制
@@ -496,6 +564,9 @@ class InferenceNode:
         try:
             # 使用 env 的 init_status 方法
             self.env.init_status()
+            # 丢弃上一个 episode 的 cached observation，避免下一次 start
+            # 用到回位前的 stale qpos_end 来 seed hold chunk。
+            self.latest_obs = None
             rospy.loginfo("Arm returned to initial position")
         except Exception as e:
             rospy.logerr(f"Failed to reinitialize arm: {e}")
@@ -706,10 +777,12 @@ class InferenceNode:
         if self.hitl_mode != 'live' or self.hitl_signal_client is None:
             return True
         try:
+            self._record_start_transition_event('owner_acquire_started')
             self.hitl_signal_client.set_control_state(False, "upper_machine", timeout_s=0.2)
             with self.hitl_state_lock:
                 self.hitl_live_owner_active = True
                 self.hitl_live_last_error = None
+            self._record_start_transition_event('owner_acquired', owner_active=True)
             return True
         except Exception as exc:
             with self.hitl_state_lock:
@@ -717,6 +790,74 @@ class InferenceNode:
                 self.hitl_live_last_error = str(exc)
             rospy.logerr(f"Failed to acquire HITL live upper owner: {exc}")
             return False
+
+    def _reset_hitl_episode_state(self):
+        """Clear cross-episode HITL runtime state to avoid stale scheduled/human leakage."""
+        with self.hitl_state_lock:
+            self.hitl_candidate_state = {
+                'sched_action': None,
+                'exec_action': None,
+                'shared_source': 'policy',
+                'shared_source_code': 0,
+                'num_candidates': 0,
+            }
+            self.hitl_live_state = {
+                'human_direct_target_abs': None,
+                'human_sched_target_abs': None,
+                'human_exec_target_abs': None,
+                'human_execute_source': 'policy',
+                'human_active': False,
+                'human_valid': False,
+                'human_stale': False,
+                'signal_age_ms': None,
+                'shared_source': 'policy',
+                'shared_source_code': 0,
+                'human_execute_mode': self.hitl_human_execute_mode,
+            }
+        if self.hitl_human_builder is not None:
+            self.hitl_human_builder.reset()
+
+    def _record_start_transition_event(
+        self,
+        event_name: str,
+        *,
+        owner_active: Optional[bool] = None,
+        current_qpos_end: Optional[np.ndarray] = None,
+        hold_target: Optional[np.ndarray] = None,
+        note: Optional[str] = None,
+    ) -> None:
+        """Write episode-start transition diagnostics to timeline and HDF5."""
+        event_time = time.time()
+        if owner_active is None:
+            with self.hitl_state_lock:
+                owner_active = bool(self.hitl_live_owner_active)
+
+        if current_qpos_end is None and self.latest_obs is not None and self.latest_obs.get('qpos_end') is not None:
+            current_qpos_end = np.asarray(self.latest_obs['qpos_end'], dtype=np.float64).copy()
+        if hold_target is None and current_qpos_end is not None:
+            hold_target = np.asarray(current_qpos_end, dtype=np.float64).copy()
+
+        if self.timeline_logger is not None:
+            self.timeline_logger.log(
+                'episode_start_transition',
+                event_name=event_name,
+                event_time=event_time,
+                hitl_mode=self.hitl_mode,
+                owner_active=bool(owner_active),
+                current_qpos_end=None if current_qpos_end is None else np.asarray(current_qpos_end, dtype=np.float64).tolist(),
+                hold_target=None if hold_target is None else np.asarray(hold_target, dtype=np.float64).tolist(),
+                note=note,
+            )
+
+        if self.inference_recorder is not None and self.inference_recorder.is_recording:
+            self.inference_recorder.record_start_transition_event(
+                event_name=event_name,
+                timestamp=event_time,
+                owner_active=bool(owner_active),
+                current_qpos_end=current_qpos_end,
+                hold_target=hold_target,
+                note=note,
+            )
 
     def _restore_hitl_live_owner(self):
         if self.hitl_mode != 'live' or self.hitl_signal_client is None:
@@ -1096,6 +1237,16 @@ class InferenceNode:
                         action_executed,
                         chunk_base_time,
                     )
+                    if not self._start_transition_first_chunk_logged:
+                        self._record_start_transition_event(
+                            'first_policy_chunk_added',
+                            owner_active=self.hitl_live_owner_active,
+                            current_qpos_end=np.asarray(qpos_end, dtype=np.float64),
+                            hold_target=np.asarray(action_executed[0], dtype=np.float64),
+                            note=f"chunk_id={chunk_id}",
+                        )
+                        self._start_transition_first_chunk_logged = True
+                        self._episode_policy_ready = True
 
                     if self.timeline_logger is not None:
                         delta_chunk_obs = None
@@ -1260,6 +1411,7 @@ class InferenceNode:
                     live_state = dict(self.hitl_live_state)
                 if (
                     live_owner_active
+                    and self._episode_policy_ready
                     and live_state.get('shared_source') == 'human'
                     and live_state.get('human_valid')
                 ):
@@ -1297,6 +1449,14 @@ class InferenceNode:
             # 执行控制 (末端位姿模式)
             rospy.logdebug("End pose control")
             self.env.end_control_nostep(execute_action)
+            if not self._start_transition_first_control_logged:
+                self._record_start_transition_event(
+                    'first_control_sent',
+                    owner_active=self.hitl_live_owner_active,
+                    hold_target=np.asarray(execute_action, dtype=np.float64),
+                    note=f"execute_source={execute_source}",
+                )
+                self._start_transition_first_control_logged = True
 
             if (
                 self.record_inference_enabled
@@ -1511,6 +1671,12 @@ def parse_args():
                         help='Control loop frequency in Hz (default: 50, aligned with joystick)')
     parser.add_argument('--gripper_hysteresis_window', type=int, default=1,
                         help='Gripper hysteresis window size for voting (default: 1 = no hysteresis)')
+    parser.add_argument('--gripper_threshold', type=float, default=0.05,
+                        help='Discrete gripper classification threshold / runtime override')
+    parser.add_argument('--gripper_open_val', type=float, default=0.078,
+                        help='Open gripper command in meters (runtime override)')
+    parser.add_argument('--gripper_close_val', type=float, default=0.0,
+                        help='Close gripper command in meters (runtime override)')
 
     # HITL inference 参数
     parser.add_argument('--hitl_mode', type=str, default='disabled',
@@ -1587,6 +1753,7 @@ def main():
         'truncate_at_act_horizon', 'act_horizon',
         # Teleop 对齐模式参数
         'teleop_scale', 'inference_speed_scale', 'control_freq', 'gripper_hysteresis_window',
+        'gripper_threshold', 'gripper_open_val', 'gripper_close_val',
         # HITL inference 参数
         'hitl_mode', 'hitl_signal_source', 'hitl_stale_timeout_ms', 'hitl_require_active',
         'hitl_record_full_provenance', 'hitl_human_execute_mode', 'backend_url_v2', 'events_v2_url',

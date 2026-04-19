@@ -47,7 +47,7 @@ def default_policy_config():
         "use_ema": False,
         "gripper_threshold": 0.05,
         "gripper_open_val": 0.078,
-        "gripper_close_val": 0.04,
+        "gripper_close_val": 0.0,
         "gripper_head_hidden_dim": 256,
         "gripper_hysteresis_window": 1,
     }
@@ -101,7 +101,7 @@ def fake_checkpoint_dir(tmp_path, device):
         "action_mode": "full",
         "gripper_threshold": 0.05,
         "gripper_open_val": 0.078,
-        "gripper_close_val": 0.04,
+        "gripper_close_val": 0.0,
         "gripper_head_hidden_dim": 256,
     }
     with open(str(tmp_path / "args.json"), "w") as f:

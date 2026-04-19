@@ -89,7 +89,7 @@ POLICY_DEFAULTS: Dict[str, Any] = {
     'use_ema': False,
     'gripper_threshold': 0.05,
     'gripper_open_val': 0.078,
-    'gripper_close_val': 0.04,
+    'gripper_close_val': 0.0,
     'gripper_head_hidden_dim': 256,
     'gripper_hysteresis_window': 1,
 }
@@ -271,6 +271,17 @@ class RealPolicy(PolicyInterface):
                       f"obs_horizon={self.obs_horizon}, pred_horizon={self.pred_horizon}, "
                       f"state_mode={self.state_mode}, use_ema={self.use_ema}, "
                       f"num_inference_steps={self.num_inference_steps}")
+
+        # 运行时参数应允许覆盖 checkpoint 内的历史 gripper 配置，
+        # 否则部署时无法修正训练期遗留的 close/open 语义。
+        self.gripper_threshold = self.config.get('gripper_threshold', self.gripper_threshold)
+        self.gripper_open_val = self.config.get('gripper_open_val', self.gripper_open_val)
+        self.gripper_close_val = self.config.get('gripper_close_val', self.gripper_close_val)
+        self.gripper_head_hidden_dim = self.config.get('gripper_head_hidden_dim', self.gripper_head_hidden_dim)
+        _log_info(
+            f"Runtime gripper override: threshold={self.gripper_threshold}, "
+            f"open={self.gripper_open_val}, close={self.gripper_close_val}"
+        )
 
         # 2. 创建模型 -------------------------------------------------------
         _log_info("Creating models...")
