@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -23,7 +24,7 @@ class Args:
     peft_adapter_path: Optional[str] = None
     output_path: Optional[str] = None
     repo_id: str = "carm/pi05_local"
-    tokenizer_path_override: Optional[str] = "/home/wjz/.cache/huggingface/hub/models--google--paligemma-3b-pt-224/snapshots/35e4f46485b4d07967e7e9935bc3786aad50687c"
+    tokenizer_path_override: Optional[str] = os.environ.get("PI05_TOKENIZER_PATH")
     max_episodes: Optional[int] = None
     max_frames: Optional[int] = None
     device: str = "cuda"
@@ -33,6 +34,13 @@ def _to_float_array(value) -> np.ndarray:
     if torch.is_tensor(value):
         return value.detach().cpu().numpy().astype(np.float32)
     return np.asarray(value, dtype=np.float32)
+
+
+def _load_bridge_metadata(dataset_root: Path) -> Optional[dict]:
+    metadata_path = dataset_root / "pi05_bridge_metadata.json"
+    if not metadata_path.exists():
+        return None
+    return json.loads(metadata_path.read_text())
 
 
 def _load_policy_and_processors(args: Args, dataset: LeRobotDataset):
@@ -79,6 +87,7 @@ def _load_policy_and_processors(args: Args, dataset: LeRobotDataset):
 def main() -> None:
     args = tyro.cli(Args)
     dataset_root = Path(args.dataset_root).expanduser().resolve()
+    bridge_metadata = _load_bridge_metadata(dataset_root)
     dataset = LeRobotDataset(repo_id=args.repo_id, root=dataset_root)
     policy, preprocessor, postprocessor = _load_policy_and_processors(args, dataset)
     policy.eval()
@@ -112,6 +121,7 @@ def main() -> None:
         "dataset_root": str(dataset_root),
         "policy_pretrained_path": str(Path(args.policy_pretrained_path).expanduser().resolve()),
         "peft_adapter_path": str(Path(args.peft_adapter_path).expanduser().resolve()) if args.peft_adapter_path else None,
+        "bridge_contract": None if bridge_metadata is None else bridge_metadata.get("bridge_contract"),
         "num_frames": len(sq_errors),
         "num_episodes": len(dataset.meta.episodes),
         "mean_action_mse": float(np.mean(mse)),

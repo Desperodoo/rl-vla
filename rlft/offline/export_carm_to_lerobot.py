@@ -8,6 +8,7 @@ import tyro
 
 from rlft.offline.pi05_bridge import (
     Pi05BridgeContract,
+    Pi05ActionContract,
     Pi05ObservationContract,
     export_carm_to_lerobot_dataset,
     validate_lerobot_dataset_path,
@@ -19,7 +20,8 @@ class Args:
     demo_path: str = "~/rl-vla/recorded_data/mix"
     output_dir: str = "~/rl-vla/runs/pi05_lerobot_export"
     num_demos: Optional[int] = None
-    state_mode: Literal["joint_only", "ee_only", "both"] = "joint_only"
+    state_mode: Literal["joint_only", "ee_only", "both"] = "ee_only"
+    action_representation: Literal["ee_delta_pose_gripper", "absolute_pose_gripper"] = "ee_delta_pose_gripper"
     obs_horizon: int = 2
     action_horizon: int = 16
     window_stride: int = 1
@@ -46,7 +48,7 @@ def main() -> None:
             normalize_images=base_contract.observation.normalize_images,
             include_depth=base_contract.observation.include_depth,
         ),
-        action=base_contract.action,
+        action=Pi05ActionContract(representation=args.action_representation),
     )
 
     export_result = export_carm_to_lerobot_dataset(

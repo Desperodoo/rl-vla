@@ -1,9 +1,22 @@
 from __future__ import annotations
 
+import os
+from pathlib import Path
 from typing import Any
 
 
-DEFAULT_OPENPI_PI05_DROID_PRETRAINED_PATH = "/mnt/disk_2/wjz/openpi/pi05_droid_pytorch"
+DEFAULT_OPENPI_CHECKPOINT_ROOT = Path(
+    os.environ.get("OPENPI_CHECKPOINT_ROOT", "~/openpi")
+).expanduser()
+DEFAULT_OPENPI_PI05_BASE_PRETRAINED_PATH = str(DEFAULT_OPENPI_CHECKPOINT_ROOT / "pi05_base_pytorch")
+DEFAULT_OPENPI_PI05_DROID_PRETRAINED_PATH = str(DEFAULT_OPENPI_CHECKPOINT_ROOT / "pi05_droid_pytorch")
+DEFAULT_OPENPI_PI05_LIBERO_PRETRAINED_PATH = str(DEFAULT_OPENPI_CHECKPOINT_ROOT / "pi05_libero_pytorch")
+
+DEFAULT_OPENPI_PI05_PRETRAINED_PATHS = {
+    "pi05_base": DEFAULT_OPENPI_PI05_BASE_PRETRAINED_PATH,
+    "pi05_droid": DEFAULT_OPENPI_PI05_DROID_PRETRAINED_PATH,
+    "pi05_libero": DEFAULT_OPENPI_PI05_LIBERO_PRETRAINED_PATH,
+}
 
 LEROBOT_POLICY_NAME_MAP = {
     "pi0.5": "pi05",
@@ -18,6 +31,16 @@ def resolve_target_image_size(visual_encoder_type: str, auto_image_size: bool = 
     if visual_encoder_type in {"resnet18", "resnet34", "resnet50"}:
         return (224, 224)
     return (128, 128)
+
+
+def resolve_default_openpi_pi05_pretrained_path(checkpoint_name: str = "pi05_base") -> str:
+    try:
+        return DEFAULT_OPENPI_PI05_PRETRAINED_PATHS[checkpoint_name]
+    except KeyError as exc:  # pragma: no cover - defensive
+        raise ValueError(
+            f"Unsupported OpenPI pi05 checkpoint '{checkpoint_name}'. "
+            f"Expected one of: {sorted(DEFAULT_OPENPI_PI05_PRETRAINED_PATHS)}"
+        ) from exc
 
 
 def build_pi05_run_config(args: Any, contract_metadata: dict, data_info: dict) -> dict:
@@ -43,6 +66,7 @@ def build_pi05_run_config(args: Any, contract_metadata: dict, data_info: dict) -
             "dataset_path": getattr(args, "lerobot_dataset_path", None),
             "policy_repo_id": getattr(args, "policy_repo_id", f"carm/{lerobot_policy_type}-smoke"),
             "policy_pretrained_path": getattr(args, "policy_pretrained_path", None),
+            "official_checkpoint_name": getattr(args, "official_openpi_checkpoint_name", "pi05_base"),
             "push_to_hub": getattr(args, "policy_push_to_hub", False),
             "use_peft": getattr(args, "use_peft", False),
         },
@@ -79,7 +103,8 @@ def build_lerobot_train_command(args: Any, run_dir: str) -> list[str]:
     policy_repo_id = getattr(args, "policy_repo_id", f"carm/{lerobot_policy_type}-smoke")
     policy_pretrained_path = getattr(args, "policy_pretrained_path", None)
     if getattr(args, "use_official_openpi_checkpoint", False) and not policy_pretrained_path:
-        policy_pretrained_path = DEFAULT_OPENPI_PI05_DROID_PRETRAINED_PATH
+        checkpoint_name = getattr(args, "official_openpi_checkpoint_name", "pi05_base")
+        policy_pretrained_path = resolve_default_openpi_pi05_pretrained_path(checkpoint_name)
     command = ["lerobot-train", f"--policy.type={lerobot_policy_type}"]
 
     dataset_repo_id = getattr(args, "lerobot_dataset_repo_id", None)

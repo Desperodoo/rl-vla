@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import shlex
+import shutil
 import subprocess
 import threading
 import time
@@ -12,15 +13,20 @@ from typing import Optional
 
 import tyro
 
+from rlft.offline.pi05_bridge import resolve_default_openpi_pi05_pretrained_path
+
 
 @dataclass
 class Args:
     dataset_root: str
     output_dir: str
     launcher_output_dir: Optional[str] = None
-    policy_pretrained_path: str = "/mnt/disk_2/wjz/openpi/pi05_droid_pytorch"
-    policy_repo_id: str = "zhili0818/pi05-full-lora-openpi-droid-v3"
-    job_name: str = "pi05-full-lora-openpi-droid-v3"
+    accelerate_bin: Optional[str] = None
+    lerobot_train_bin: Optional[str] = None
+    policy_pretrained_path: Optional[str] = None
+    official_openpi_checkpoint_name: str = "pi05_base"
+    policy_repo_id: str = "zhili0818/pi05-ee-delta-lora-base"
+    job_name: str = "pi05-ee-delta-lora-base"
     gpus: str = "0,1,2,3,4,5"
     num_processes: int = 6
     main_process_port: int = 29672
@@ -73,6 +79,15 @@ def _monitor(stop_event: threading.Event, monitor_path: Path, interval_s: int) -
 
 def main() -> None:
     args = tyro.cli(Args)
+    policy_pretrained_path = args.policy_pretrained_path or resolve_default_openpi_pi05_pretrained_path(
+        args.official_openpi_checkpoint_name
+    )
+    accelerate_bin = args.accelerate_bin or shutil.which("accelerate")
+    lerobot_train_bin = args.lerobot_train_bin or shutil.which("lerobot-train")
+    if not accelerate_bin:
+        raise FileNotFoundError("Could not resolve 'accelerate' from PATH. Pass --accelerate_bin explicitly.")
+    if not lerobot_train_bin:
+        raise FileNotFoundError("Could not resolve 'lerobot-train' from PATH. Pass --lerobot_train_bin explicitly.")
     training_output_dir = Path(args.output_dir).expanduser().resolve()
     launcher_output_dir = (
         Path(args.launcher_output_dir).expanduser().resolve()
@@ -87,18 +102,18 @@ def main() -> None:
     config_path = launcher_output_dir / "launch_config.json"
 
     command = [
-        "/home/wjz/miniconda3/envs/rlft_ms3_lerobot/bin/accelerate",
+        accelerate_bin,
         "launch",
         "--main_process_port",
         str(args.main_process_port),
         "--num_processes",
         str(args.num_processes),
-        "/home/wjz/miniconda3/envs/rlft_ms3_lerobot/bin/lerobot-train",
+        lerobot_train_bin,
         "--policy.type=pi05",
         "--dataset.repo_id=carm/pi05_local",
         f"--dataset.root={Path(args.dataset_root).expanduser().resolve()}",
         f"--policy.repo_id={args.policy_repo_id}",
-        f"--policy.pretrained_path={Path(args.policy_pretrained_path).expanduser().resolve()}",
+        f"--policy.pretrained_path={Path(policy_pretrained_path).expanduser().resolve()}",
         "--policy.push_to_hub=false",
         f"--job_name={args.job_name}",
         f"--output_dir={training_output_dir}",

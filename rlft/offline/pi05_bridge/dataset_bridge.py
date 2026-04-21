@@ -9,6 +9,7 @@ from torch.utils.data import Dataset
 
 from rlft.datasets import ActionNormalizer, load_carm_dataset, create_carm_obs_process_fn
 
+from .action_transform import transform_carm_raw_action_sequence
 from .contract import Pi05BridgeContract
 
 
@@ -25,7 +26,7 @@ class Pi05LeRobotDatasetBridge(Dataset):
     Current scope:
     - single RGB stream
     - state from create_carm_obs_process_fn(...)
-    - 8D absolute teleop action passthrough for v2 datasets
+    - bridge-time action conversion into the configured pi05 action contract
     - optional action normalization reused from rlft.datasets.ActionNormalizer
     """
 
@@ -54,14 +55,16 @@ class Pi05LeRobotDatasetBridge(Dataset):
             images = self.raw_data["images"][ep_idx]
             qpos_joint = self.raw_data["qpos_joint"][ep_idx]
             qpos_end = self.raw_data["qpos_end"][ep_idx]
-            actions = self.raw_data["action"][ep_idx].astype(np.float32)
-
+            obs = self.obs_process_fn(images, qpos_joint, qpos_end)
+            actions = transform_carm_raw_action_sequence(
+                self.raw_data["action"][ep_idx],
+                obs["ee_pose"],
+                contract.action.representation,
+            )
             if actions.shape[-1] != contract.action.target_dim:
                 raise ValueError(
-                    f"Expected CARM v2 action dim {contract.action.target_dim}, got {actions.shape[-1]}"
+                    f"Expected bridge action dim {contract.action.target_dim}, got {actions.shape[-1]}"
                 )
-
-            obs = self.obs_process_fn(images, qpos_joint, qpos_end)
             episode = {
                 "rgb": obs["rgb"],
                 "state": obs["state"],

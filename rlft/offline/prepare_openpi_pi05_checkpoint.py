@@ -11,9 +11,9 @@ from rlft.offline.pi05_bridge.openpi_checkpoint import prepare_openpi_pi05_check
 
 @dataclass
 class Args:
-    checkpoint_name: Literal["pi05_base", "pi05_droid", "pi05_libero"] = "pi05_droid"
-    cache_dir: Optional[str] = "/mnt/disk_2/wjz/.cache/openpi"
-    output_dir: Optional[str] = "/mnt/disk_2/wjz/openpi/pi05_droid_pytorch"
+    checkpoint_name: Literal["pi05_base", "pi05_droid", "pi05_libero"] = "pi05_base"
+    cache_dir: Optional[str] = "~/.cache/openpi"
+    output_dir: Optional[str] = None
     force_download: bool = False
     force_reconvert: bool = False
     precision: Literal["float32", "bfloat16"] = "bfloat16"

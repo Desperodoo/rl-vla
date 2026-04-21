@@ -29,14 +29,15 @@ except ImportError:  # pragma: no cover - optional dependency
 from rlft.datasets import get_carm_data_info, worker_init_fn
 from rlft.offline.pi05_bridge import (
     Pi05BridgeContract,
+    Pi05ActionContract,
     Pi05ObservationContract,
     build_lerobot_train_command,
     build_pi05_dataset_bridge,
     build_pi05_run_config,
     build_probe_environment,
-    DEFAULT_OPENPI_PI05_DROID_PRETRAINED_PATH,
     export_carm_to_lerobot_dataset,
     probe_lerobot_environment,
+    resolve_default_openpi_pi05_pretrained_path,
     validate_bridge_dataset,
     validate_lerobot_dataset_path,
     validate_lerobot_train_command,
@@ -55,7 +56,8 @@ class Args:
 
     demo_path: str = "~/rl-vla/recorded_data/mix"
     num_demos: Optional[int] = None
-    state_mode: Literal["joint_only", "ee_only", "both"] = "joint_only"
+    state_mode: Literal["joint_only", "ee_only", "both"] = "ee_only"
+    action_representation: Literal["ee_delta_pose_gripper", "absolute_pose_gripper"] = "ee_delta_pose_gripper"
     normalize_actions: bool = True
     action_norm_mode: Literal["standard", "minmax"] = "standard"
 
@@ -79,9 +81,10 @@ class Args:
     lerobot_dataset_path: Optional[str] = None
     policy_repo_id: Optional[str] = None
     policy_pretrained_path: Optional[str] = None
-    use_official_openpi_checkpoint: bool = False
+    use_official_openpi_checkpoint: bool = True
+    official_openpi_checkpoint_name: Literal["pi05_base", "pi05_libero", "pi05_droid"] = "pi05_base"
     policy_push_to_hub: bool = False
-    use_peft: bool = False
+    use_peft: bool = True
     peft_method_type: str = "LORA"
     peft_r: int = 16
     peft_target_modules: Optional[str] = None
@@ -120,7 +123,11 @@ def _build_contract(args: Args) -> Pi05BridgeContract:
             normalize_images=base_contract.observation.normalize_images,
             include_depth=base_contract.observation.include_depth,
         ),
-        action=base_contract.action,
+        action=Pi05ActionContract(
+            representation=args.action_representation,
+            normalize_actions=args.normalize_actions,
+            action_norm_mode=args.action_norm_mode,
+        ),
     )
 
 
@@ -153,8 +160,10 @@ def _wait_for_export(export_dir: Path, timeout_s: float = 300.0) -> None:
 
 
 def _validate_peft_args(args: Args) -> None:
-    if args.use_official_openpi_checkpoint and not args.policy_pretrained_path:
-        args.policy_pretrained_path = DEFAULT_OPENPI_PI05_DROID_PRETRAINED_PATH
+    if (args.use_official_openpi_checkpoint or args.use_peft) and not args.policy_pretrained_path:
+        args.policy_pretrained_path = resolve_default_openpi_pi05_pretrained_path(
+            args.official_openpi_checkpoint_name
+        )
     if args.use_peft and not args.policy_pretrained_path:
         raise ValueError(
             "PEFT/LoRA requires policy_pretrained_path. "
@@ -254,9 +263,11 @@ def main() -> None:
     if writer is not None:
         writer.add_text("bridge/upstream_family", args.upstream_family)
         writer.add_text("bridge/policy_type", args.policy_type)
+        writer.add_text("bridge/action_representation", contract.action.representation)
         writer.add_scalar("bridge/num_sequences", len(dataset), 0)
         writer.add_scalar("bridge/state_dim", data_info["state_dim"], 0)
         writer.add_scalar("bridge/action_dim_raw", data_info["action_dim"], 0)
+        writer.add_scalar("bridge/action_dim_bridge", contract.action.target_dim, 0)
 
     if args.bridge_smoke_only:
         if writer is not None:

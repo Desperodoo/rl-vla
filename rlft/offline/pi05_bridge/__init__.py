@@ -6,9 +6,13 @@ pipeline to an external pi0.5/LeRobot training stack.
 
 from .contract import Pi05ActionContract, Pi05BridgeContract, Pi05ObservationContract
 from .config_bridge import (
+    DEFAULT_OPENPI_PI05_BASE_PRETRAINED_PATH,
     DEFAULT_OPENPI_PI05_DROID_PRETRAINED_PATH,
+    DEFAULT_OPENPI_PI05_LIBERO_PRETRAINED_PATH,
+    DEFAULT_OPENPI_PI05_PRETRAINED_PATHS,
     build_lerobot_train_command,
     build_pi05_run_config,
+    resolve_default_openpi_pi05_pretrained_path,
     resolve_target_image_size,
 )
 from .dataset_bridge import Pi05EpisodeWindow, Pi05LeRobotDatasetBridge, build_pi05_dataset_bridge
@@ -27,7 +31,11 @@ __all__ = [
     "build_pi05_run_config",
     "build_lerobot_train_command",
     "resolve_target_image_size",
+    "resolve_default_openpi_pi05_pretrained_path",
+    "DEFAULT_OPENPI_PI05_BASE_PRETRAINED_PATH",
     "DEFAULT_OPENPI_PI05_DROID_PRETRAINED_PATH",
+    "DEFAULT_OPENPI_PI05_LIBERO_PRETRAINED_PATH",
+    "DEFAULT_OPENPI_PI05_PRETRAINED_PATHS",
     "build_probe_environment",
     "probe_lerobot_environment",
     "validate_bridge_dataset",

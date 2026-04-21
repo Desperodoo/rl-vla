@@ -1,6 +1,8 @@
 from dataclasses import dataclass, field
 from typing import Literal, Tuple
 
+from .action_transform import ActionRepresentation, get_pi05_action_representation_spec
+
 
 @dataclass(frozen=True)
 class Pi05ObservationContract:
@@ -20,17 +22,27 @@ class Pi05ObservationContract:
 class Pi05ActionContract:
     """Action contract for the first bridge version.
 
-    We intentionally keep the current CARM v2 teleop semantics untouched:
-    absolute target pose (7D) + gripper scalar (1D).
+    Mainline uses LIBERO-like end-effector delta actions, while keeping the
+    legacy absolute target-pose route available as a baseline/ablation.
     """
 
     action_key: str = "action"
-    target_dim: int = 8
-    pose_slice: Tuple[int, int] = (0, 7)
-    gripper_index: int = 7
-    representation: Literal["absolute_pose_gripper"] = "absolute_pose_gripper"
+    representation: ActionRepresentation = "ee_delta_pose_gripper"
     normalize_actions: bool = True
     action_norm_mode: Literal["standard", "minmax"] = "standard"
+    target_dim: int = field(init=False)
+    pose_slice: Tuple[int, int] = field(init=False)
+    gripper_index: int = field(init=False)
+    rotation_mode: Literal["rotvec", "quat"] = field(init=False)
+    description: str = field(init=False)
+
+    def __post_init__(self) -> None:
+        spec = get_pi05_action_representation_spec(self.representation)
+        object.__setattr__(self, "target_dim", spec.target_dim)
+        object.__setattr__(self, "pose_slice", spec.pose_slice)
+        object.__setattr__(self, "gripper_index", spec.gripper_index)
+        object.__setattr__(self, "rotation_mode", spec.rotation_mode)
+        object.__setattr__(self, "description", spec.description)
 
 
 @dataclass(frozen=True)
@@ -64,6 +76,8 @@ class Pi05BridgeContract:
                 "pose_slice": list(self.action.pose_slice),
                 "gripper_index": self.action.gripper_index,
                 "representation": self.action.representation,
+                "rotation_mode": self.action.rotation_mode,
+                "description": self.action.description,
                 "normalize_actions": self.action.normalize_actions,
                 "action_norm_mode": self.action.action_norm_mode,
             },

@@ -9,6 +9,7 @@ import numpy as np
 
 from rlft.datasets import create_carm_obs_process_fn, get_carm_data_info, load_carm_dataset
 
+from .action_transform import transform_carm_raw_action_sequence
 from .contract import Pi05BridgeContract
 
 
@@ -75,7 +76,7 @@ def export_carm_to_lerobot_dataset(
     features = _build_lerobot_features(
         image_shape=tuple(processed_first["rgb"].shape[1:]),
         state_dim=processed_first["state"].shape[-1],
-        action_dim=raw_dataset["action"][0].shape[-1],
+        action_dim=contract.action.target_dim,
     )
 
     repo_id = "carm/pi05_local"
@@ -99,6 +100,11 @@ def export_carm_to_lerobot_dataset(
         )
     ):
         obs = process_obs(images, qpos_joint, qpos_end)
+        bridge_actions = transform_carm_raw_action_sequence(
+            actions,
+            obs["ee_pose"],
+            contract.action.representation,
+        )
         for frame_index in range(actions.shape[0]):
             dataset.add_frame(
                 {
@@ -106,7 +112,7 @@ def export_carm_to_lerobot_dataset(
                     "observation.image": obs["rgb"][frame_index],
                     "observation.state": obs["state"][frame_index].astype(np.float32),
                     "observation.ee_pose": obs["ee_pose"][frame_index].astype(np.float32),
-                    "action": actions[frame_index].astype(np.float32),
+                    "action": bridge_actions[frame_index].astype(np.float32),
                 }
             )
         dataset.save_episode()
@@ -125,8 +131,10 @@ def export_carm_to_lerobot_dataset(
             "demo_path": demo_path,
             "num_episodes": len(exported_episodes),
             "data_info": data_info,
+            "raw_action_dim": int(raw_dataset["action"][0].shape[-1]),
         },
         "bridge_contract": contract.as_metadata(),
+        "exported_action_dim": contract.action.target_dim,
         "episodes": exported_episodes,
         "repo_id": repo_id,
     }
