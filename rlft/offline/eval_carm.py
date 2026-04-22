@@ -1399,12 +1399,24 @@ class EMAComparisonEvaluator:
         # 构建 GT actions (相对于自身 = identity)
         raw_actions = episode['action']
         relative_actions = np.zeros_like(raw_actions)
-        for t in range(T):
-            relative_actions[t, :6] = raw_actions[t, :6]
-            relative_actions[t, 6] = raw_actions[t, 6]
-            relative_actions[t, 7:10] = 0.0
-            relative_actions[t, 10:14] = np.array([0.0, 0.0, 0.0, 1.0])
-            relative_actions[t, 14] = raw_actions[t, 14]
+        qpos_end = episode['qpos_end']
+        if raw_actions.shape[-1] == 15:
+            for t in range(T):
+                relative_actions[t, :6] = raw_actions[t, :6]
+                relative_actions[t, 6] = raw_actions[t, 6]
+
+                ref_pose = qpos_end[t, :7]
+                target_pose = raw_actions[t, 7:14]
+                relative_actions[t, 7:14] = compute_relative_pose_transform(ref_pose, target_pose)
+                relative_actions[t, 14] = raw_actions[t, 14]
+        elif raw_actions.shape[-1] == 8:
+            for t in range(T):
+                ref_pose = qpos_end[t, :7]
+                target_pose = raw_actions[t, :7]
+                relative_actions[t, :7] = compute_relative_pose_transform(ref_pose, target_pose)
+                relative_actions[t, 7] = raw_actions[t, 7]
+        else:
+            raise ValueError(f"Unsupported action shape: {raw_actions.shape}")
         
         iterator = tqdm(range(T), desc=f"Episode {ep_idx}") if verbose else range(T)
         
@@ -1435,11 +1447,13 @@ class EMAComparisonEvaluator:
         
         # 计算两个模型之间的差异
         pred_diff = np.abs(pred_regular - pred_ema)
+        pose_slice = slice(7, 14) if pred_diff.shape[1] >= 14 else slice(0, min(7, pred_diff.shape[1]))
+        joint_slice = slice(0, 6) if pred_diff.shape[1] >= 6 else slice(0, pred_diff.shape[1])
         diff_metrics = {
             'mean_diff': np.mean(pred_diff),
             'max_diff': np.max(pred_diff),
-            'joint_diff': np.mean(pred_diff[:, :6]),
-            'pose_diff': np.mean(pred_diff[:, 7:14]),
+            'joint_diff': np.mean(pred_diff[:, joint_slice]),
+            'pose_diff': np.mean(pred_diff[:, pose_slice]),
         }
         
         return {
@@ -1452,7 +1466,35 @@ class EMAComparisonEvaluator:
         }
     
     def _compute_metrics(self, pred: np.ndarray, gt: np.ndarray) -> Dict:
-        """计算评估指标"""
+        """计算评估指标（兼容 full 和 ee_only）"""
+        if pred.shape[1] == 8:
+            pose_pred = pred[:, :7]
+            pose_gt = gt[:, :7]
+            gripper_pred = pred[:, 7]
+            gripper_gt = gt[:, 7]
+
+            pose_mse = np.mean((pose_pred - pose_gt) ** 2)
+            pose_mae = np.mean(np.abs(pose_pred - pose_gt))
+            gripper_mse = np.mean((gripper_pred - gripper_gt) ** 2)
+            gripper_mae = np.mean(np.abs(gripper_pred - gripper_gt))
+            total_mse = np.mean((pred - gt) ** 2)
+            total_mae = np.mean(np.abs(pred - gt))
+
+            return {
+                'joint_mse': 0.0,
+                'joint_mae': 0.0,
+                'gripper_joint_mse': gripper_mse,
+                'gripper_joint_mae': gripper_mae,
+                'gripper_pose_mse': gripper_mse,
+                'gripper_pose_mae': gripper_mae,
+                'pose_mse': pose_mse,
+                'pose_mae': pose_mae,
+                'ee_mse': total_mse,
+                'ee_mae': total_mae,
+                'total_mse': total_mse,
+                'total_mae': total_mae,
+            }
+
         joint_pred = pred[:, :6]
         joint_gt = gt[:, :6]
         gripper_joint_pred = pred[:, 6]
@@ -1464,7 +1506,7 @@ class EMAComparisonEvaluator:
 
         ee_pred = np.concatenate([pred[:, 6:7], pred[:, 7:14]], axis=1)
         ee_gt = np.concatenate([gt[:, 6:7], gt[:, 7:14]], axis=1)
-        
+
         return {
             'joint_mse': np.mean((joint_pred - joint_gt) ** 2),
             'joint_mae': np.mean(np.abs(joint_pred - joint_gt)),
@@ -1487,6 +1529,88 @@ class EMAComparisonEvaluator:
         gt = result['gt_actions']
         T = len(gt)
         time_steps = np.arange(T)
+
+        if gt.shape[1] == 8:
+            fig, axes = plt.subplots(3, 4, figsize=(22, 12))
+            fig.suptitle(f'Episode {ep_idx}: EMA vs Non-EMA Comparison', fontsize=14)
+
+            for i, label in enumerate(['X', 'Y', 'Z']):
+                ax = axes[0, i]
+                ax.plot(time_steps, gt[:, i], 'k-', label='GT', alpha=0.5, linewidth=2)
+                ax.plot(time_steps, pred_r[:, i], 'b--', label='Non-EMA', alpha=0.7)
+                ax.plot(time_steps, pred_e[:, i], 'r--', label='EMA', alpha=0.7)
+                ax.set_xlabel('Time Step')
+                ax.set_ylabel(f'Rel {label}')
+                ax.legend()
+                ax.grid(True, alpha=0.3)
+                ax.set_title(f'Rel {label}')
+
+            ax = axes[0, 3]
+            ax.plot(time_steps, gt[:, 7], 'k-', label='GT', alpha=0.5, linewidth=2)
+            ax.plot(time_steps, pred_r[:, 7], 'b--', label='Non-EMA', alpha=0.7)
+            ax.plot(time_steps, pred_e[:, 7], 'r--', label='EMA', alpha=0.7)
+            ax.set_xlabel('Time Step')
+            ax.set_ylabel('Gripper')
+            ax.legend()
+            ax.grid(True, alpha=0.3)
+            ax.set_title('Gripper')
+
+            for i, label in enumerate(['qx', 'qy', 'qz', 'qw']):
+                ax = axes[1, i]
+                ax.plot(time_steps, gt[:, 3 + i], 'k-', label='GT', alpha=0.5, linewidth=2)
+                ax.plot(time_steps, pred_r[:, 3 + i], 'b--', label='Non-EMA', alpha=0.7)
+                ax.plot(time_steps, pred_e[:, 3 + i], 'r--', label='EMA', alpha=0.7)
+                ax.set_xlabel('Time Step')
+                ax.set_ylabel(label)
+                ax.legend()
+                ax.grid(True, alpha=0.3)
+                ax.set_title(f'Rel {label}')
+
+            error_r = np.mean(np.abs(pred_r - gt), axis=1)
+            error_e = np.mean(np.abs(pred_e - gt), axis=1)
+            pose_err_r = np.mean(np.abs(pred_r[:, :7] - gt[:, :7]), axis=1)
+            pose_err_e = np.mean(np.abs(pred_e[:, :7] - gt[:, :7]), axis=1)
+            pred_diff = np.mean(np.abs(pred_r - pred_e), axis=1)
+
+            axes[2, 0].plot(time_steps, error_r, 'b-', label='Non-EMA', alpha=0.7)
+            axes[2, 0].plot(time_steps, error_e, 'r-', label='EMA', alpha=0.7)
+            axes[2, 0].set_title('Step-wise Total MAE')
+            axes[2, 0].set_xlabel('Time Step')
+            axes[2, 0].set_ylabel('MAE')
+            axes[2, 0].grid(True, alpha=0.3)
+            axes[2, 0].legend()
+
+            axes[2, 1].plot(time_steps, pose_err_r, 'b-', label='Non-EMA', alpha=0.7)
+            axes[2, 1].plot(time_steps, pose_err_e, 'r-', label='EMA', alpha=0.7)
+            axes[2, 1].set_title('Step-wise Pose MAE')
+            axes[2, 1].set_xlabel('Time Step')
+            axes[2, 1].set_ylabel('MAE')
+            axes[2, 1].grid(True, alpha=0.3)
+            axes[2, 1].legend()
+
+            axes[2, 2].plot(time_steps, np.cumsum(error_r), 'b-', label='Non-EMA', alpha=0.7)
+            axes[2, 2].plot(time_steps, np.cumsum(error_e), 'r-', label='EMA', alpha=0.7)
+            axes[2, 2].set_title('Cumulative Error')
+            axes[2, 2].set_xlabel('Time Step')
+            axes[2, 2].set_ylabel('Cumulative MAE')
+            axes[2, 2].grid(True, alpha=0.3)
+            axes[2, 2].legend()
+
+            axes[2, 3].plot(time_steps, pred_diff, 'g-', alpha=0.7)
+            axes[2, 3].set_title('EMA vs Non-EMA Difference')
+            axes[2, 3].set_xlabel('Time Step')
+            axes[2, 3].set_ylabel('Mean Abs Difference')
+            axes[2, 3].grid(True, alpha=0.3)
+
+            plt.tight_layout()
+
+            if save:
+                save_path = os.path.join(self.output_dir, f'ema_comparison_ep{ep_idx:03d}.png')
+                plt.savefig(save_path, dpi=150, bbox_inches='tight')
+                print(f"Saved: {save_path}")
+
+            plt.close()
+            return
         
         fig, axes = plt.subplots(3, 4, figsize=(22, 12))
         fig.suptitle(f'Episode {ep_idx}: EMA vs Non-EMA Comparison', fontsize=14)
@@ -1675,10 +1799,14 @@ class EMAComparisonEvaluator:
             return obj
         
         results_path = os.path.join(self.output_dir, 'comparison_results.json')
+        improvement = None
+        if avg_regular.get('total_mae', 0.0):
+            improvement = (avg_regular['total_mae'] - avg_ema['total_mae']) / avg_regular['total_mae'] * 100.0
         with open(results_path, 'w') as f:
             json.dump({
                 'avg_regular': convert_to_native(avg_regular),
                 'avg_ema': convert_to_native(avg_ema),
+                'improvement': convert_to_native(improvement),
                 'model_path': self.model_path,
                 'data_dir': self.data_dir,
                 'num_episodes': len(all_results),

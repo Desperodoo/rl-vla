@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import os
 import shutil
@@ -7,6 +8,8 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote, urlencode, urlparse
+from urllib.request import urlopen
 
 
 def _resolve_openpi_repo() -> Path:
@@ -35,7 +38,145 @@ def _run_python(repo: Path, code: str, env: dict[str, str] | None = None) -> sub
     )
 
 
+def _resolve_openpi_cache_path(checkpoint_uri: str, cache_dir: str | None = None) -> Path:
+    parsed = urlparse(checkpoint_uri)
+    if parsed.scheme != "gs":
+        raise ValueError(f"Only gs:// checkpoint URIs are supported, got: {checkpoint_uri}")
+    root = Path(cache_dir or "~/.cache/openpi").expanduser().resolve()
+    return root / parsed.netloc / parsed.path.strip("/")
+
+
+def _list_public_gcs_objects(bucket: str, prefix: str) -> list[dict[str, Any]]:
+    objects: list[dict[str, Any]] = []
+    page_token: str | None = None
+    base_url = f"https://storage.googleapis.com/storage/v1/b/{bucket}/o"
+    while True:
+        params = {"prefix": prefix}
+        if page_token:
+            params["pageToken"] = page_token
+        url = f"{base_url}?{urlencode(params)}"
+        with urlopen(url) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        objects.extend(payload.get("items", []))
+        page_token = payload.get("nextPageToken")
+        if not page_token:
+            break
+    return objects
+
+
+def _download_http_file(url: str, destination: Path) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with urlopen(url) as response, destination.open("wb") as handle:
+        shutil.copyfileobj(response, handle)
+
+
+def _relative_public_gcs_name(prefix: str, object_name: str) -> str:
+    return object_name[len(prefix):].lstrip("/")
+
+
+def _download_http_file_checked(url: str, destination: Path, expected_size: int, max_retries: int = 3) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = destination.with_suffix(destination.suffix + ".partial")
+    for attempt in range(1, max_retries + 1):
+        if tmp_path.exists():
+            tmp_path.unlink()
+        wget_bin = shutil.which("wget")
+        if wget_bin is not None:
+            subprocess.run(
+                [
+                    wget_bin,
+                    "--quiet",
+                    "--tries=3",
+                    "--timeout=60",
+                    "-O",
+                    str(tmp_path),
+                    url,
+                ],
+                check=True,
+            )
+        else:
+            with urlopen(url) as response, tmp_path.open("wb") as handle:
+                shutil.copyfileobj(response, handle)
+        actual_size = tmp_path.stat().st_size
+        if actual_size == expected_size:
+            tmp_path.replace(destination)
+            return
+        if attempt == max_retries:
+            raise IOError(
+                f"Downloaded size mismatch for {destination}: expected {expected_size} bytes, got {actual_size}"
+            )
+
+
+def _public_gcs_checkpoint_complete(local_path: Path, prefix: str, objects: list[dict[str, Any]]) -> bool:
+    if not local_path.exists():
+        return False
+    expected: dict[str, int] = {}
+    for obj in objects:
+        relative_name = _relative_public_gcs_name(prefix, obj["name"])
+        if not relative_name:
+            continue
+        expected[relative_name] = int(obj["size"])
+    if not expected:
+        return False
+    for relative_name, expected_size in expected.items():
+        file_path = local_path / relative_name
+        if not file_path.is_file() or file_path.stat().st_size != expected_size:
+            return False
+    return True
+
+
+def _download_public_openpi_checkpoint_http(checkpoint_uri: str, cache_dir: str | None = None) -> Path:
+    parsed = urlparse(checkpoint_uri)
+    if parsed.scheme != "gs" or parsed.netloc != "openpi-assets":
+        raise ValueError(f"HTTP fallback only supports public openpi-assets checkpoints, got: {checkpoint_uri}")
+
+    local_path = _resolve_openpi_cache_path(checkpoint_uri, cache_dir)
+    prefix = parsed.path.strip("/")
+    objects = _list_public_gcs_objects(parsed.netloc, prefix)
+    if not objects:
+        raise FileNotFoundError(f"No public GCS objects found for {checkpoint_uri}")
+    if _public_gcs_checkpoint_complete(local_path, prefix, objects):
+        return local_path
+
+    scratch_path = local_path.with_suffix(".partial")
+    if scratch_path.exists():
+        shutil.rmtree(scratch_path)
+    scratch_path.mkdir(parents=True, exist_ok=True)
+
+    def download_object(obj: dict[str, Any]) -> None:
+        name = obj["name"]
+        relative_name = _relative_public_gcs_name(prefix, name)
+        if not relative_name:
+            return
+        media_url = f"https://storage.googleapis.com/{parsed.netloc}/{name}"
+        expected_size = int(obj["size"])
+        existing_path = local_path / relative_name
+        target_path = scratch_path / relative_name
+        if existing_path.is_file() and existing_path.stat().st_size == expected_size:
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(existing_path, target_path)
+            return
+        _download_http_file_checked(media_url, target_path, expected_size)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+        futures = [executor.submit(download_object, obj) for obj in objects]
+        for future in concurrent.futures.as_completed(futures):
+            future.result()
+
+    if local_path.exists():
+        shutil.rmtree(local_path)
+    shutil.move(str(scratch_path), str(local_path))
+    return local_path
+
+
 def _download_openpi_checkpoint(repo: Path, checkpoint_uri: str, cache_dir: str | None = None, force_download: bool = False) -> Path:
+    parsed = urlparse(checkpoint_uri)
+    if parsed.scheme == "gs" and parsed.netloc == "openpi-assets":
+        local_path = _resolve_openpi_cache_path(checkpoint_uri, cache_dir)
+        if local_path.exists() and force_download:
+            shutil.rmtree(local_path)
+        return _download_public_openpi_checkpoint_http(checkpoint_uri, cache_dir)
+
     env: dict[str, str] = {}
     if cache_dir:
         env["OPENPI_DATA_HOME"] = str(Path(cache_dir).expanduser().resolve())
@@ -76,11 +217,32 @@ def _write_lerobot_pi05_config(
     action_expert_variant: str,
     precision: str,
 ) -> None:
+    input_features = {
+        "observation.image": {
+            "type": "VISUAL",
+            "shape": [3, 224, 224],
+        },
+        "observation.state": {
+            "type": "STATE",
+            "shape": [32],
+        },
+    }
+    output_features = {
+        "action": {
+            "type": "ACTION",
+            "shape": [action_dim],
+        }
+    }
+    normalization_mapping = {
+        "VISUAL": "IDENTITY",
+        "STATE": "QUANTILES",
+        "ACTION": "QUANTILES",
+    }
     config = {
         "type": "pi05",
         "n_obs_steps": 1,
-        "input_features": {},
-        "output_features": {},
+        "input_features": input_features,
+        "output_features": output_features,
         "device": None,
         "use_amp": False,
         "use_peft": False,
@@ -108,11 +270,7 @@ def _write_lerobot_pi05_config(
         "image_resolution": [224, 224],
         "empty_cameras": 0,
         "tokenizer_max_length": 200,
-        "normalization_mapping": {
-            "VISUAL": "IDENTITY",
-            "STATE": "QUANTILES",
-            "ACTION": "QUANTILES",
-        },
+        "normalization_mapping": normalization_mapping,
         "gradient_checkpointing": False,
         "compile_model": False,
         "compile_mode": "max-autotune",
@@ -128,6 +286,100 @@ def _write_lerobot_pi05_config(
         "scheduler_decay_lr": 2.5e-06,
     }
     (output_dir / "config.json").write_text(json.dumps(config, indent=2) + "\n")
+
+
+def _resolve_pi05_tokenizer_name() -> str:
+    tokenizer_override = os.environ.get("PI05_TOKENIZER_PATH")
+    if tokenizer_override:
+        candidate = Path(tokenizer_override).expanduser().resolve()
+        if candidate.exists():
+            return str(candidate)
+    return "google/paligemma-3b-pt-224"
+
+
+def _write_lerobot_pi05_processors(pretrained_dir: Path, *, action_dim: int) -> None:
+    input_features = {
+        "observation.image": {
+            "type": "VISUAL",
+            "shape": [3, 224, 224],
+        },
+        "observation.state": {
+            "type": "STATE",
+            "shape": [32],
+        },
+    }
+    output_features = {
+        "action": {
+            "type": "ACTION",
+            "shape": [action_dim],
+        }
+    }
+    normalization_mapping = {
+        "VISUAL": "IDENTITY",
+        "STATE": "QUANTILES",
+        "ACTION": "QUANTILES",
+    }
+
+    preprocessor = {
+        "name": "policy_preprocessor",
+        "steps": [
+            {
+                "registry_name": "rename_observations_processor",
+                "config": {"rename_map": {}},
+            },
+            {
+                "registry_name": "to_batch_processor",
+                "config": {},
+            },
+            {
+                "registry_name": "normalizer_processor",
+                "config": {
+                    "eps": 1e-08,
+                    "features": {**input_features, **output_features},
+                    "norm_map": normalization_mapping,
+                },
+            },
+            {
+                "registry_name": "pi05_prepare_state_tokenizer_processor_step",
+                "config": {"max_state_dim": 32, "task_key": "task"},
+            },
+            {
+                "registry_name": "tokenizer_processor",
+                "config": {
+                    "tokenizer_name": _resolve_pi05_tokenizer_name(),
+                    "max_length": 200,
+                    "task_key": "task",
+                    "padding_side": "right",
+                    "padding": "max_length",
+                    "truncation": True,
+                },
+            },
+            {
+                "registry_name": "device_processor",
+                "config": {"device": "cuda", "float_dtype": None},
+            },
+        ],
+    }
+    postprocessor = {
+        "name": "policy_postprocessor",
+        "steps": [
+            {
+                "registry_name": "unnormalizer_processor",
+                "config": {
+                    "eps": 1e-08,
+                    "features": output_features,
+                    "norm_map": normalization_mapping,
+                },
+            },
+            {
+                "registry_name": "device_processor",
+                "config": {"device": "cpu", "float_dtype": None},
+            },
+        ],
+    }
+
+    (pretrained_dir / "policy_preprocessor.json").write_text(json.dumps(preprocessor, indent=2) + "\n")
+    (pretrained_dir / "policy_postprocessor.json").write_text(json.dumps(postprocessor, indent=2) + "\n")
 
 
 def _convert_jax_checkpoint_to_pytorch(
@@ -178,12 +430,20 @@ def _validate_lerobot_pretrained_dir(pretrained_dir: Path) -> dict[str, Any]:
     add("path_exists", pretrained_dir.exists(), "Pretrained directory exists" if pretrained_dir.exists() else "Pretrained directory missing", {"path": str(pretrained_dir)})
     add("config_json", (pretrained_dir / "config.json").exists(), "Found config.json" if (pretrained_dir / "config.json").exists() else "Missing config.json", {"path": str(pretrained_dir / 'config.json')})
     add("model_safetensors", (pretrained_dir / "model.safetensors").exists(), "Found model.safetensors" if (pretrained_dir / "model.safetensors").exists() else "Missing model.safetensors", {"path": str(pretrained_dir / 'model.safetensors')})
+    add("policy_preprocessor", (pretrained_dir / "policy_preprocessor.json").exists(), "Found policy_preprocessor.json" if (pretrained_dir / "policy_preprocessor.json").exists() else "Missing policy_preprocessor.json", {"path": str(pretrained_dir / 'policy_preprocessor.json')})
+    add("policy_postprocessor", (pretrained_dir / "policy_postprocessor.json").exists(), "Found policy_postprocessor.json" if (pretrained_dir / "policy_postprocessor.json").exists() else "Missing policy_postprocessor.json", {"path": str(pretrained_dir / 'policy_postprocessor.json')})
 
     try:
         from lerobot.configs.policies import PreTrainedConfig
         from lerobot.policies.factory import get_policy_class
 
         config = PreTrainedConfig.from_pretrained(pretrained_dir)
+        add(
+            "image_feature_configured",
+            bool(getattr(config, "image_features", {})),
+            "Configured at least one image feature" if getattr(config, "image_features", {}) else "No image features configured in config.json",
+            {"image_features": list(getattr(config, "image_features", {}).keys())},
+        )
         policy_cls = get_policy_class(config.type)
         _ = policy_cls.from_pretrained(pretrained_name_or_path=pretrained_dir, config=config, strict=False)
         add("lerobot_load", True, "LeRobot policy load succeeded", {"policy_type": config.type})
@@ -232,6 +492,7 @@ def prepare_openpi_pi05_checkpoint(
         action_expert_variant="gemma_300m",
         precision=precision,
     )
+    _write_lerobot_pi05_processors(pytorch_dir, action_dim=32)
 
     validation = _validate_lerobot_pretrained_dir(pytorch_dir)
     result = {

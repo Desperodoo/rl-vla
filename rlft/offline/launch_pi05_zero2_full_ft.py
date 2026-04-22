@@ -24,16 +24,19 @@ class Args:
     lerobot_train_bin: Optional[str] = None
     policy_pretrained_path: Optional[str] = None
     official_openpi_checkpoint_name: str = "pi05_base"
-    policy_repo_id: str = "zhili0818/pi05-ee-delta-lora-base"
-    job_name: str = "pi05-ee-delta-lora-base"
+    policy_repo_id: str = "carm/pi05-full-ft-zero2-smoke"
+    job_name: str = "pi05-full-ft-zero2-smoke"
     gpus: str = "0,1,2,3,4,5"
     num_processes: int = 6
-    main_process_port: int = 29672
-    batch_size: int = 2
-    steps: int = 20000
-    save_freq: Optional[int] = None
+    main_process_port: int = 29690
+    batch_size: int = 1
+    steps: int = 8
     learning_rate: float = 5e-5
-    peft_r: int = 16
+    save_freq: Optional[int] = None
+    gradient_accumulation_steps: int = 1
+    zero_stage: int = 2
+    mixed_precision: str = "bf16"
+    policy_dtype: str = "bfloat16"
     hf_token: Optional[str] = None
     monitor_interval_s: int = 30
     profile_interval_s: int = 5
@@ -89,6 +92,7 @@ def main() -> None:
         raise FileNotFoundError("Could not resolve 'accelerate' from PATH. Pass --accelerate_bin explicitly.")
     if not lerobot_train_bin:
         raise FileNotFoundError("Could not resolve 'lerobot-train' from PATH. Pass --lerobot_train_bin explicitly.")
+
     training_output_dir = Path(args.output_dir).expanduser().resolve()
     launcher_output_dir = (
         Path(args.launcher_output_dir).expanduser().resolve()
@@ -106,6 +110,13 @@ def main() -> None:
     command = [
         accelerate_bin,
         "launch",
+        "--use_deepspeed",
+        "--zero_stage",
+        str(args.zero_stage),
+        "--gradient_accumulation_steps",
+        str(args.gradient_accumulation_steps),
+        "--mixed_precision",
+        args.mixed_precision,
         "--main_process_port",
         str(args.main_process_port),
         "--num_processes",
@@ -123,15 +134,12 @@ def main() -> None:
         f"--batch_size={args.batch_size}",
         f"--steps={args.steps}",
         f"--optimizer.lr={args.learning_rate}",
+        *([f"--save_freq={args.save_freq}"] if args.save_freq is not None else []),
         "--policy.gradient_checkpointing=true",
-        "--policy.freeze_vision_encoder=true",
-        "--policy.train_expert_only=true",
-        "--policy.dtype=bfloat16",
-        "--peft.method_type=LORA",
-        f"--peft.r={args.peft_r}",
+        "--policy.freeze_vision_encoder=false",
+        "--policy.train_expert_only=false",
+        f"--policy.dtype={args.policy_dtype}",
     ]
-    if args.save_freq is not None:
-        command.append(f"--save_freq={args.save_freq}")
 
     env, _ = build_probe_environment()
     env["CUDA_VISIBLE_DEVICES"] = args.gpus

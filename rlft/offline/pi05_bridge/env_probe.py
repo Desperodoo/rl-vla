@@ -64,8 +64,74 @@ def _run_command(command: list[str], env: dict[str, str], timeout: float = 5.0) 
     }
 
 
+def _prepend_env_path(existing: Optional[str], prefix: str) -> str:
+    if not existing:
+        return prefix
+    parts = [part for part in existing.split(os.pathsep) if part]
+    if prefix in parts:
+        return existing
+    return os.pathsep.join([prefix, *parts])
+
+
+def _is_valid_cuda_root(path: Path) -> bool:
+    return (path / "bin" / "nvcc").is_file()
+
+
+def _iter_cuda_root_candidates(env: dict[str, str]) -> list[Path]:
+    candidates: list[Path] = []
+    seen: set[str] = set()
+
+    def add(path: Optional[Path]) -> None:
+        if path is None:
+            return
+        resolved = path.expanduser().resolve()
+        key = str(resolved)
+        if key in seen:
+            return
+        seen.add(key)
+        candidates.append(resolved)
+
+    for key in ("CUDA_HOME", "CUDA_PATH"):
+        value = env.get(key)
+        if value:
+            add(Path(value))
+
+    nvcc_path = shutil.which("nvcc", path=env.get("PATH"))
+    if nvcc_path:
+        add(Path(nvcc_path).resolve().parent.parent)
+
+    add(Path("/usr/local/cuda"))
+    add(Path("/opt/cuda"))
+    add(Path("/usr/lib/cuda"))
+
+    for base_dir in (Path("/usr/local"), Path("/opt"), Path("/usr/lib")):
+        if not base_dir.exists():
+            continue
+        for candidate in sorted(base_dir.glob("cuda-*"), key=lambda path: path.name, reverse=True):
+            add(candidate)
+
+    return candidates
+
+
+def enrich_env_with_cuda_home(env: dict[str, str]) -> dict[str, str]:
+    for candidate in _iter_cuda_root_candidates(env):
+        if not _is_valid_cuda_root(candidate):
+            continue
+        cuda_home = str(candidate)
+        env["CUDA_HOME"] = cuda_home
+        env["CUDA_PATH"] = cuda_home
+        env["PATH"] = _prepend_env_path(env.get("PATH"), str(candidate / "bin"))
+        for lib_dir_name in ("lib64", "lib"):
+            lib_dir = candidate / lib_dir_name
+            if lib_dir.is_dir():
+                env["LD_LIBRARY_PATH"] = _prepend_env_path(env.get("LD_LIBRARY_PATH"), str(lib_dir))
+                break
+        break
+    return env
+
+
 def build_probe_environment(upstream_repo_path: Optional[str] = None) -> tuple[dict[str, str], Optional[str]]:
-    env = os.environ.copy()
+    env = enrich_env_with_cuda_home(os.environ.copy())
     resolved_repo_path = None
     if upstream_repo_path:
         resolved_repo_path = str(Path(upstream_repo_path).expanduser().resolve())
@@ -91,6 +157,9 @@ def probe_lerobot_environment(upstream_repo_path: Optional[str] = None) -> dict[
                 "conda_prefix": os.environ.get("CONDA_PREFIX"),
                 "path": env.get("PATH"),
                 "pythonpath": env.get("PYTHONPATH"),
+                "cuda_home": env.get("CUDA_HOME"),
+                "cuda_path": env.get("CUDA_PATH"),
+                "ld_library_path": env.get("LD_LIBRARY_PATH"),
                 "upstream_repo_path": resolved_repo_path,
             },
         )

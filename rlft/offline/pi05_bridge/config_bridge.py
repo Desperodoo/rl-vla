@@ -55,6 +55,7 @@ def build_pi05_run_config(args: Any, contract_metadata: dict, data_info: dict) -
     )
     policy_type = getattr(args, "policy_type", "pi0.5")
     lerobot_policy_type = LEROBOT_POLICY_NAME_MAP.get(policy_type, policy_type)
+    policy_repo_id = getattr(args, "policy_repo_id", None) or f"carm/{lerobot_policy_type}-smoke"
 
     return {
         "upstream": {
@@ -64,7 +65,7 @@ def build_pi05_run_config(args: Any, contract_metadata: dict, data_info: dict) -
             "repo_path": getattr(args, "upstream_repo_path", None),
             "dataset_repo_id": getattr(args, "lerobot_dataset_repo_id", None),
             "dataset_path": getattr(args, "lerobot_dataset_path", None),
-            "policy_repo_id": getattr(args, "policy_repo_id", f"carm/{lerobot_policy_type}-smoke"),
+            "policy_repo_id": policy_repo_id,
             "policy_pretrained_path": getattr(args, "policy_pretrained_path", None),
             "official_checkpoint_name": getattr(args, "official_openpi_checkpoint_name", "pi05_base"),
             "push_to_hub": getattr(args, "policy_push_to_hub", False),
@@ -100,7 +101,7 @@ def build_lerobot_train_command(args: Any, run_dir: str) -> list[str]:
     """Build a concrete LeRobot training command for the current CLI shape."""
     policy_type = getattr(args, "policy_type", "pi0.5")
     lerobot_policy_type = LEROBOT_POLICY_NAME_MAP.get(policy_type, policy_type)
-    policy_repo_id = getattr(args, "policy_repo_id", f"carm/{lerobot_policy_type}-smoke")
+    policy_repo_id = getattr(args, "policy_repo_id", None) or f"carm/{lerobot_policy_type}-smoke"
     policy_pretrained_path = getattr(args, "policy_pretrained_path", None)
     if getattr(args, "use_official_openpi_checkpoint", False) and not policy_pretrained_path:
         checkpoint_name = getattr(args, "official_openpi_checkpoint_name", "pi05_base")
