@@ -43,7 +43,7 @@ from lerobot.utils.utils import format_big_number, has_method, init_logging, ins
 
 def _patch_pi05_bf16_runtime() -> None:
     embed_suffix = getattr(modeling_pi05.PI05Pytorch, "embed_suffix", None)
-    if embed_suffix is None or getattr(embed_suffix, "_rlft_runtime_patch", False):
+    if embed_suffix is None or getattr(modeling_pi05.PI05Pytorch, "_rlft_runtime_patch", False):
         return
 
     def patched_embed_suffix(self, noisy_actions, timestep):
@@ -93,6 +93,64 @@ def _patch_pi05_bf16_runtime() -> None:
 
     patched_embed_suffix._rlft_runtime_patch = True
     modeling_pi05.PI05Pytorch.embed_suffix = patched_embed_suffix
+    
+    def patched_forward(self, images, img_masks, tokens, masks, actions, noise=None, time=None):
+        if noise is None:
+            noise = self.sample_noise(actions.shape, actions.device)
+
+        if time is None:
+            time = self.sample_time(actions.shape[0], actions.device)
+
+        time_expanded = time[:, None, None]
+        x_t = time_expanded * noise + (1 - time_expanded) * actions
+        u_t = noise - actions
+
+        prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(images, img_masks, tokens, masks)
+        suffix_embs, suffix_pad_masks, suffix_att_masks, adarms_cond = self.embed_suffix(x_t, time)
+
+        if (
+            self.paligemma_with_expert.paligemma.language_model.layers[0].self_attn.q_proj.weight.dtype
+            == torch.bfloat16
+        ):
+            suffix_embs = suffix_embs.to(dtype=torch.bfloat16)
+            prefix_embs = prefix_embs.to(dtype=torch.bfloat16)
+
+        pad_masks = torch.cat([prefix_pad_masks, suffix_pad_masks], dim=1)
+        att_masks = torch.cat([prefix_att_masks, suffix_att_masks], dim=1)
+
+        att_2d_masks = modeling_pi05.make_att_2d_masks(pad_masks, att_masks)
+        position_ids = torch.cumsum(pad_masks, dim=1) - 1
+        att_2d_masks_4d = self._prepare_attention_masks_4d(att_2d_masks)
+
+        def forward_func(prefix_embs, suffix_embs, att_2d_masks_4d, position_ids, adarms_cond):
+            (_, suffix_out), _ = self.paligemma_with_expert.forward(
+                attention_mask=att_2d_masks_4d,
+                position_ids=position_ids,
+                past_key_values=None,
+                inputs_embeds=[prefix_embs, suffix_embs],
+                use_cache=False,
+                adarms_cond=[None, adarms_cond],
+            )
+            return suffix_out
+
+        suffix_out = self._apply_checkpoint(
+            forward_func, prefix_embs, suffix_embs, att_2d_masks_4d, position_ids, adarms_cond
+        )
+
+        suffix_out = suffix_out[:, -self.config.chunk_size :]
+        suffix_out = suffix_out.to(dtype=torch.float32)
+
+        def action_out_proj_func(suffix_out):
+            suffix_out = suffix_out.to(dtype=self.action_out_proj.weight.dtype)
+            return self.action_out_proj(suffix_out)
+
+        v_t = self._apply_checkpoint(action_out_proj_func, suffix_out)
+        v_t = v_t.to(dtype=u_t.dtype)
+
+        return F.mse_loss(u_t, v_t, reduction="none")
+
+    modeling_pi05.PI05Pytorch.forward = patched_forward
+    modeling_pi05.PI05Pytorch._rlft_runtime_patch = True
     logging.info("Applied RLFT runtime PI05 bf16 dtype patch")
 
 
