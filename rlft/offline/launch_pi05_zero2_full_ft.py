@@ -22,6 +22,7 @@ class Args:
     launcher_output_dir: Optional[str] = None
     accelerate_bin: Optional[str] = None
     lerobot_train_bin: Optional[str] = None
+    training_module: str = "rlft.offline.patched_lerobot_train"
     policy_pretrained_path: Optional[str] = None
     official_openpi_checkpoint_name: str = "pi05_base"
     policy_repo_id: str = "carm/pi05-full-ft-zero2-smoke"
@@ -83,14 +84,14 @@ def _monitor(stop_event: threading.Event, monitor_path: Path, interval_s: int) -
 
 def main() -> None:
     args = tyro.cli(Args)
+    repo_root = Path(__file__).resolve().parents[2]
     policy_pretrained_path = args.policy_pretrained_path or resolve_default_openpi_pi05_pretrained_path(
         args.official_openpi_checkpoint_name
     )
     accelerate_bin = args.accelerate_bin or shutil.which("accelerate")
-    lerobot_train_bin = args.lerobot_train_bin or shutil.which("lerobot-train")
     if not accelerate_bin:
         raise FileNotFoundError("Could not resolve 'accelerate' from PATH. Pass --accelerate_bin explicitly.")
-    if not lerobot_train_bin:
+    if not args.training_module and not (args.lerobot_train_bin or shutil.which("lerobot-train")):
         raise FileNotFoundError("Could not resolve 'lerobot-train' from PATH. Pass --lerobot_train_bin explicitly.")
 
     training_output_dir = Path(args.output_dir).expanduser().resolve()
@@ -121,27 +122,37 @@ def main() -> None:
         str(args.main_process_port),
         "--num_processes",
         str(args.num_processes),
-        lerobot_train_bin,
-        "--policy.type=pi05",
-        "--dataset.repo_id=carm/pi05_local",
-        f"--dataset.root={Path(args.dataset_root).expanduser().resolve()}",
-        f"--policy.repo_id={args.policy_repo_id}",
-        f"--policy.pretrained_path={Path(policy_pretrained_path).expanduser().resolve()}",
-        "--policy.push_to_hub=false",
-        f"--job_name={args.job_name}",
-        f"--output_dir={training_output_dir}",
-        "--seed=1",
-        f"--batch_size={args.batch_size}",
-        f"--steps={args.steps}",
-        f"--optimizer.lr={args.learning_rate}",
-        *([f"--save_freq={args.save_freq}"] if args.save_freq is not None else []),
-        "--policy.gradient_checkpointing=true",
-        "--policy.freeze_vision_encoder=false",
-        "--policy.train_expert_only=false",
-        f"--policy.dtype={args.policy_dtype}",
     ]
+    if args.training_module:
+        command.extend(["-m", args.training_module])
+    else:
+        lerobot_train_bin = args.lerobot_train_bin or shutil.which("lerobot-train")
+        assert lerobot_train_bin is not None
+        command.append(lerobot_train_bin)
 
-    env, _ = build_probe_environment()
+    command.extend(
+        [
+            "--policy.type=pi05",
+            "--dataset.repo_id=carm/pi05_local",
+            f"--dataset.root={Path(args.dataset_root).expanduser().resolve()}",
+            f"--policy.repo_id={args.policy_repo_id}",
+            f"--policy.pretrained_path={Path(policy_pretrained_path).expanduser().resolve()}",
+            "--policy.push_to_hub=false",
+            f"--job_name={args.job_name}",
+            f"--output_dir={training_output_dir}",
+            "--seed=1",
+            f"--batch_size={args.batch_size}",
+            f"--steps={args.steps}",
+            f"--optimizer.lr={args.learning_rate}",
+            *([f"--save_freq={args.save_freq}"] if args.save_freq is not None else []),
+            "--policy.gradient_checkpointing=true",
+            "--policy.freeze_vision_encoder=false",
+            "--policy.train_expert_only=false",
+            f"--policy.dtype={args.policy_dtype}",
+        ]
+    )
+
+    env, _ = build_probe_environment(str(repo_root))
     env["CUDA_VISIBLE_DEVICES"] = args.gpus
     env["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
     env["PYTHONUNBUFFERED"] = "1"

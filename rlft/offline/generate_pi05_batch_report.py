@@ -26,6 +26,13 @@ PROGRESS_RE = re.compile(
     r"Training:\s+\d+%.*?(?P<current>\d+)/(?P<total>\d+)\s*\[[^\]]*?,\s*(?P<rate>[0-9.]+)(?P<unit>s/step|step/s)\]"
 )
 
+PLOT_SETUP_LABELS = {
+    "official": "official",
+    "batch2": "lora_batch2_20k",
+    "batch64": "lora_batch64_20k",
+    "dense_b1_5k": "dense_batch1_5k",
+}
+
 
 @dataclass
 class Args:
@@ -57,6 +64,8 @@ class Args:
     base_batch64_test: str | None = None
     libero_batch64_val: str | None = None
     libero_batch64_test: str | None = None
+    base_dense_pilot5k_val: str | None = None
+    base_dense_pilot5k_test: str | None = None
 
     base_batch64_resource_monitor: str | None = None
     libero_batch64_resource_monitor: str | None = None
@@ -251,9 +260,9 @@ def _plot_training_curves(
     ]
     for title, ax, batch2_df, batch64_df in pairs:
         if not batch2_df.empty:
-            ax.plot(batch2_df["step"], batch2_df["loss"], label="batch2", linewidth=2)
+            ax.plot(batch2_df["step"], batch2_df["loss"], label=PLOT_SETUP_LABELS["batch2"], linewidth=2)
         if not batch64_df.empty:
-            ax.plot(batch64_df["step"], batch64_df["loss"], label="batch64", linewidth=2, linestyle="--")
+            ax.plot(batch64_df["step"], batch64_df["loss"], label=PLOT_SETUP_LABELS["batch64"], linewidth=2, linestyle="--")
         ax.set_title(f"{title} loss")
         ax.set_xlabel("step")
         ax.set_ylabel("loss")
@@ -269,9 +278,9 @@ def _plot_training_curves(
     ]
     for title, ax, batch2_df, batch64_df in pairs:
         if not batch2_df.empty:
-            ax.plot(batch2_df["step"], batch2_df["update_s"], label="batch2", linewidth=2)
+            ax.plot(batch2_df["step"], batch2_df["update_s"], label=PLOT_SETUP_LABELS["batch2"], linewidth=2)
         if not batch64_df.empty:
-            ax.plot(batch64_df["step"], batch64_df["update_s"], label="batch64", linewidth=2, linestyle="--")
+            ax.plot(batch64_df["step"], batch64_df["update_s"], label=PLOT_SETUP_LABELS["batch64"], linewidth=2, linestyle="--")
         ax.set_title(f"{title} update_s")
         ax.set_xlabel("step")
         ax.set_ylabel("update_s")
@@ -353,7 +362,9 @@ def _plot_eval_overview(
     df = pd.DataFrame(eval_rows)
     order = ["base-val", "base-test", "libero-val", "libero-test"]
     setup_order = ["official", "batch2", "batch64"]
-    setup_labels = {"official": "official", "batch2": "batch2", "batch64": "batch64"}
+    if (df["setup"] == "dense_b1_5k").any():
+        setup_order.append("dense_b1_5k")
+    setup_labels = PLOT_SETUP_LABELS
     metric_keys = [("mse", "mean_action_mse"), ("mae", "mean_action_mae")]
 
     include_carm = bool(carm_rows)
@@ -361,7 +372,7 @@ def _plot_eval_overview(
     axes_list = list(axes if isinstance(axes, (list, tuple)) else axes.flat if hasattr(axes, "flat") else [axes])
     for ax, (metric_key, title) in zip(axes_list[:2], metric_keys):
         x = range(len(order))
-        width = 0.24
+        width = min(0.8 / max(len(setup_order), 1), 0.24)
         all_series: dict[str, list[float]] = {setup: [] for setup in setup_order}
         pending_marks: list[tuple[float, float]] = []
         for idx, label in enumerate(order):
@@ -376,7 +387,7 @@ def _plot_eval_overview(
             [value for values in all_series.values() for value in values if not math.isnan(value)],
             default=0.01,
         )
-        offsets = [-width, 0.0, width]
+        offsets = [(idx - (len(setup_order) - 1) / 2.0) * width for idx in range(len(setup_order))]
         for setup, offset in zip(setup_order, offsets):
             visible_values = [0.0 if math.isnan(v) else v for v in all_series[setup]]
             ax.bar([idx + offset for idx in x], visible_values, width=width, label=setup_labels[setup])
@@ -443,6 +454,7 @@ def _plot_per_dim_mae(output_dir: Path, eval_payloads: dict[str, dict[str, Any] 
                 ("official", eval_payloads.get("base_official_val")),
                 ("batch2", eval_payloads["base_batch2_val"]),
                 ("batch64", eval_payloads.get("base_batch64_val")),
+                ("dense_b1_5k", eval_payloads.get("base_dense_pilot5k_val")),
             ],
         ),
         (
@@ -456,21 +468,21 @@ def _plot_per_dim_mae(output_dir: Path, eval_payloads: dict[str, dict[str, Any] 
         ),
     ]
     for title, ax, eval_configs in configs:
-        reference_eval = next(data for _, data in eval_configs if data is not None)
-        reference_vals = reference_eval["per_dim_mae"]
+        active_eval_configs = [(label, data) for label, data in eval_configs if data is not None]
+        reference_eval = active_eval_configs[0]
+        reference_vals = reference_eval[1]["per_dim_mae"]
         dims = list(range(1, len(reference_vals) + 1))
-        width = 0.24
-        offsets = {"official": -width, "batch2": 0.0, "batch64": width}
+        width = min(0.8 / max(len(active_eval_configs), 1), 0.24)
+        offsets = {
+            label: (idx - (len(active_eval_configs) - 1) / 2.0) * width
+            for idx, (label, _) in enumerate(active_eval_configs)
+        }
         max_visible = max(reference_vals)
-        for label, payload in eval_configs:
+        for label, payload in active_eval_configs:
             x_positions = [dim + offsets[label] for dim in dims]
-            if payload is None:
-                for x_pos in x_positions:
-                    ax.text(x_pos, max_visible * 0.05, "pending", rotation=90, ha="center", va="bottom")
-                continue
             values = payload["per_dim_mae"]
             max_visible = max(max_visible, max(values))
-            ax.bar(x_positions, values, width=width, label=label)
+            ax.bar(x_positions, values, width=width, label=PLOT_SETUP_LABELS.get(label, label))
         ax.set_title(f"{title} val per-dim MAE")
         ax.set_xlabel("action dimension")
         ax.set_ylabel("MAE")
@@ -493,6 +505,7 @@ def _plot_per_episode_mae(output_dir: Path, eval_payloads: dict[str, dict[str, A
                 ("official", eval_payloads.get("base_official_val"), ":"),
                 ("batch2", eval_payloads["base_batch2_val"], "-"),
                 ("batch64", eval_payloads.get("base_batch64_val"), "--"),
+                ("dense_b1_5k", eval_payloads.get("base_dense_pilot5k_val"), "-."),
             ],
         ),
         (
@@ -507,16 +520,12 @@ def _plot_per_episode_mae(output_dir: Path, eval_payloads: dict[str, dict[str, A
     ]
     for title, ax, eval_configs in configs:
         max_visible = 0.01
-        has_pending = False
         for label, payload, linestyle in eval_configs:
             if payload is None:
-                has_pending = True
                 continue
             values = sorted(float(v) for v in payload["per_episode_mean_mae"].values())
             max_visible = max(max_visible, max(values))
-            ax.plot(values, label=label, linewidth=2, linestyle=linestyle)
-        if has_pending:
-            ax.text(0.98, 0.05, "pending setup omitted", transform=ax.transAxes, ha="right", va="bottom")
+            ax.plot(values, label=PLOT_SETUP_LABELS.get(label, label), linewidth=2, linestyle=linestyle)
         ax.set_title(f"{title} val per-episode mean MAE")
         ax.set_xlabel("episode (sorted)")
         ax.set_ylabel("mean MAE")
@@ -643,6 +652,8 @@ def main() -> None:
         "base_batch64_test": _load_eval(args.base_batch64_test),
         "libero_batch64_val": _load_eval(args.libero_batch64_val),
         "libero_batch64_test": _load_eval(args.libero_batch64_test),
+        "base_dense_pilot5k_val": _load_eval(args.base_dense_pilot5k_val),
+        "base_dense_pilot5k_test": _load_eval(args.base_dense_pilot5k_test),
     }
     carm_payloads = {
         "val": _load_carm_eval(args.carm_consistency_val),
@@ -656,6 +667,8 @@ def main() -> None:
         _eval_metric_row("pi05_base", "batch2", "test", eval_payloads["base_batch2_test"]),
         _eval_metric_row("pi05_base", "batch64", "val", eval_payloads["base_batch64_val"]),
         _eval_metric_row("pi05_base", "batch64", "test", eval_payloads["base_batch64_test"]),
+        _eval_metric_row("pi05_base", "dense_b1_5k", "val", eval_payloads["base_dense_pilot5k_val"]),
+        _eval_metric_row("pi05_base", "dense_b1_5k", "test", eval_payloads["base_dense_pilot5k_test"]),
         _eval_metric_row("pi05_libero", "official", "val", eval_payloads["libero_official_val"]),
         _eval_metric_row("pi05_libero", "official", "test", eval_payloads["libero_official_test"]),
         _eval_metric_row("pi05_libero", "batch2", "val", eval_payloads["libero_batch2_val"]),
@@ -698,12 +711,16 @@ def main() -> None:
         for key in ["base_batch64_val", "base_batch64_test", "libero_batch64_val", "libero_batch64_test"]
     )
     carm_eval_ready = all(carm_payloads[key] is not None for key in ["val", "test"])
+    dense_pilot_eval_ready = all(
+        eval_payloads[key] is not None for key in ["base_dense_pilot5k_val", "base_dense_pilot5k_test"]
+    )
 
     observations = [
         f"- `pi05_base batch64` 当前已到 `{base_batch64_status['latest_step']}/{base_batch64_status['total_steps']}`，预计剩余 `{base_batch64_status['eta_text']}`。",
         f"- `pi05_libero batch64` 当前已到 `{libero_batch64_status['latest_step']}/{libero_batch64_status['total_steps']}`，预计剩余 `{libero_batch64_status['eta_text']}`。",
         f"- `official/untrained` eval {'已经齐全' if official_eval_ready else '正在补跑或待回收'}；第 4 节统一按 `official / batch2 / batch64` 三组 setup 展示。",
         f"- `batch2` 已有完整 val/test eval；`batch64` eval {'已经齐全' if batch64_eval_ready else '仍在等待 020000 checkpoint 触发'}。",
+        f"- `dense full-ft batch1 pilot5k`（pi05_base）离线评估 {'已经齐全' if dense_pilot_eval_ready else '正在补跑或待回收'}。",
         f"- `consistency_flow_resnet18` 离线评估 {'已经齐全' if carm_eval_ready else '正在运行或待回收'}；由于 `eval_carm.py` 与 `eval_pi05.py` 指标族不同，第 4 节使用同一张总览图中的独立子图展示。",
         f"- 从最近 logged `update_s` 看，`batch64` 单步开销约为 batch2 的 {base_batch64_status['update_s'] / base_batch2_status['update_s']:.1f}x（base）和 {libero_batch64_status['update_s'] / libero_batch2_status['update_s']:.1f}x（libero）。",
     ]
@@ -765,7 +782,7 @@ def main() -> None:
             "",
             "### 4.2 PI05 + consistency_flow_resnet18 总览图",
             "",
-            "- 左两幅子图为 PI05 的 `mean_action_mse / mean_action_mae`。",
+            "- 左两幅子图为 PI05 的 `mean_action_mse / mean_action_mae`，其中 `pi05_base` 额外包含 `dense_b1_5k`。",
             "- 右侧子图为 `consistency_flow_resnet18` 的 `eval_carm.py` 指标：`total_mae / pose_mae / gripper_mae`。",
             "- 两套指标不是严格同口径，因此放在同一张总览图中做并列展示，而不是强行混成同一根柱子。",
             "",
@@ -786,6 +803,16 @@ def main() -> None:
                 "- 建议下一步把 `batch64` 的 checkpoint 和 `batch2` 结果一起做更正式的结论归纳。",
             ]
         )
+        if dense_pilot_eval_ready:
+            dense_val_mae = float(eval_payloads["base_dense_pilot5k_val"]["mean_action_mae"])
+            dense_test_mae = float(eval_payloads["base_dense_pilot5k_test"]["mean_action_mae"])
+            batch64_val_mae = float(eval_payloads["base_batch64_val"]["mean_action_mae"])
+            batch64_test_mae = float(eval_payloads["base_batch64_test"]["mean_action_mae"])
+            val_improve = (batch64_val_mae - dense_val_mae) / batch64_val_mae * 100.0
+            test_improve = (batch64_test_mae - dense_test_mae) / batch64_test_mae * 100.0
+            lines.append(
+                f"- `pi05_base dense_b1_5k` 在仅训练 `5000` step 时，`val/test mean_action_mae` 已较 `pi05_base batch64` 再下降 `{val_improve:.2f}% / {test_improve:.2f}%`。"
+            )
     else:
         lines.extend(
             [
