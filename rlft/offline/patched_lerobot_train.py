@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 
 import dataclasses
+import inspect
 import logging
 import time
 from contextlib import nullcontext
@@ -39,6 +40,14 @@ from lerobot.utils.train_utils import (
     update_last_checkpoint,
 )
 from lerobot.utils.utils import format_big_number, has_method, init_logging, inside_slurm
+
+
+def _save_checkpoint_compat(*, accelerator=None, **kwargs) -> None:
+    """Call LeRobot's checkpoint saver across envs with/without accelerator kwarg."""
+    save_signature = inspect.signature(save_checkpoint)
+    if "accelerator" in save_signature.parameters:
+        kwargs["accelerator"] = accelerator
+    save_checkpoint(**kwargs)
 
 
 def _patch_pi05_bf16_runtime() -> None:
@@ -504,7 +513,7 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
             checkpoint_dir = get_step_checkpoint_dir(cfg.output_dir, cfg.steps, step)
             if is_main_process:
                 logging.info(f"Checkpoint policy after step {step}")
-            save_checkpoint(
+            _save_checkpoint_compat(
                 checkpoint_dir=checkpoint_dir,
                 step=step,
                 cfg=cfg,
