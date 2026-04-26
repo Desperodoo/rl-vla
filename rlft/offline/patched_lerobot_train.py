@@ -5,6 +5,7 @@ import inspect
 import logging
 import time
 from contextlib import nullcontext
+from pathlib import Path
 from pprint import pformat
 from typing import Any
 
@@ -12,6 +13,9 @@ import torch
 import torch.nn.functional as F
 from accelerate import Accelerator
 from accelerate.utils import DistributedType
+from huggingface_hub.constants import SAFETENSORS_SINGLE_FILE
+from huggingface_hub.serialization import save_torch_state_dict
+from safetensors.torch import save_model as save_model_as_safetensor
 from termcolor import colored
 from torch.optim import Optimizer
 from tqdm import tqdm
@@ -48,6 +52,57 @@ def _save_checkpoint_compat(*, accelerator=None, **kwargs) -> None:
     if "accelerator" in save_signature.parameters:
         kwargs["accelerator"] = accelerator
     save_checkpoint(**kwargs)
+
+
+def _patch_policy_save_pretrained_runtime() -> None:
+    if getattr(PreTrainedPolicy, "_rlft_save_pretrained_patch", False):
+        return
+
+    def _tensor_has_complete_storage(tensor: torch.Tensor) -> bool:
+        if tensor.device.type == "meta":
+            return True
+        if tensor.untyped_storage().nbytes() == 0:
+            return True
+        return (
+            tensor.data_ptr() == tensor.untyped_storage().data_ptr()
+            and tensor.nelement() * tensor.element_size() == tensor.untyped_storage().nbytes()
+        )
+
+    def patched_save_pretrained(self, save_directory: Path) -> None:
+        self.config._save_pretrained(save_directory)
+        model_to_save = self.module if hasattr(self, "module") else self
+        try:
+            save_model_as_safetensor(model_to_save, str(save_directory / SAFETENSORS_SINGLE_FILE))
+        except RuntimeError as exc:
+            if "None is covering the entire storage" not in str(exc):
+                raise
+
+            logging.warning(
+                "Falling back to sanitized safetensors save due to shared-storage serialization issue."
+            )
+            state_dict = model_to_save.state_dict()
+            cloned_names: list[str] = []
+            for name, tensor in state_dict.items():
+                if not isinstance(tensor, torch.Tensor):
+                    continue
+                if not _tensor_has_complete_storage(tensor):
+                    state_dict[name] = tensor.clone()
+                    cloned_names.append(name)
+
+            metadata = {"format": "pt"}
+            if cloned_names:
+                metadata["lerobot_cloned_incomplete_tensors"] = ",".join(cloned_names)
+
+            save_torch_state_dict(
+                state_dict,
+                save_directory,
+                max_shard_size="20GB",
+                safe_serialization=True,
+                metadata=metadata,
+            )
+
+    PreTrainedPolicy._save_pretrained = patched_save_pretrained
+    PreTrainedPolicy._rlft_save_pretrained_patch = True
 
 
 def _patch_pi05_bf16_runtime() -> None:
@@ -229,6 +284,7 @@ def update_policy(
 @parser.wrap()
 def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
     cfg.validate()
+    _patch_policy_save_pretrained_runtime()
     _patch_pi05_bf16_runtime()
 
     if accelerator is None:
