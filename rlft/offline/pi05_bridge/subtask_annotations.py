@@ -133,13 +133,22 @@ def parse_vlm_boundary_frame(
     expected_subtasks: tuple[str, str],
 ) -> tuple[int, dict[str, Any]]:
     data = _extract_json_object(raw_output) if isinstance(raw_output, str) else raw_output
+    frame_boundary = data.get("boundary_frame")
+    if frame_boundary is None and isinstance(data.get("boundary"), dict):
+        frame_boundary = data["boundary"].get("frame")
+
     subtasks = data.get("subtasks")
     if not isinstance(subtasks, list) or len(subtasks) != 2:
+        if frame_boundary is not None:
+            return int(round(float(frame_boundary))), data
         raise ValueError("VLM output must contain exactly two subtasks")
 
     names = tuple(str(item.get("name", "")).strip() for item in subtasks)
     if names != expected_subtasks:
         raise ValueError(f"Unexpected subtask order {names}; expected {expected_subtasks}")
+
+    if frame_boundary is not None:
+        return int(round(float(frame_boundary))), data
 
     first_end = subtasks[0].get("timestamps", {}).get("end")
     second_start = subtasks[1].get("timestamps", {}).get("start")
@@ -232,11 +241,14 @@ def build_episode_annotation(
         if refine
         else {"frame": clipped_vlm_boundary, "score": 0.0, "source": "vlm_boundary"}
     )
-    boundary_frame = int(np.clip(refinement["frame"], 1, num_frames - 1))
+    boundary_frame = clipped_vlm_boundary
     max_allowed_delta = int(round(fps))
-    if abs(boundary_frame - clipped_vlm_boundary) > max_allowed_delta:
+    signal_frame = int(np.clip(refinement["frame"], 1, num_frames - 1))
+    signal_delta = abs(signal_frame - clipped_vlm_boundary)
+    refinement["delta_from_vlm_frame"] = int(signal_frame - clipped_vlm_boundary)
+    refinement["policy"] = "validate_visual_boundary_only"
+    if signal_delta > max_allowed_delta:
         flags.append("needs_review_boundary_signal_disagreement")
-        boundary_frame = clipped_vlm_boundary
 
     lower = int(round(num_frames * 0.05))
     upper = int(round(num_frames * 0.95))
@@ -264,8 +276,6 @@ def build_episode_annotation(
     confidence = 0.85
     if any(flag.startswith("needs_review") for flag in flags):
         confidence = 0.45
-    elif refinement.get("source") == "robot_signal_peak":
-        confidence = 0.75
 
     return {
         "episode_id": make_episode_id(episode_path, recorded_root=recorded_root),

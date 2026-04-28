@@ -431,6 +431,21 @@ pilot 输出：
 - validator 已确认没有 missing/extra episode；退出码为 1 是因为仍有 `needs_review`，这是预期 gate。
 - 这份新 sidecar 仍是候选标注，必须人工 review 后才允许导出正式 PI05 subtask prompt 数据集。
 
+2026-04-29 VLM 标注质量诊断进展：
+
+- 新增单样本 debug harness：
+  - `python -m rlft.offline.debug_pi05_subtask_vlm`
+  - 默认样本：`fixed_dual_light/episode_0005_20260319_235708.hdf5`
+  - 默认输出：`/mnt/disk_2/wjz/runs/pi05_subtask_vlm_debug/fixed_dual_light_episode_0005_20260319_235708`
+- debug harness 会导出带帧号的 `third_person | wrist` contact sheets、2/4/8 FPS review videos、prompt ablation 文本、`debug_summary.json` 和 `report.md`。
+- 该样本当前 VLM 视频标注为 frame 188 / 4.00s，但画面显示此时还没有完成 pick；Codex/manual gold 暂估为 frame 420 / 8.94s。
+- 同一样本改用 2 FPS numbered contact sheet + 本地 Qwen2.5-VL-7B 的 `numbered_contact_sheet` prompt 后，模型输出 frame 648，说明：
+  - 带帧号静态图能打破原来 2/3/4/5 秒早切塌缩。
+  - 但本地 Qwen2.5-VL-7B 仍然不能稳定理解“lift 后 wrist 中首次出现 blue cup”的精确边界，出现明显偏晚。
+  - 当前问题不是单纯降采样；至少包含视频时间定位 / prompt grounding / 基础模型视觉事件理解三个因素。
+- 后处理已调整为：robot gripper/action/qpos signal 只用于验证 VLM 视觉边界并打 `needs_review_boundary_signal_disagreement`，不再把 boundary snap 到 robot signal peak。
+- 在没有更强模型或人工复核闭环前，不应再次把本地 Qwen2.5-VL 的全量输出当作可训练 gold label。
+
 ## 当前正式 run 快照
 
 截至 2026-04-28 下午 CST，严格 save/resume smoke 通过后：
