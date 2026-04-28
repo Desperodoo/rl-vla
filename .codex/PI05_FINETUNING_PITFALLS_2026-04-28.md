@@ -413,6 +413,24 @@ pilot 输出：
 - 下一轮全量标注应使用新 prompt，输出到新目录，不覆盖：
   - `/mnt/disk_2/wjz/runs/pi05_subtask_annotations/pick_and_place_tape_into_cup_full_qwen25vl7b_local_cup_visible_boundary`
 
+2026-04-28 晚间，新标准全量候选标注已完成：
+
+- 输出目录：`/mnt/disk_2/wjz/runs/pi05_subtask_annotations/pick_and_place_tape_into_cup_full_qwen25vl7b_local_cup_visible_boundary`
+- sidecar：`annotations.json`
+- review queue：`review_queue.txt`
+- 统计：
+  - 总数：127/127
+  - `auto`：47
+  - `needs_review`：80
+  - `needs_review_boundary_signal_disagreement`：80
+- subset review 数：
+  - `fixed_dual_light`：16/26
+  - `fixed_left_light`：15/25
+  - `fixed_no_light`：37/50
+  - `random_no_light`：12/26
+- validator 已确认没有 missing/extra episode；退出码为 1 是因为仍有 `needs_review`，这是预期 gate。
+- 这份新 sidecar 仍是候选标注，必须人工 review 后才允许导出正式 PI05 subtask prompt 数据集。
+
 ## 当前正式 run 快照
 
 截至 2026-04-28 下午 CST，严格 save/resume smoke 通过后：
