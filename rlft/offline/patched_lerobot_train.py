@@ -2,6 +2,7 @@
 
 import dataclasses
 import inspect
+import json
 import logging
 import time
 from contextlib import nullcontext
@@ -46,12 +47,101 @@ from lerobot.utils.train_utils import (
 from lerobot.utils.utils import format_big_number, has_method, init_logging, inside_slurm
 
 
+ACCELERATOR_STATE_DIR = "accelerator_state"
+PRETRAINED_MODEL_DIR = "pretrained_model"
+TRAINING_STATE_DIR = "training_state"
+TRAINING_STEP = "training_step.json"
+
+
+def _write_training_step(step: int, save_dir: Path) -> None:
+    save_dir.mkdir(parents=True, exist_ok=True)
+    (save_dir / TRAINING_STEP).write_text(json.dumps({"step": step}) + "\n")
+
+
+def _read_training_step(save_dir: Path) -> int:
+    return json.loads((save_dir / TRAINING_STEP).read_text())["step"]
+
+
+def _is_deepspeed(accelerator: Accelerator | None) -> bool:
+    return accelerator is not None and accelerator.distributed_type == DistributedType.DEEPSPEED
+
+
+def _save_checkpoint_deepspeed(
+    *,
+    checkpoint_dir: Path,
+    step: int,
+    cfg: TrainPipelineConfig,
+    policy: PreTrainedPolicy,
+    preprocessor: Any | None,
+    postprocessor: Any | None,
+    accelerator: Accelerator,
+) -> None:
+    """Save PI05 policy plus native DeepSpeed/Accelerate training state.
+
+    Old LeRobot assumes optimizer.state_dict() has a PyTorch-style
+    ``param_groups`` key. DeepSpeed ZeRO optimizers do not expose that shape,
+    so saving must go through Accelerate's distributed state API and must be
+    called by every rank.
+    """
+    checkpoint_dir = Path(checkpoint_dir)
+    pretrained_dir = checkpoint_dir / PRETRAINED_MODEL_DIR
+    training_state_dir = checkpoint_dir / TRAINING_STATE_DIR
+    accelerator_state_dir = training_state_dir / ACCELERATOR_STATE_DIR
+
+    if accelerator.is_main_process:
+        policy.save_pretrained(pretrained_dir)
+        cfg.save_pretrained(pretrained_dir)
+        if cfg.peft is not None:
+            policy.config.save_pretrained(pretrained_dir)
+        if preprocessor is not None:
+            preprocessor.save_pretrained(pretrained_dir)
+        if postprocessor is not None:
+            postprocessor.save_pretrained(pretrained_dir)
+        _write_training_step(step, training_state_dir)
+
+    accelerator.wait_for_everyone()
+    accelerator.save_state(str(accelerator_state_dir), safe_serialization=False)
+    accelerator.wait_for_everyone()
+
+
 def _save_checkpoint_compat(*, accelerator=None, **kwargs) -> None:
     """Call LeRobot's checkpoint saver across envs with/without accelerator kwarg."""
+    if _is_deepspeed(accelerator):
+        _save_checkpoint_deepspeed(
+            checkpoint_dir=kwargs["checkpoint_dir"],
+            step=kwargs["step"],
+            cfg=kwargs["cfg"],
+            policy=kwargs["policy"],
+            preprocessor=kwargs.get("preprocessor"),
+            postprocessor=kwargs.get("postprocessor"),
+            accelerator=accelerator,
+        )
+        return
+
     save_signature = inspect.signature(save_checkpoint)
     if "accelerator" in save_signature.parameters:
         kwargs["accelerator"] = accelerator
     save_checkpoint(**kwargs)
+
+
+def _load_training_state_compat(
+    checkpoint_dir: Path,
+    optimizer: Optimizer,
+    scheduler: Any | None,
+    accelerator: Accelerator,
+) -> tuple[int, Optimizer, Any | None]:
+    training_state_dir = Path(checkpoint_dir) / TRAINING_STATE_DIR
+    accelerator_state_dir = training_state_dir / ACCELERATOR_STATE_DIR
+
+    if _is_deepspeed(accelerator) and accelerator_state_dir.is_dir():
+        step = _read_training_step(training_state_dir)
+        accelerator.load_state(str(accelerator_state_dir))
+        return step, optimizer, scheduler
+
+    load_signature = inspect.signature(load_training_state)
+    if "accelerator" in load_signature.parameters:
+        return load_training_state(checkpoint_dir, optimizer, scheduler, accelerator=accelerator)
+    return load_training_state(checkpoint_dir, optimizer, scheduler)
 
 
 def _patch_policy_save_pretrained_runtime() -> None:
@@ -410,7 +500,7 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
     resume_after_prepare = cfg.resume and accelerator.distributed_type == DistributedType.DEEPSPEED
 
     if cfg.resume and not resume_after_prepare:
-        step, optimizer, lr_scheduler = load_training_state(
+        step, optimizer, lr_scheduler = _load_training_state_compat(
             cfg.checkpoint_path,
             optimizer,
             lr_scheduler,
@@ -467,7 +557,7 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
     )
 
     if resume_after_prepare:
-        step, optimizer, lr_scheduler = load_training_state(
+        step, optimizer, lr_scheduler = _load_training_state_compat(
             cfg.checkpoint_path,
             optimizer,
             lr_scheduler,
