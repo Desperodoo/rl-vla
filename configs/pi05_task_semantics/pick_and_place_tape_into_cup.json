@@ -1,0 +1,14 @@
+{
+  "task": "pick_and_place_tape_into_cup",
+  "description": "Pick up the black tape roll and place it into the blue cup.",
+  "subtasks": [
+    {
+      "name": "pick_tape",
+      "instruction": "Pick up the black tape roll."
+    },
+    {
+      "name": "place_tape_in_cup",
+      "instruction": "Place the tape roll into the blue cup."
+    }
+  ]
+}

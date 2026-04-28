@@ -19,6 +19,7 @@ from .dataset_bridge import Pi05EpisodeWindow, Pi05LeRobotDatasetBridge, build_p
 from .env_probe import build_probe_environment, probe_lerobot_environment
 from .export import export_carm_to_lerobot_dataset
 from .openpi_checkpoint import prepare_openpi_pi05_checkpoint
+from .task_semantics import Pi05TaskSemantics, load_pi05_task_semantics
 from .validate import validate_bridge_dataset, validate_lerobot_dataset_path, validate_lerobot_train_command
 
 __all__ = [
@@ -43,4 +44,6 @@ __all__ = [
     "validate_lerobot_train_command",
     "export_carm_to_lerobot_dataset",
     "prepare_openpi_pi05_checkpoint",
+    "Pi05TaskSemantics",
+    "load_pi05_task_semantics",
 ]

@@ -17,6 +17,8 @@
   CARM_PIPELINE.md                        ← CARM 真机当前状态、审计结论、下一阶段计划与 baseline
   CARM_ACTION_SEMANTICS_AND_HITL.md       ← CARM action 语义、teleop uplift、HITL live 约束
   CARM_INFERENCE_ADMISSION_POLICY.md      ← inference episode 准入策略
+  PI05_FINETUNING_PITFALLS_2026-04-28.md  ← PI05 微调踩坑、测试门槛、task/subtask 语义
+  PI05_PROGRESS_2026-04-22.md             ← PI05 微调阶段性进度与远端训练记录
   VLAW_RESEARCH_NOTES.md                  ← VLAW/ACP/WM 的长期研究结论
   SCRIPT_POLICY_PLATFORM_PLAN.md          ← script runtime 平台设计与当前施工范围
   skills/
@@ -30,6 +32,7 @@
 - 涉及 `ctrl_world/` 改动时，额外遵守 [CTRL_WORLD.md](/home/amax/rl-vla/.codex/CTRL_WORLD.md)。
 - 涉及 CARM 真机 inference 回流、staging、second-stage 训练时，额外遵守 [CARM_PIPELINE.md](/home/amax/rl-vla/.codex/CARM_PIPELINE.md) 和 [CARM_INFERENCE_ADMISSION_POLICY.md](/home/amax/rl-vla/.codex/CARM_INFERENCE_ADMISSION_POLICY.md)。
 - 涉及 CARM 的 action 语义、teleop uplift、HITL live owner/source 设计时，优先阅读 [CARM_ACTION_SEMANTICS_AND_HITL.md](/home/amax/rl-vla/.codex/CARM_ACTION_SEMANTICS_AND_HITL.md)。
+- 涉及 PI05 微调、dense full-ft、DeepSpeed ZeRO checkpoint、task/subtask 语义时，优先阅读 [PI05_FINETUNING_PITFALLS_2026-04-28.md](/home/wjz/rl-vla/.codex/PI05_FINETUNING_PITFALLS_2026-04-28.md)；需要时间线时再读 [PI05_PROGRESS_2026-04-22.md](/home/wjz/rl-vla/.codex/PI05_PROGRESS_2026-04-22.md)。
 - 涉及 ACP、retention/hold 诊断、WM 时间尺度与 imagination 设计时，优先阅读 [VLAW_RESEARCH_NOTES.md](/home/amax/rl-vla/.codex/VLAW_RESEARCH_NOTES.md)。
 - 涉及真机 script policy 执行层、skill runtime、任务树和 learned adapter 设计时，优先阅读 [SCRIPT_POLICY_PLATFORM_PLAN.md](/home/amax/rl-vla/.codex/SCRIPT_POLICY_PLATFORM_PLAN.md)。
 - 需要使用“技能式”工作流时，读 `skills/` 下对应 `SKILL.md`。

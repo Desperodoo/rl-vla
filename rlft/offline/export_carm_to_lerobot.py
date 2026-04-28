@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional, Literal
 
 import tyro
@@ -25,6 +26,27 @@ class Args:
     obs_horizon: int = 2
     action_horizon: int = 16
     window_stride: int = 1
+    episode_manifest: Optional[str] = None
+    task_semantics_path: Optional[str] = None
+    subtask_annotations_path: Optional[str] = None
+    recorded_root: Optional[str] = None
+    allow_needs_review_annotations: bool = False
+
+
+def _load_manifest_episode_paths(path: str | None) -> list[str] | None:
+    if path is None:
+        return None
+    manifest_path = Path(path).expanduser().resolve()
+    with open(manifest_path) as handle:
+        records = json.load(handle)
+    if not isinstance(records, list):
+        raise ValueError(f"Episode manifest must be a JSON list: {manifest_path}")
+    paths: list[str] = []
+    for record in records:
+        if not isinstance(record, dict) or "source_path" not in record:
+            raise ValueError(f"Manifest records must contain source_path: {record!r}")
+        paths.append(str(Path(record["source_path"]).expanduser().resolve()))
+    return paths
 
 
 def main() -> None:
@@ -50,12 +72,18 @@ def main() -> None:
         ),
         action=Pi05ActionContract(representation=args.action_representation),
     )
+    episode_paths = _load_manifest_episode_paths(args.episode_manifest)
 
     export_result = export_carm_to_lerobot_dataset(
         demo_path=args.demo_path,
         output_dir=args.output_dir,
         contract=contract,
         num_episodes=args.num_demos,
+        episode_paths=episode_paths,
+        task_semantics_path=args.task_semantics_path,
+        subtask_annotations_path=args.subtask_annotations_path,
+        recorded_root=args.recorded_root,
+        allow_needs_review_annotations=args.allow_needs_review_annotations,
     )
     validation_result = validate_lerobot_dataset_path(export_result["dataset_path"])
 
