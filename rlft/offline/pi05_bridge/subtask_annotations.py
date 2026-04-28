@@ -218,6 +218,243 @@ def refine_boundary_from_robot_signals(
     }
 
 
+def _moving_average(values: np.ndarray, window: int) -> np.ndarray:
+    if window <= 1:
+        return values.astype(np.float64)
+    kernel = np.ones(int(window), dtype=np.float64) / float(window)
+    return np.convolve(values.astype(np.float64), kernel, mode="same")
+
+
+def _normalize_signal(values: np.ndarray) -> np.ndarray:
+    values = values.astype(np.float64)
+    denom = float(np.nanpercentile(values, 95))
+    if denom <= 1e-9 or not math.isfinite(denom):
+        return np.zeros_like(values, dtype=np.float64)
+    return np.clip(values / denom, 0.0, 2.0)
+
+
+def estimate_grasp_lift_frame_from_robot_signals(episode_path: str | Path) -> dict[str, Any]:
+    with h5py.File(Path(episode_path).expanduser(), "r") as handle:
+        fps = float(handle.attrs.get("record_freq", 30.0))
+        actions = np.asarray(handle["action"])
+        qpos_end = np.asarray(handle["observations/qpos_end"])
+        obs_gripper = np.asarray(handle["observations/gripper"])
+
+    action_gripper = actions[:, 7] if actions.shape[1] > 7 else obs_gripper
+    ee_xyz = qpos_end[:, :3]
+    grip_signal = np.abs(np.diff(action_gripper.astype(np.float64), prepend=action_gripper[0]))
+    obs_grip_signal = np.abs(np.diff(obs_gripper.astype(np.float64), prepend=obs_gripper[0]))
+    ee_speed = np.linalg.norm(np.diff(ee_xyz.astype(np.float64), axis=0, prepend=ee_xyz[:1]), axis=1)
+
+    score = (
+        0.45 * _normalize_signal(grip_signal)
+        + 0.35 * _normalize_signal(obs_grip_signal)
+        + 0.20 * _normalize_signal(ee_speed)
+    )
+    smooth = _moving_average(score, max(1, int(round(0.2 * fps))))
+    num_frames = actions.shape[0]
+    peak_frame = int(np.nanargmax(smooth)) if smooth.size else 0
+    peak_score = float(smooth[peak_frame]) if smooth.size else 0.0
+    threshold = max(0.25, float(np.nanpercentile(smooth, 80)) if smooth.size else 0.25)
+    candidates = np.where(smooth >= threshold)[0]
+    signal_frame = int(candidates[0]) if candidates.size else peak_frame
+
+    z = ee_xyz[:, 2].astype(np.float64)
+    z_search_start = int(round(0.10 * num_frames))
+    z_min_frame = int(z_search_start + np.nanargmin(z[z_search_start:])) if z_search_start < num_frames else int(np.nanargmin(z))
+    z_after = z[z_min_frame:]
+    z_min = float(z[z_min_frame])
+    z_peak_after = float(np.nanmax(z_after)) if z_after.size else z_min
+    z_lift_level = z_min + max(0.04, 0.30 * max(0.0, z_peak_after - z_min))
+    z_lift_candidates = np.where(z_after >= z_lift_level)[0]
+    z_lift_frame = int(z_min_frame + z_lift_candidates[0]) if z_lift_candidates.size else z_min_frame
+
+    frame = max(signal_frame, z_lift_frame)
+    flags: list[str] = []
+    if peak_score <= 1e-6:
+        flags.append("needs_review_rule_no_robot_signal")
+        frame = z_lift_frame
+
+    return {
+        "frame": frame,
+        "signal_frame": signal_frame,
+        "z_lift_frame": z_lift_frame,
+        "z_min_frame": z_min_frame,
+        "z_lift_level": z_lift_level,
+        "peak_frame": peak_frame,
+        "peak_score": peak_score,
+        "threshold": threshold,
+        "source": "robot_signal_lower_bound",
+        "flags": flags,
+    }
+
+
+def compute_wrist_blue_cup_score(
+    wrist_frames: np.ndarray,
+    *,
+    fps: float,
+) -> dict[str, Any]:
+    rgb = wrist_frames.astype(np.int16)
+    red = rgb[..., 0]
+    green = rgb[..., 1]
+    blue = rgb[..., 2]
+    mask = (blue > 80) & (green > 55) & (blue > red + 25) & (green > red + 10)
+    fraction = mask.mean(axis=(1, 2)).astype(np.float64)
+
+    largest_component = np.zeros(mask.shape[0], dtype=np.float64)
+    try:
+        import cv2
+
+        pixel_count = float(mask.shape[1] * mask.shape[2])
+        for index, frame_mask in enumerate(mask):
+            num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(frame_mask.astype(np.uint8), 8)
+            if num_labels > 1:
+                largest_component[index] = float(np.max(stats[1:, cv2.CC_STAT_AREA])) / pixel_count
+    except Exception:
+        largest_component = fraction.copy()
+
+    smooth_window = max(1, int(round(0.25 * fps)))
+    smooth_fraction = _moving_average(fraction, smooth_window)
+    smooth_component = _moving_average(largest_component, smooth_window)
+    score = 0.70 * smooth_fraction + 0.30 * smooth_component
+    return {
+        "fraction": fraction,
+        "largest_component": largest_component,
+        "score": score,
+        "smooth_window": smooth_window,
+    }
+
+
+def detect_rule_based_subtask_boundary(
+    episode_path: str | Path,
+    *,
+    min_blue_threshold: float = 0.012,
+    stable_seconds: float = 0.12,
+    lower_bound_margin_seconds: float = 0.20,
+) -> dict[str, Any]:
+    episode_path = Path(episode_path).expanduser()
+    info = read_episode_info(episode_path)
+    fps = float(info["fps"])
+    num_frames = int(info["num_frames"])
+    flags: list[str] = []
+
+    robot = estimate_grasp_lift_frame_from_robot_signals(episode_path)
+    flags.extend(robot.get("flags", []))
+    lower_bound = int(robot["frame"] + round(lower_bound_margin_seconds * fps))
+    lower_bound = int(np.clip(lower_bound, 0, num_frames - 1))
+
+    with h5py.File(episode_path, "r") as handle:
+        by_camera = handle.get("observations/images_by_camera")
+        fallback = handle.get("observations/images")
+        if by_camera is not None and "wrist" in by_camera:
+            wrist = np.asarray(by_camera["wrist"])
+            wrist_source = "observations/images_by_camera/wrist"
+        elif fallback is not None:
+            wrist = np.asarray(fallback)
+            wrist_source = "observations/images"
+            flags.append("needs_review_missing_wrist_view")
+        else:
+            raise KeyError(f"No wrist or fallback image stream found in {episode_path}")
+
+    blue = compute_wrist_blue_cup_score(wrist, fps=fps)
+    score = np.asarray(blue["score"], dtype=np.float64)
+    after = score[lower_bound:]
+    if after.size == 0:
+        candidate = num_frames - 1
+        threshold = min_blue_threshold
+        flags.append("needs_review_rule_no_search_window")
+    else:
+        baseline = float(np.nanpercentile(after, 25))
+        high = float(np.nanpercentile(after, 95))
+        adaptive_threshold = baseline + 0.15 * max(0.0, high - baseline)
+        threshold = max(min_blue_threshold, min(0.04, adaptive_threshold))
+        stable_frames = max(1, int(round(stable_seconds * fps)))
+        candidate = -1
+        for frame in range(lower_bound, num_frames):
+            end = min(num_frames, frame + stable_frames)
+            if end - frame < stable_frames:
+                break
+            if float(np.nanmin(score[frame:end])) >= threshold:
+                candidate = frame
+                break
+        if candidate < 0:
+            above = np.where(after >= threshold)[0]
+            if above.size:
+                candidate = int(lower_bound + above[0])
+                flags.append("needs_review_rule_unstable_blue_score")
+            else:
+                candidate = int(lower_bound + np.nanargmax(after))
+                flags.append("needs_review_rule_no_blue_cup")
+
+    lower = int(round(num_frames * 0.05))
+    upper = int(round(num_frames * 0.95))
+    if candidate <= lower or candidate >= upper:
+        flags.append("needs_review_rule_boundary_near_episode_edge")
+    if candidate <= lower_bound:
+        flags.append("needs_review_rule_boundary_not_after_grasp_lift")
+
+    pre_start = max(lower_bound, candidate - int(round(1.0 * fps)))
+    pre_median = float(np.nanmedian(score[pre_start:candidate])) if candidate > pre_start else 0.0
+    candidate_score = float(score[candidate]) if 0 <= candidate < len(score) else 0.0
+    peak_after = float(np.nanmax(after)) if after.size else 0.0
+    margin = candidate_score - pre_median
+    confidence = 0.85
+    if margin < 0.006:
+        flags.append("needs_review_rule_low_blue_margin")
+        confidence = 0.55
+    if peak_after > 1e-9 and candidate_score < 0.45 * peak_after:
+        flags.append("needs_review_rule_early_weak_blue_score")
+        confidence = min(confidence, 0.50)
+    if any(flag.startswith("needs_review") for flag in flags):
+        confidence = min(confidence, 0.45)
+
+    summary_indices = sorted(
+        {
+            0,
+            lower_bound,
+            int(robot["frame"]),
+            int(candidate),
+            min(num_frames - 1, int(candidate + round(0.5 * fps))),
+            num_frames - 1,
+        }
+    )
+    score_samples = [
+        {
+            "frame": int(index),
+            "time_s": float(index / fps),
+            "score": float(score[index]),
+            "fraction": float(blue["fraction"][index]),
+            "largest_component": float(blue["largest_component"][index]),
+        }
+        for index in summary_indices
+        if 0 <= index < num_frames
+    ]
+
+    return {
+        "boundary_frame": int(np.clip(candidate, 1, num_frames - 1)),
+        "boundary_source": "rule_detector",
+        "grasp_lift_frame": int(robot["frame"]),
+        "grasp_lift_lower_bound_frame": int(lower_bound),
+        "cup_visible_frame": int(candidate),
+        "confidence": float(confidence),
+        "flags": sorted(set(flags)),
+        "blue_score_trace_summary": {
+            "wrist_source": wrist_source,
+            "threshold": float(threshold),
+            "min_blue_threshold": float(min_blue_threshold),
+            "stable_seconds": float(stable_seconds),
+            "stable_frames": int(max(1, int(round(stable_seconds * fps)))),
+            "candidate_score": candidate_score,
+            "pre_window_median": pre_median,
+            "margin": float(margin),
+            "peak_after_lower_bound": peak_after,
+            "max_score": float(np.nanmax(score)) if score.size else 0.0,
+            "score_samples": score_samples,
+        },
+        "robot_signal": robot,
+    }
+
+
 def build_episode_annotation(
     episode_path: str | Path,
     semantics: Pi05TaskSemantics,
@@ -226,6 +463,8 @@ def build_episode_annotation(
     vlm_raw_output: dict[str, Any] | str | None,
     recorded_root: str | Path | None = None,
     refine: bool = True,
+    boundary_source: str = "vlm",
+    detector_output: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     info = read_episode_info(episode_path)
     num_frames = int(info["num_frames"])
@@ -254,6 +493,8 @@ def build_episode_annotation(
     upper = int(round(num_frames * 0.95))
     if boundary_frame <= lower or boundary_frame >= upper:
         flags.append("needs_review_boundary_near_episode_edge")
+    if detector_output is not None:
+        flags.extend(str(flag) for flag in detector_output.get("flags", []))
 
     subtask_names = semantics.subtask_names
     segments = [
@@ -274,8 +515,10 @@ def build_episode_annotation(
     ]
 
     confidence = 0.85
+    if detector_output is not None:
+        confidence = float(detector_output.get("confidence", confidence))
     if any(flag.startswith("needs_review") for flag in flags):
-        confidence = 0.45
+        confidence = min(confidence, 0.45)
 
     return {
         "episode_id": make_episode_id(episode_path, recorded_root=recorded_root),
@@ -290,8 +533,10 @@ def build_episode_annotation(
         },
         "refinement": refinement,
         "boundary_frame": boundary_frame,
+        "boundary_source": boundary_source,
+        "rule_detector": detector_output,
         "segments": segments,
-        "flags": flags,
+        "flags": sorted(set(flags)),
         "confidence": confidence,
         "review_status": "needs_review" if any(flag.startswith("needs_review") for flag in flags) else "auto",
     }
@@ -482,6 +727,100 @@ def export_review_video(
                 writer.write(cv2.cvtColor(np.ascontiguousarray(frame).astype(np.uint8), cv2.COLOR_RGB2BGR))
         finally:
             writer.release()
+    return output_path
+
+
+def write_boundary_contact_sheet(
+    episode_path: str | Path,
+    output_path: str | Path,
+    *,
+    markers: dict[str, int],
+    target_fps: float = 2.0,
+    max_tiles: int = 36,
+    columns: int = 3,
+    tile_height: int = 160,
+) -> Path:
+    import cv2
+    from PIL import Image, ImageDraw
+
+    episode_path = Path(episode_path).expanduser().resolve()
+    output_path = Path(output_path).expanduser().resolve()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with h5py.File(episode_path, "r") as handle:
+        fps = float(handle.attrs.get("record_freq", 30.0))
+        by_camera = handle.get("observations/images_by_camera")
+        fallback = handle.get("observations/images")
+        if by_camera is not None and "third_person" in by_camera:
+            third = by_camera["third_person"]
+        elif fallback is not None:
+            third = fallback
+        else:
+            raise KeyError(f"No third_person or observations/images frames in {episode_path}")
+
+        if by_camera is not None and "wrist" in by_camera:
+            wrist = by_camera["wrist"]
+        elif fallback is not None:
+            wrist = fallback
+        else:
+            wrist = third
+
+        num_frames = min(len(third), len(wrist))
+        stride = max(1, int(round(fps / target_fps)))
+        sampled = set(range(0, num_frames, stride))
+        for frame in markers.values():
+            if 0 <= int(frame) < num_frames:
+                sampled.add(int(frame))
+                for offset in (-stride, stride):
+                    nearby = int(frame) + offset
+                    if 0 <= nearby < num_frames:
+                        sampled.add(nearby)
+        indices = sorted(sampled)
+        if len(indices) > max_tiles:
+            must_keep = {0, num_frames - 1}
+            must_keep.update(int(frame) for frame in markers.values() if 0 <= int(frame) < num_frames)
+            remaining = [idx for idx in indices if idx not in must_keep]
+            keep_budget = max(0, max_tiles - len(must_keep))
+            if keep_budget and remaining:
+                positions = np.linspace(0, len(remaining) - 1, keep_budget).round().astype(int)
+                must_keep.update(remaining[int(pos)] for pos in positions)
+            indices = sorted(idx for idx in must_keep if 0 <= idx < num_frames)
+
+        tiles = []
+        for idx in indices:
+            left = np.asarray(third[idx])
+            right = np.asarray(wrist[idx])
+            if left.shape[0] != tile_height:
+                scale = tile_height / left.shape[0]
+                left = cv2.resize(left, (int(left.shape[1] * scale), tile_height), interpolation=cv2.INTER_AREA)
+            if right.shape[0] != tile_height:
+                scale = tile_height / right.shape[0]
+                right = cv2.resize(right, (int(right.shape[1] * scale), tile_height), interpolation=cv2.INTER_AREA)
+            image = Image.fromarray(np.concatenate([left, right], axis=1))
+            header = 28
+            tile = Image.new("RGB", (image.width, image.height + header), (245, 245, 245))
+            tile.paste(image, (0, header))
+            draw = ImageDraw.Draw(tile)
+            tags = [name for name, frame in markers.items() if int(frame) == idx]
+            draw.rectangle([0, 0, tile.width - 1, header - 1], fill=(18, 18, 18))
+            tag_text = f" [{' | '.join(tags)}]" if tags else ""
+            draw.text((8, 7), f"frame {idx} t={idx / fps:.2f}s third_person | wrist{tag_text}", fill=(255, 255, 255))
+            border = (160, 160, 160)
+            if tags:
+                border = (20, 150, 80) if "rule" in tags else (60, 110, 220)
+            draw.rectangle([0, 0, tile.width - 1, tile.height - 1], outline=border, width=4)
+            tiles.append(tile)
+
+    if not tiles:
+        raise ValueError(f"No frames available in {episode_path}")
+
+    tile_w = max(tile.width for tile in tiles)
+    tile_h = max(tile.height for tile in tiles)
+    rows = int(math.ceil(len(tiles) / columns))
+    sheet = Image.new("RGB", (columns * tile_w, rows * tile_h), (230, 230, 230))
+    for index, tile in enumerate(tiles):
+        sheet.paste(tile, ((index % columns) * tile_w, (index // columns) * tile_h))
+    sheet.save(output_path, quality=92)
     return output_path
 
 

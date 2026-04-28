@@ -138,6 +138,7 @@ PAGE = r"""<!doctype html>
       </div>
       <div class="row">
         <button onclick="useVlm()">Use VLM</button>
+        <button onclick="useRule()">Use Rule</button>
         <button onclick="useRobot()">Use Robot Signal</button>
         <label>boundary frame <input id="boundary" type="number" min="1"></label>
         <span id="time" class="small"></span>
@@ -192,9 +193,16 @@ function selectEpisode(id) {
   updateFrame();
   const vlm = r.vlm && r.vlm.boundary_frame;
   const robot = r.refinement && r.refinement.frame;
+  const rule = r.rule_detector && r.rule_detector.boundary_frame;
+  const blue = r.rule_detector && r.rule_detector.blue_score_trace_summary;
+  const blueText = blue ? `, blue_threshold=${Number(blue.threshold).toFixed(4)}, blue_score=${Number(blue.candidate_score).toFixed(4)}` : '';
   document.getElementById('details').innerHTML =
-    `fps=${r.fps}, frames=${r.num_frames}, current=${r.boundary_frame}, vlm=${vlm}, robot=${robot}, flags=<span class="bad">${r.flags.join(', ')}</span>`;
-  document.getElementById('raw').textContent = JSON.stringify(r.vlm && r.vlm.raw_output, null, 2);
+    `fps=${r.fps}, frames=${r.num_frames}, source=${r.boundary_source || 'unknown'}, current=${r.boundary_frame}, vlm=${vlm}, rule=${rule}, robot=${robot}${blueText}, flags=<span class="bad">${r.flags.join(', ')}</span>`;
+  document.getElementById('raw').textContent = JSON.stringify({
+    vlm: r.vlm && r.vlm.raw_output,
+    rule_detector: r.rule_detector,
+    refinement: r.refinement
+  }, null, 2);
   document.getElementById('status').textContent = '';
 }
 
@@ -224,6 +232,14 @@ function setBoundaryFromFrame() {
 function useVlm() {
   const r = record(current);
   if (r.vlm && r.vlm.boundary_frame) document.getElementById('boundary').value = r.vlm.boundary_frame;
+  document.getElementById('frameSlider').value = document.getElementById('boundary').value;
+  updateTime();
+  updateFrame();
+}
+
+function useRule() {
+  const r = record(current);
+  if (r.rule_detector && r.rule_detector.boundary_frame) document.getElementById('boundary').value = r.rule_detector.boundary_frame;
   document.getElementById('frameSlider').value = document.getElementById('boundary').value;
   updateTime();
   updateFrame();

@@ -446,6 +446,27 @@ pilot 输出：
 - 后处理已调整为：robot gripper/action/qpos signal 只用于验证 VLM 视觉边界并打 `needs_review_boundary_signal_disagreement`，不再把 boundary snap 到 robot signal peak。
 - 在没有更强模型或人工复核闭环前，不应再次把本地 Qwen2.5-VL 的全量输出当作可训练 gold label。
 
+2026-04-29 rule detector 路线进展：
+
+- 新增 `--boundary-source rule_detector`，主标注器改为任务特化规则：
+  - robot signal + EE z 抬升估计 `grasp_lift_frame` / lower bound。
+  - wrist 蓝色区域分数估计 lift 后 blue cup 首次可见帧。
+  - robot signal 只提供 lower bound / debug，不覆盖视觉 boundary。
+- 新增 `contact_sheet` 输出，每条 annotation 可附带带 marker 的 `third_person | wrist` JPG。
+- review app 已显示 `boundary_source`、rule boundary、robot frame、blue threshold/score，以及完整 `rule_detector` debug JSON。
+- 单样本 anchor：
+  - `fixed_dual_light/episode_0005_20260319_235708.hdf5`
+  - rule detector：frame 438，落在 manual/Codex 估计 frame 420 ± 24 的窗口内。
+- stratified pilot：
+  - 输出目录：`/mnt/disk_2/wjz/runs/pi05_subtask_annotations/pick_and_place_tape_into_cup_rule_detector_pilot`
+  - 8 条 episode，4 auto / 4 needs_review。
+  - review queue：
+    - `fixed_dual_light/episode_0002_20260319_235421.hdf5`
+    - `fixed_left_light/episode_0001_20260320_225700.hdf5`
+    - `fixed_no_light/episode_0002_20260318_230248.hdf5`
+    - `fixed_no_light/episode_0005_20260318_230434.hdf5`
+- 不应在 pilot review 前直接跑全量并导出训练数据；先确认这些 flagged 样本和 auto 抽样是否符合边界语义。
+
 ## 当前正式 run 快照
 
 截至 2026-04-28 下午 CST，严格 save/resume smoke 通过后：

@@ -8,6 +8,8 @@ import numpy as np
 
 from rlft.offline.pi05_bridge.subtask_annotations import (
     build_episode_annotation,
+    compute_wrist_blue_cup_score,
+    detect_rule_based_subtask_boundary,
     load_subtask_annotation_sidecar,
     parse_vlm_boundary_frame,
     validate_annotation_record,
@@ -25,6 +27,23 @@ def _write_tiny_carm_episode(path: Path, *, num_frames: int = 100, fps: float = 
         obs = handle.create_group("observations")
         obs.create_dataset("qpos_end", data=np.zeros((num_frames, 8), dtype=np.float32))
         obs.create_dataset("gripper", data=np.zeros((num_frames,), dtype=np.float32))
+
+
+def _write_tiny_carm_episode_with_images(path: Path, *, num_frames: int = 80, fps: float = 20.0) -> None:
+    _write_tiny_carm_episode(path, num_frames=num_frames, fps=fps)
+    with h5py.File(path, "r+") as handle:
+        action = handle["action"][:]
+        action[18:26, 7] = np.linspace(0.0, 1.0, 8)
+        del handle["action"]
+        handle.create_dataset("action", data=action)
+        handle["observations/gripper"][18:26] = np.linspace(0.0, 1.0, 8)
+        handle["observations/qpos_end"][18:26, 2] = np.linspace(0.0, 1.0, 8)
+        frames = np.zeros((num_frames, 32, 32, 3), dtype=np.uint8)
+        frames[45:, 8:24, 10:26, 1] = 120
+        frames[45:, 8:24, 10:26, 2] = 220
+        by_camera = handle["observations"].create_group("images_by_camera")
+        by_camera.create_dataset("wrist", data=frames)
+        by_camera.create_dataset("third_person", data=frames)
 
 
 def test_task_semantics_prompt_contains_current_subtask() -> None:
@@ -100,6 +119,34 @@ def test_build_annotation_keeps_visual_boundary_when_robot_signal_disagrees(tmp_
     assert record["segments"][0]["end_frame"] == 60
     assert record["refinement"]["policy"] == "validate_visual_boundary_only"
     assert "needs_review_boundary_signal_disagreement" in record["flags"]
+
+
+def test_blue_cup_score_detects_synthetic_blue_patch() -> None:
+    frames = np.zeros((20, 16, 16, 3), dtype=np.uint8)
+    frames[10:, 4:12, 4:12, 1] = 120
+    frames[10:, 4:12, 4:12, 2] = 220
+
+    score = compute_wrist_blue_cup_score(frames, fps=20.0)["score"]
+
+    assert float(score[10]) > float(score[8])
+    assert int(np.argmax(score)) >= 10
+
+
+def test_rule_detector_finds_blue_cup_after_robot_lower_bound(tmp_path: Path) -> None:
+    recorded_root = tmp_path / "recorded_data"
+    episode_path = recorded_root / "fixed_dual_light" / "episode_0001.hdf5"
+    _write_tiny_carm_episode_with_images(episode_path)
+
+    result = detect_rule_based_subtask_boundary(
+        episode_path,
+        min_blue_threshold=0.02,
+        stable_seconds=0.10,
+        lower_bound_margin_seconds=0.20,
+    )
+
+    assert 42 <= result["boundary_frame"] <= 48
+    assert result["boundary_source"] == "rule_detector"
+    assert result["grasp_lift_frame"] < result["boundary_frame"]
 
 
 def test_build_write_load_annotation_sidecar(tmp_path: Path) -> None:

@@ -12,11 +12,13 @@ from rlft.offline.pi05_bridge.subtask_annotations import (
     DEFAULT_SUBSETS,
     QwenVideoAnnotator,
     build_episode_annotation,
+    detect_rule_based_subtask_boundary,
     export_review_video,
     parse_vlm_boundary_frame,
     read_episode_info,
     validate_annotation_record,
     write_annotation_sidecar,
+    write_boundary_contact_sheet,
     write_review_html,
 )
 from rlft.offline.pi05_bridge.task_semantics import load_pi05_task_semantics
@@ -30,6 +32,7 @@ class Args:
     subsets: list[str] = field(default_factory=lambda: list(DEFAULT_SUBSETS))
     pilot_episodes_per_subset: Optional[int] = None
     run_vlm: bool = False
+    boundary_source: str = "vlm"
     skip_existing: bool = True
     review_video_fps: float = 2.0
     qwen_model: str = "Qwen/Qwen3-VL-30B-A3B-Instruct"
@@ -41,6 +44,10 @@ class Args:
     disable_hf_xet: bool = True
     tmp_dir: Optional[str] = "/mnt/disk_2/wjz/tmp"
     local_files_only: bool = False
+    rule_min_blue_threshold: float = 0.012
+    rule_stable_seconds: float = 0.12
+    rule_lower_bound_margin_seconds: float = 0.20
+    write_contact_sheets: bool = True
 
 
 def _select_paths(args: Args) -> list[Path]:
@@ -86,10 +93,13 @@ def main() -> None:
     semantics = load_pi05_task_semantics(args.task_semantics_path)
     if len(semantics.subtasks) != 2:
         raise ValueError("This annotator expects exactly two subtasks")
+    if args.boundary_source not in {"vlm", "rule_detector", "stub"}:
+        raise ValueError("--boundary-source must be one of: vlm, rule_detector, stub")
 
     recorded_root = Path(args.recorded_root).expanduser().resolve()
     output_dir = Path(args.output_dir).expanduser().resolve()
     videos_dir = output_dir / "videos"
+    contact_sheets_dir = output_dir / "contact_sheets"
     raw_vlm_dir = output_dir / "raw_vlm"
     annotations_path = output_dir / "annotations.json"
     review_path = output_dir / "review.html"
@@ -126,10 +136,26 @@ def main() -> None:
         manifest_records.append(manifest_record)
         print(f"[VIDEO] {index}/{len(episode_paths)} {episode_id} -> {review_video}")
 
-        if not args.run_vlm and not args.allow_stub_annotations:
+        if args.boundary_source == "vlm" and not args.run_vlm and not args.allow_stub_annotations:
             continue
 
-        if args.run_vlm:
+        detector_output = None
+        refine = True
+        if args.boundary_source == "rule_detector":
+            detector_output = detect_rule_based_subtask_boundary(
+                episode_path,
+                min_blue_threshold=args.rule_min_blue_threshold,
+                stable_seconds=args.rule_stable_seconds,
+                lower_bound_margin_seconds=args.rule_lower_bound_margin_seconds,
+            )
+            vlm_boundary_frame = int(detector_output["boundary_frame"])
+            vlm_raw = {
+                "boundary_source": "rule_detector",
+                "rule_detector": detector_output,
+            }
+            parse_error = None
+            refine = False
+        elif args.run_vlm:
             if annotator is None:
                 annotator = QwenVideoAnnotator(
                     semantics=semantics,
@@ -174,9 +200,24 @@ def main() -> None:
             vlm_boundary_frame=vlm_boundary_frame,
             vlm_raw_output=vlm_raw,
             recorded_root=recorded_root,
-            refine=True,
+            refine=refine,
+            boundary_source=args.boundary_source,
+            detector_output=detector_output,
         )
         record["review_video"] = rel_video
+        if args.write_contact_sheets:
+            markers = {"boundary": int(record["boundary_frame"])}
+            if detector_output is not None:
+                markers = {
+                    "rule": int(detector_output["boundary_frame"]),
+                    "grasp_lift": int(detector_output["grasp_lift_frame"]),
+                    "lower_bound": int(detector_output["grasp_lift_lower_bound_frame"]),
+                }
+            elif record.get("refinement"):
+                markers["robot"] = int(record["refinement"]["frame"])
+            sheet_path = contact_sheets_dir / info["source_subset"] / f"{episode_path.stem}_boundary_sheet.jpg"
+            write_boundary_contact_sheet(episode_path, sheet_path, markers=markers)
+            record["contact_sheet"] = sheet_path.relative_to(output_dir).as_posix()
         if parse_error is not None:
             record["flags"] = sorted(set(record.get("flags", []) + ["needs_review_vlm_parse_error"]))
             record["confidence"] = 0.1
