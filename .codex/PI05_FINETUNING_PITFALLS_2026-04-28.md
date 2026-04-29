@@ -467,6 +467,52 @@ pilot 输出：
     - `fixed_no_light/episode_0005_20260318_230434.hdf5`
 - 不应在 pilot review 前直接跑全量并导出训练数据；先确认这些 flagged 样本和 auto 抽样是否符合边界语义。
 
+2026-04-29 rule detector pilot 已人工接受并全量导出：
+
+- 用户人工查看 8 条 pilot 后确认结果都没问题，明确要求：
+  - 按 rule detector 标准跑全量。
+  - 跳过人工 review。
+  - 直接导出 PI05 subtask prompt 数据。
+- 全量 annotation 输出目录：
+  - `/mnt/disk_2/wjz/runs/pi05_subtask_annotations/pick_and_place_tape_into_cup_rule_detector_full`
+  - sidecar：`annotations.json`
+  - review queue：`review_queue.txt`
+  - review 页面：`review.html`
+- annotation validator 快照：
+  - 总数：127/127
+  - missing：0
+  - extra：0
+  - `auto`：33
+  - `needs_review`：94
+  - subset review 数：`fixed_dual_light` 13/26，`fixed_left_light` 13/25，`fixed_no_light` 50/50，`random_no_light` 18/26
+- 重要风险记录：
+  - annotation validator 退出码仍为 1，因为仍有 94 条 `needs_review`。
+  - `fixed_no_light` 全部 50 条都因缺 wrist 视角等原因被 flag。
+  - 这次不是“review queue 已清空”的 gold sidecar，而是用户在确认 pilot 后显式覆盖人工 review gate 的工程版本。
+  - 后续若训练效果异常，必须优先回查这份 sidecar 的 flagged episode，尤其是 `fixed_no_light`。
+
+已基于该 sidecar 直接导出 LeRobot/PI05 数据集：
+
+- 数据集 root：`/mnt/disk_2/wjz/datasets/pi05_ee_delta_ee_only_subtask_prompt_rule_detector_full`
+- 使用参数：
+  - `--task-semantics-path configs/pi05_task_semantics/pick_and_place_tape_into_cup.json`
+  - `--subtask-annotations-path /mnt/disk_2/wjz/runs/pi05_subtask_annotations/pick_and_place_tape_into_cup_rule_detector_full/annotations.json`
+  - `--recorded-root recorded_data`
+  - `--state-mode ee_only`
+  - `--action-representation ee_delta_pose_gripper`
+  - `--allow-needs-review-annotations`
+- split 沿用现有 manifest，没有重新随机切分：
+  - train：`recorded_data_splits/train_manifest.json`，101 episodes，63246 frames，约 3.8G
+  - val：`recorded_data_splits/val_manifest.json`，13 episodes，8968 frames，约 546M
+  - test：`recorded_data_splits/test_manifest.json`，13 episodes，8168 frames，约 501M
+  - 总大小：约 4.8G
+- 三个 split 的 LeRobot load validation 均通过。
+- 三个 split 的 `validate_pi05_subtask_dataset` 均通过：
+  - `meta/tasks.parquet` 只包含两条 subtask prompt。
+  - 每个 episode 的 `task_index` 恰好切换一次。
+  - 边界前后抽样帧 prompt 与 sidecar segment 一致。
+- validator 输出里的 `policy_preprocessor_smoke: false` 表示本次没有传 `--policy-pretrained-path`，未执行真实 PI05 preprocessor smoke；正式训练前仍应按严格 training gate 跑真实 PI05/真实数据/ZeRO/bf16/save+resume smoke。
+
 ## 当前正式 run 快照
 
 截至 2026-04-28 下午 CST，严格 save/resume smoke 通过后：
