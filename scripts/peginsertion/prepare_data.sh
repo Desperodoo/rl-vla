@@ -13,8 +13,10 @@ REWARD_MODE="${REWARD_MODE:-dense}"
 NUM_ENVS="${NUM_ENVS:-64}"
 CONDA_ENV="${CONDA_ENV:-rlft_ms3}"
 FORCE_REPLAY="${FORCE_REPLAY:-0}"
-ENABLE_CPU_FALLBACK="${ENABLE_CPU_FALLBACK:-1}"
-CPU_FALLBACK_NUM_ENVS="${CPU_FALLBACK_NUM_ENVS:-1}"
+ENABLE_CPU_CONVERT="${ENABLE_CPU_CONVERT:-1}"
+CPU_CONVERT_NUM_ENVS="${CPU_CONVERT_NUM_ENVS:-1}"
+GPU_REPLAY_NUM_ENVS="${GPU_REPLAY_NUM_ENVS:-${NUM_ENVS}}"
+GPU_REPLAY_ALLOW_FAILURE="${GPU_REPLAY_ALLOW_FAILURE:-1}"
 MIN_TRAJS="${MIN_TRAJS:-10}"
 REPLAY_COUNT="${REPLAY_COUNT:-}"
 
@@ -23,8 +25,9 @@ RAW_TRAJ="${RAW_TRAJ:-${DEMO_DIR}/trajectory.h5}"
 OUT_TRAJ="${OUT_TRAJ:-${DEMO_DIR}/trajectory.${OBS_MODE}.${CONTROL_MODE}.${SIM_BACKEND}.h5}"
 FALLBACK_DEMO_DIR="${FALLBACK_DEMO_DIR:-${HOME}/.maniskill/demos/${ENV_ID}/motionplanning}"
 FALLBACK_RAW_TRAJ="${FALLBACK_RAW_TRAJ:-${FALLBACK_DEMO_DIR}/trajectory.h5}"
-FALLBACK_BACKEND="${FALLBACK_BACKEND:-physx_cpu}"
-FALLBACK_OUT_TRAJ="${FALLBACK_OUT_TRAJ:-${FALLBACK_DEMO_DIR}/trajectory.${OBS_MODE}.${CONTROL_MODE}.${FALLBACK_BACKEND}.h5}"
+CPU_CONVERT_BACKEND="${CPU_CONVERT_BACKEND:-physx_cpu}"
+CPU_CONVERT_OUT_TRAJ="${CPU_CONVERT_OUT_TRAJ:-${FALLBACK_DEMO_DIR}/trajectory.${OBS_MODE}.${CONTROL_MODE}.${CPU_CONVERT_BACKEND}.h5}"
+GPU_REPLAY_OUT_TRAJ="${GPU_REPLAY_OUT_TRAJ:-${FALLBACK_DEMO_DIR}/trajectory.${OBS_MODE}.${CONTROL_MODE}.${SIM_BACKEND}.h5}"
 
 log() { printf '[prepare_data] %s\n' "$*"; }
 warn() { printf '[prepare_data][WARN] %s\n' "$*" >&2; }
@@ -78,9 +81,13 @@ run_replay() {
     local backend=$2
     local num_envs=$3
     local use_first=$4
+    local allow_failure=${5:-0}
 
     local use_first_arg="--use-first-env-state"
     [[ "${use_first}" == "1" ]] || use_first_arg="--no-use-first-env-state"
+
+    local failure_arg="--no-allow-failure"
+    [[ "${allow_failure}" == "1" ]] && failure_arg="--allow-failure"
 
     local count_args=()
     if [[ -n "${REPLAY_COUNT}" ]]; then
@@ -96,6 +103,7 @@ run_replay() {
         --record-rewards \
         --reward-mode "${REWARD_MODE}" \
         "${use_first_arg}" \
+        "${failure_arg}" \
         "${count_args[@]}" \
         --save-traj
 }
@@ -110,7 +118,7 @@ main() {
     fi
 
     if [[ "${FORCE_REPLAY}" == "1" ]]; then
-        rm -f "${OUT_TRAJ}" "${FALLBACK_OUT_TRAJ}"
+        rm -f "${OUT_TRAJ}" "${CPU_CONVERT_OUT_TRAJ}" "${GPU_REPLAY_OUT_TRAJ}"
     fi
 
     if [[ -f "${OUT_TRAJ}" && "${FORCE_REPLAY}" != "1" ]]; then
@@ -123,14 +131,14 @@ main() {
         fi
     fi
 
-    if [[ -f "${FALLBACK_OUT_TRAJ}" && "${FORCE_REPLAY}" != "1" ]]; then
-        if valid_traj "${FALLBACK_OUT_TRAJ}"; then
-            ln -sf "${FALLBACK_OUT_TRAJ}" "${OUT_TRAJ}"
+    if [[ -f "${GPU_REPLAY_OUT_TRAJ}" && "${FORCE_REPLAY}" != "1" ]]; then
+        if valid_traj "${GPU_REPLAY_OUT_TRAJ}"; then
+            ln -sf "${GPU_REPLAY_OUT_TRAJ}" "${OUT_TRAJ}"
             log "Found replay data: ${OUT_TRAJ}"
             exit 0
         fi
-        warn "Existing fallback replay data is invalid, removing: ${FALLBACK_OUT_TRAJ}"
-        rm -f "${FALLBACK_OUT_TRAJ}"
+        warn "Existing two-stage GPU replay data is invalid, removing: ${GPU_REPLAY_OUT_TRAJ}"
+        rm -f "${GPU_REPLAY_OUT_TRAJ}"
     fi
 
     log "Replaying ${ENV_ID}"
@@ -141,25 +149,35 @@ main() {
     log "  backend:  ${SIM_BACKEND}"
     log "  envs:     ${NUM_ENVS}"
 
-    if run_replay "${RAW_TRAJ}" "${SIM_BACKEND}" "${NUM_ENVS}" 1; then
+    if run_replay "${RAW_TRAJ}" "${SIM_BACKEND}" "${NUM_ENVS}" 1 0; then
         valid_traj "${OUT_TRAJ}" || die "Replay finished but expected output is invalid: ${OUT_TRAJ}"
         log "Done: ${OUT_TRAJ}"
         exit 0
     fi
 
     rm -f "${OUT_TRAJ}"
-    [[ "${ENABLE_CPU_FALLBACK}" == "1" ]] || die "GPU replay failed and CPU fallback is disabled."
+    [[ "${ENABLE_CPU_CONVERT}" == "1" ]] || die "GPU replay failed and CPU action conversion is disabled."
     [[ -f "${FALLBACK_RAW_TRAJ}" ]] || die "Fallback trajectory not found: ${FALLBACK_RAW_TRAJ}"
 
-    warn "GPU replay failed. Falling back to CPU conversion from motionplanning demos."
-    warn "This is needed when the RL demo action/state format cannot be converted to ${CONTROL_MODE} on GPU."
-    log "  fallback raw:    ${FALLBACK_RAW_TRAJ}"
-    log "  fallback output: ${FALLBACK_OUT_TRAJ}"
+    warn "Direct GPU replay failed. Running two-stage conversion instead."
+    warn "Stage 1 uses CPU only to convert actions to ${CONTROL_MODE}; stage 2 replays those actions with ${SIM_BACKEND}."
+    log "  stage1 raw:      ${FALLBACK_RAW_TRAJ}"
+    log "  stage1 output:   ${CPU_CONVERT_OUT_TRAJ}"
+    log "  stage2 output:   ${GPU_REPLAY_OUT_TRAJ}"
 
-    run_replay "${FALLBACK_RAW_TRAJ}" "${FALLBACK_BACKEND}" "${CPU_FALLBACK_NUM_ENVS}" 0
+    if [[ ! -f "${CPU_CONVERT_OUT_TRAJ}" ]] || ! valid_traj "${CPU_CONVERT_OUT_TRAJ}"; then
+        rm -f "${CPU_CONVERT_OUT_TRAJ}"
+        run_replay "${FALLBACK_RAW_TRAJ}" "${CPU_CONVERT_BACKEND}" "${CPU_CONVERT_NUM_ENVS}" 0 0
+    fi
+    valid_traj "${CPU_CONVERT_OUT_TRAJ}" || die "CPU action conversion finished but output is invalid: ${CPU_CONVERT_OUT_TRAJ}"
 
-    valid_traj "${FALLBACK_OUT_TRAJ}" || die "Fallback replay finished but output is invalid: ${FALLBACK_OUT_TRAJ}"
-    ln -sf "${FALLBACK_OUT_TRAJ}" "${OUT_TRAJ}"
+    rm -f "${GPU_REPLAY_OUT_TRAJ}" "${OUT_TRAJ}"
+    # Replay actions into the GPU backend. Avoid state-dict initialization here:
+    # CPU/GPU actor registries can differ, while the converted actions are backend-portable.
+    run_replay "${CPU_CONVERT_OUT_TRAJ}" "${SIM_BACKEND}" "${GPU_REPLAY_NUM_ENVS}" 0 "${GPU_REPLAY_ALLOW_FAILURE}"
+
+    valid_traj "${GPU_REPLAY_OUT_TRAJ}" || die "GPU replay finished but output is invalid: ${GPU_REPLAY_OUT_TRAJ}"
+    ln -sf "${GPU_REPLAY_OUT_TRAJ}" "${OUT_TRAJ}"
 
     log "Done: ${OUT_TRAJ}"
 }
