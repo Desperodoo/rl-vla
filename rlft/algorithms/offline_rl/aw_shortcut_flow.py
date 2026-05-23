@@ -2,7 +2,7 @@
 Advantage-Weighted ShortCut Flow (AW-SCF / AWSC) Agent
 
 Combines ShortCut Flow with AWAC-style Q-weighted BC for stable offline RL.
-This is the "bridge" between pure BC (ShortCut Flow) and online RL (ReinFlow).
+This is the bridge between pure BC (ShortCut Flow) and value-weighted RL.
 
 Key Algorithm Design:
 =====================
@@ -15,7 +15,7 @@ Key design principles:
 1. Policy stays on demo distribution (no OOD exploration)
 2. Q is used to weight BC samples (not to maximize directly)
 3. Critic learns within data distribution (bounded estimation error)
-4. ShortCut structure is preserved for downstream ReinFlow fine-tuning
+4. ShortCut structure is preserved for downstream fine-tuning
 
 ShortCut Flow Training:
 - Flow loss: Standard CFM with step-size conditioning
@@ -25,7 +25,6 @@ ShortCut Flow Training:
 Three-stage Pipeline (Recommended):
 - Stage 1: ShortCut Flow BC pretrain (pure BC, shortcut_flow.py)
 - Stage 2: AW-ShortCut Flow offline RL (this module)
-- Stage 3: ReinFlow online RL (fine-tuning with rewards)
 
 ShortCut Flow Parameters (from sweep best practices):
 - step_size_mode: "fixed" with fixed_step_size=0.0625 (1/16)
@@ -48,7 +47,6 @@ References:
 - ShortCut Flow: shortcut_flow.py (local ODE solver approximation)
 - AWAC: https://arxiv.org/abs/2006.09359
 - IQL: https://arxiv.org/abs/2110.06169
-- ReinFlow: For downstream online RL fine-tuning
 """
 
 import torch

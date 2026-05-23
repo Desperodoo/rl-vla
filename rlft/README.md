@@ -7,7 +7,7 @@
 RLFT 是一个统一的机器人学习框架，支持：
 - **Imitation Learning (IL)**: Diffusion Policy, Flow Matching, ShortCut Flow, Consistency Flow
 - **Offline Reinforcement Learning**: CPQL, AWCP, AW-ShortCut Flow
-- **Online Reinforcement Learning**: SAC, RLPD, ReinFlow, AWSC
+- **Online Reinforcement Learning**: SAC, RLPD, AWSC
 
 ## 📁 项目结构
 
@@ -26,7 +26,6 @@ rlft/
 │   │   └── aw_shortcut_flow.py    # AW-ShortCut Flow
 │   └── online_rl/       # 在线强化学习算法
 │       ├── sac.py                 # SAC (Soft Actor-Critic)
-│       ├── reinflow.py            # ReinFlow (PPO + Flow Matching)
 │       └── awsc.py                # AWSC (Advantage-Weighted ShortCut Flow)
 │
 ├── networks/            # 神经网络架构
@@ -39,7 +38,7 @@ rlft/
 ├── buffers/             # 数据缓冲区
 │   ├── replay_buffer.py    # Off-policy replay buffers
 │   ├── success_buffer.py   # Success-filtered replay buffer
-│   ├── rollout_buffer.py   # On-policy rollout buffer (PPO)
+│   ├── rollout_buffer.py   # SMDP chunk reward collector
 │   └── smdp.py             # SMDP cumulative reward computation
 │
 ├── datasets/            # 数据集加载
@@ -57,8 +56,7 @@ rlft/
 │   └── train_maniskill.py  # ManiSkill 仿真训练
 │
 ├── online/              # 在线训练脚本
-│   ├── train_rlpd.py       # RLPD/AWSC 训练 (Off-policy)
-│   └── train_reinflow.py   # ReinFlow 训练 (On-policy)
+│   └── train_rlpd.py       # RLPD/AWSC 训练 (Off-policy)
 │
 ├── roboreward/          # RoboReward 标注工具
 │
@@ -344,24 +342,11 @@ python -m rlft.online.train_rlpd \
     --total_timesteps 1000000
 ```
 
-#### ReinFlow (On-policy, PPO + Flow)
-
-```bash
-# 从预训练 Flow Matching 模型微调
-python -m rlft.online.train_reinflow \
-    --env_id PushCube-v1 \
-    --pretrained_path runs/flow_matching/checkpoint.pt \
-    --obs_mode state \
-    --total_updates 10000 \
-    --lr 1e-6
-```
-
 支持的 Online RL 算法：
 | 算法 | 脚本 | 描述 |
 |------|------|------|
 | SAC | `train_rlpd.py --algorithm sac` | Soft Actor-Critic + Action Chunking |
 | AWSC | `train_rlpd.py --algorithm awsc` | Q-weighted ShortCut Flow (RLPD style) |
-| ReinFlow | `train_reinflow.py` | PPO + Flow Matching |
 
 ---
 
@@ -419,7 +404,6 @@ nn.Module
 │   └── AWCPAgent
 │       └── AWShortCutFlowAgent
 ├── SACAgent
-├── ReinFlowAgent
 └── AWSCAgent
 ```
 
@@ -490,7 +474,6 @@ tensorboard --logdir runs/
 - **Flow Matching**: [Lipman et al., ICLR 2023](https://arxiv.org/abs/2210.02747)
 - **ShortCut Flow**: [Frans et al., 2024](https://arxiv.org/abs/2410.12557)
 - **RLPD**: [Ball et al., ICML 2023](https://arxiv.org/abs/2302.02948)
-- **ReinFlow**: [Ding et al., 2024](https://arxiv.org/abs/2402.14262)
 - **CPQL**: [Nakamoto et al., ICLR 2024](https://arxiv.org/abs/2310.07297)
 
 ---

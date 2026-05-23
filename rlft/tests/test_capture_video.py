@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Test script for verifying capture_video functionality in RLPD and ReinFlow pipelines.
+Test script for verifying capture_video functionality in RLPD pipeline.
 
 This script runs minimal training loops to verify that:
 1. Video recording is properly configured when capture_video=True
@@ -85,41 +85,6 @@ def test_rlpd_capture_video():
         return True
 
 
-def test_reinflow_capture_video():
-    """Test ReinFlow pipeline with capture_video=True."""
-    print("\n" + "=" * 60)
-    print("Testing ReinFlow pipeline with capture_video=True")
-    print("=" * 60)
-    
-    with tempfile.TemporaryDirectory() as tmpdir:
-        cmd = [
-            sys.executable, "-m", "rlft.online.train_reinflow",
-            "--env_id", "PushCube-v1",
-            "--obs_mode", "state",
-            "--num_envs", "4",
-            "--num_eval_envs", "2",
-            "--total_updates", "5",
-            "--eval_freq", "2",
-            "--num_eval_episodes", "2",
-            "--capture_video",
-            "--no-track",
-            "--rollout_steps", "4",
-        ]
-        
-        env = os.environ.copy()
-        env["RLFT_LOG_DIR"] = tmpdir
-        
-        returncode, stdout, stderr = run_command(cmd, timeout=120)
-        
-        if returncode != 0:
-            print(f"FAILED: Command returned {returncode}")
-            print(f"STDERR: {stderr}")
-            return False
-        
-        print("ReinFlow capture_video test: PASSED (command completed)")
-        return True
-
-
 def test_video_directory_creation():
     """Test that make_eval_envs creates video directory correctly."""
     print("\n" + "=" * 60)
@@ -177,7 +142,7 @@ def test_video_directory_creation():
 
 def main():
     parser = argparse.ArgumentParser(description="Test capture_video functionality")
-    parser.add_argument("--test", choices=["all", "rlpd", "reinflow", "make_env"],
+    parser.add_argument("--test", choices=["all", "rlpd", "make_env"],
                        default="make_env", help="Which test to run")
     args = parser.parse_args()
     
@@ -188,9 +153,6 @@ def main():
     
     if args.test in ["all", "rlpd"]:
         results["rlpd"] = test_rlpd_capture_video()
-    
-    if args.test in ["all", "reinflow"]:
-        results["reinflow"] = test_reinflow_capture_video()
     
     # Print summary
     print("\n" + "=" * 60)

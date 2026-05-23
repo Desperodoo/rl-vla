@@ -1,6 +1,6 @@
 """
 ShortCut Flow Policy with adaptive step size.
-Migrated from toy_diffusion_rl (ReinFlow) to rlft framework.
+Migrated from toy_diffusion_rl to rlft framework.
 
 Configurable design axes (for ablation studies):
 1. Time sampling: t_min, t_max, t_sampling_mode
@@ -23,7 +23,6 @@ class ShortCutFlowAgent(nn.Module):
     """
     ShortCut Flow Matching agent with adaptive step sizes.
     Learns to take larger steps when possible, enabling faster inference.
-    Based on ReinFlow implementation.
     
     Configurable hyperparameters for ablation:
     - Time sampling: t_min, t_max, t_sampling_mode (uniform/truncated)

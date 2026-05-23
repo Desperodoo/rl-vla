@@ -28,7 +28,6 @@ def evaluate(
         sim_backend: Simulation backend ('physx_cpu' or 'physx_cuda')
         progress_bar: Whether to show progress bar
         agent_kwargs: Additional kwargs to pass to agent.get_action()
-            For ReinFlowAgent: {'deterministic': True, 'use_ema': True}
     
     Returns:
         eval_metrics: Dict of metrics from evaluation

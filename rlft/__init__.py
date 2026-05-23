@@ -4,7 +4,7 @@ RLFT: Reinforcement Learning and Flow-based Training
 A unified framework for:
 - Offline Imitation Learning (Diffusion Policy, Flow Matching, etc.)
 - Offline Reinforcement Learning (CPQL, AWCP, etc.)
-- Online Reinforcement Learning (SAC, RLPD, ReinFlow, etc.)
+- Online Reinforcement Learning (SAC, RLPD, AWSC, etc.)
 
 Package Structure:
     rlft.offline/      - Offline training scripts

@@ -4,7 +4,7 @@ rlft.algorithms - Policy learning algorithms
 Organized by training paradigm:
 - il/: Imitation Learning (BC, Flow Matching, ShortCut Flow, etc.)
 - offline_rl/: Offline RL (CPQL, AWCP, AW-ShortCut)
-- online_rl/: Online RL (SAC, RLPD, ReinFlow, AWSC)
+- online_rl/: Online RL (SAC, RLPD, AWSC)
 """
 
 # IL algorithms
@@ -23,7 +23,6 @@ from .offline_rl.dqc import DQCAgent
 
 # Online RL algorithms
 from .online_rl.sac import SACAgent
-from .online_rl.reinflow import ReinFlowAgent
 from .online_rl.awsc import AWSCAgent
 
 __all__ = [
@@ -41,6 +40,5 @@ __all__ = [
     "DQCAgent",
     # Online RL
     "SACAgent",
-    "ReinFlowAgent",
     "AWSCAgent",
 ]
