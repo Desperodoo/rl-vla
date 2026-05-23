@@ -20,6 +20,7 @@ DEFAULT_ALGORITHMS = [
     "aw_shortcut_flow",
     "sac",
     "dqc",
+    "rlpd_sac",
     "awsc",
     "pld",
     "dsrl",

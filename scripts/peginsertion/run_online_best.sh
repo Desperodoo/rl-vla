@@ -82,14 +82,27 @@ select_base_ckpt() {
     echo "${ckpt}"
 }
 
+run_key_for() {
+    local algo=$1
+    if [[ "${algo}" == "sac" ]]; then
+        echo "rlpd_sac"
+    else
+        echo "${algo}"
+    fi
+}
+
 base_dir_for() {
     local algo=$1
-    echo "${ROOT}/runs/${EXP_NAME}/${algo}/best"
+    local run_key
+    run_key="$(run_key_for "${algo}")"
+    echo "${ROOT}/runs/${EXP_NAME}/${run_key}/best"
 }
 
 actual_dir_for() {
     local algo=$1
-    local parent="${ROOT}/runs/${EXP_NAME}/${algo}"
+    local run_key
+    run_key="$(run_key_for "${algo}")"
+    local parent="${ROOT}/runs/${EXP_NAME}/${run_key}"
     find "${parent}" -maxdepth 1 -type d -name 'best__*' 2>/dev/null | sort -r | head -1
 }
 
@@ -122,6 +135,8 @@ build_cmd() {
     local gpu=$1
     local algo=$2
     local ckpt=$3
+    local run_key
+    run_key="$(run_key_for "${algo}")"
 
     case "${algo}" in
         sac)
@@ -136,7 +151,7 @@ build_cmd() {
                 --eval_freq "${EVAL_FREQ_SAC}" --save_freq "${SAVE_FREQ}" --num_eval_episodes "${NUM_EVAL_EPISODES}" \
                 --gamma 0.9 --tau 0.005 --init_temperature 1.0 --num_qs 10 --num_min_qs 2 \
                 --online_ratio 0.5 --reward_scale 1.0 \
-                --seed "${SEED}" --exp_name "${EXP_NAME}/${algo}/best"
+                --seed "${SEED}" --exp_name "${EXP_NAME}/${run_key}/best"
             track_args_rlpd
             ;;
         awsc)
@@ -152,7 +167,7 @@ build_cmd() {
                 --online_ratio 0.15 --utd_ratio 20 --lr_actor 1e-4 --lr_critic 1e-4 \
                 --num_qs 10 --num_min_qs 2 --awsc_beta 50.0 --awsc_bc_weight 2.0 \
                 --awsc_advantage_mode per_state_v --awsc_num_inference_steps 8 \
-                --seed "${SEED}" --exp_name "${EXP_NAME}/${algo}/best"
+                --seed "${SEED}" --exp_name "${EXP_NAME}/${run_key}/best"
             track_args_rlpd
             ;;
         pld)
@@ -169,7 +184,7 @@ build_cmd() {
                 --init_temperature 0.1 --learning_rate 1e-4 --num_layers 3 --layer_size 1024 \
                 --num_qs 5 --calql_pretrain_steps 1000 --calql_alpha 0.0 --online_ratio 1.0 \
                 --offline_demo_episodes 50 \
-                --seed "${SEED}" --exp_name "${EXP_NAME}/${algo}/best"
+                --seed "${SEED}" --exp_name "${EXP_NAME}/${run_key}/best"
             track_args_online
             ;;
         dsrl)
@@ -185,7 +200,7 @@ build_cmd() {
                 --action_magnitude 2.5 --utd_ratio 60 --gamma 0.95 --target_entropy -3.5 \
                 --log_std_init -5.0 --learning_rate 3e-4 --num_layers 3 --layer_size 2048 \
                 --num_qs 10 --num_seed_steps 0 \
-                --seed "${SEED}" --exp_name "${EXP_NAME}/${algo}/best"
+                --seed "${SEED}" --exp_name "${EXP_NAME}/${run_key}/best"
             track_args_online
             ;;
         *)
