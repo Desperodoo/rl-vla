@@ -933,8 +933,14 @@ def main():
             raise
         print(f"Offline dataset size: {len(offline_dataset)}")
         
-        # Precompute cache for faster sampling (up to 50k samples)
-        offline_dataset.precompute_cache(max_cache_size=min(50000, len(offline_dataset)))
+        # Precompute cache for faster sampling. RGB ManiSkill online training can
+        # exceed 24GB on PegInsertion, so allow launchers to cap this without
+        # changing the default behavior.
+        offline_cache_size = int(os.environ.get("RLFT_OFFLINE_CACHE_SIZE", "50000"))
+        if offline_cache_size > 0:
+            offline_dataset.precompute_cache(max_cache_size=min(offline_cache_size, len(offline_dataset)))
+        else:
+            print("Offline cache disabled via RLFT_OFFLINE_CACHE_SIZE=0")
     
     # Agent wrapper for evaluation (created after action_normalizer is fitted)
     agent_wrapper = AgentWrapper(
