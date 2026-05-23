@@ -159,7 +159,7 @@ def load_traj_hdf5(path: str, num_traj: Optional[int] = None) -> Dict:
 # 1. State: Concatenate all arrays in obs["agent"] and obs["extra"]
 #    Example: qpos(9) + qvel(9) + tcp_pose(7) + ... = state_dim
 #
-# 2. RGB: Stack all camera rgb images along channel dimension
+# 2. RGB: Stack selected camera rgb images along channel dimension
 #    Example: base_camera(H,W,3) + hand_camera(H,W,3) -> (H,W,6) -> transpose to (6,H,W)
 #
 # =============================================================================
@@ -219,6 +219,11 @@ def create_obs_process_fn(env_id: str, output_format: str = "NCHW") -> Callable:
         >>> processed["rgb"].shape    # (T, 3, 128, 128) with single camera
     """
     state_extractor = build_state_obs_extractor(env_id)
+    camera_names = [
+        name.strip()
+        for name in os.environ.get("RLFT_MANISKILL_CAMERA_NAMES", "").split(",")
+        if name.strip()
+    ]
     
     def obs_process_fn(obs):
         # =====================================================================
@@ -239,9 +244,14 @@ def create_obs_process_fn(env_id: str, output_format: str = "NCHW") -> Callable:
         
         if "sensor_data" in obs:
             img_dict = obs["sensor_data"]
+            camera_items = [
+                (name, img_dict[name])
+                for name in camera_names
+                if name in img_dict
+            ] if camera_names else list(img_dict.items())
             
             # Process RGB
-            rgb_list = [v["rgb"] for v in img_dict.values() if "rgb" in v]
+            rgb_list = [v["rgb"] for _, v in camera_items if "rgb" in v]
             if rgb_list:
                 rgb_nhwc = np.concatenate(rgb_list, axis=-1)  # (T, H, W, 3*num_cameras)
                 if output_format == "NCHW":
@@ -250,7 +260,7 @@ def create_obs_process_fn(env_id: str, output_format: str = "NCHW") -> Callable:
                     rgb = rgb_nhwc
             
             # Process Depth
-            depth_list = [v["depth"] for v in img_dict.values() if "depth" in v]
+            depth_list = [v["depth"] for _, v in camera_items if "depth" in v]
             if depth_list:
                 depth_nhwc = np.concatenate(depth_list, axis=-1)  # (T, H, W, 1*num_cameras)
                 if output_format == "NCHW":
