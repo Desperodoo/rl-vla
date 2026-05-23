@@ -15,7 +15,7 @@ CONDA_ENV="${CONDA_ENV:-rlft_ms3}"
 
 DEMO_PATH="${DEMO_PATH:-${HOME}/.maniskill/demos/${ENV_ID}/rl/trajectory.${OBS_MODE}.${CONTROL_MODE}.${SIM_BACKEND}.h5}"
 TOTAL_ITERS="${TOTAL_ITERS:-50000}"
-BATCH_SIZE="${BATCH_SIZE:-256}"
+BATCH_SIZE="${BATCH_SIZE:-128}"
 NUM_EVAL_EPISODES="${NUM_EVAL_EPISODES:-100}"
 NUM_EVAL_ENVS="${NUM_EVAL_ENVS:-25}"
 EVAL_FREQ="${EVAL_FREQ:-2500}"
@@ -65,6 +65,7 @@ init_env() {
     fi
     export PYTHONPATH="${ROOT}:${PYTHONPATH:-}"
     export HDF5_USE_FILE_LOCKING="${HDF5_USE_FILE_LOCKING:-FALSE}"
+    export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 }
 
 base_dir_for() {
