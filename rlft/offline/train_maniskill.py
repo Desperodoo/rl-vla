@@ -626,6 +626,7 @@ def create_agent(algorithm: str, action_dim: int, global_cond_dim: int, args):
         )
     
     elif algorithm == "dqc":
+        backup_horizon = min(args.backup_horizon, args.pred_horizon)
         velocity_net = VelocityUNet1D(
             input_dim=action_dim,
             global_cond_dim=global_cond_dim,
@@ -640,7 +641,7 @@ def create_agent(algorithm: str, action_dim: int, global_cond_dim: int, args):
             obs_horizon=args.obs_horizon,
             pred_horizon=args.pred_horizon,
             act_horizon=args.act_horizon,
-            backup_horizon=args.backup_horizon,
+            backup_horizon=backup_horizon,
             num_flow_steps=args.num_flow_steps,
             q_hidden_dims=args.q_hidden_dims,
             num_chunk_qs=args.num_chunk_qs,
