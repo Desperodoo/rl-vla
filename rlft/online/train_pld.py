@@ -220,6 +220,7 @@ def _make_train_envs_with_acp(args: Args):
         return make_flow_train_envs(args)
 
     from mani_skill.utils.wrappers.flatten import FlattenRGBDObservationWrapper
+    from rlft.envs.camera_selection import SelectManiSkillCamerasWrapper
 
     env_kwargs = dict(
         obs_mode="rgbd" if "rgb" in args.obs_mode else "state",
@@ -247,6 +248,7 @@ def _make_train_envs_with_acp(args: Args):
     ]
     if "rgb" in args.obs_mode:
         wrappers.append(FlattenRGBDObservationWrapper)
+        wrappers.append(SelectManiSkillCamerasWrapper)
 
     return make_eval_envs(
         env_id=args.env_id,

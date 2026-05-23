@@ -13,6 +13,7 @@ from .base_flow_env import BaseFlowEnvWrapper
 from .dsrl_env import ManiSkillFlowEnvWrapper
 from .pld_env import ManiSkillResidualEnvWrapper
 from .acp_reward_wrapper import DualCameraRewardWrapper, ACPRewardConfig
+from .camera_selection import SelectManiSkillCamerasWrapper, selected_camera_names
 
 __all__ = [
     "make_eval_envs",
@@ -22,4 +23,6 @@ __all__ = [
     "ManiSkillResidualEnvWrapper",
     "DualCameraRewardWrapper",
     "ACPRewardConfig",
+    "SelectManiSkillCamerasWrapper",
+    "selected_camera_names",
 ]

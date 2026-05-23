@@ -384,6 +384,7 @@ def make_train_envs(args):
         import gymnasium as gym
         import mani_skill.envs
         from mani_skill.utils.wrappers.flatten import FlattenRGBDObservationWrapper
+        from rlft.envs.camera_selection import SelectManiSkillCamerasWrapper
     except ImportError:
         raise ImportError("ManiSkill3 is required. Install with: pip install mani-skill")
 
@@ -423,6 +424,7 @@ def make_train_envs(args):
 
     if "rgb" in args.obs_mode:
         env = FlattenRGBDObservationWrapper(env, rgb=True, depth=False, state=True)
+        env = SelectManiSkillCamerasWrapper(env)
 
     return env
 
@@ -661,7 +663,8 @@ def main():
     
     # Import wrapper for evaluation environment
     from mani_skill.utils.wrappers.flatten import FlattenRGBDObservationWrapper
-    eval_wrappers = [FlattenRGBDObservationWrapper] if "rgb" in args.obs_mode else []
+    from rlft.envs.camera_selection import SelectManiSkillCamerasWrapper
+    eval_wrappers = [FlattenRGBDObservationWrapper, SelectManiSkillCamerasWrapper] if "rgb" in args.obs_mode else []
     
     eval_envs = make_eval_envs(
         env_id=args.env_id,

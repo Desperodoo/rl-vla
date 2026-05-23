@@ -37,6 +37,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 # Import from rlft package
 from rlft.envs import make_eval_envs, evaluate
+from rlft.envs.camera_selection import SelectManiSkillCamerasWrapper
 from rlft.networks import (
     PlainConv, ConditionalUnet1D, VelocityUNet1D, ShortCutVelocityUNet1D,
     DoubleQNetwork, EnsembleQNetwork,
@@ -755,7 +756,7 @@ def main():
     # In state mode, the observation is already flat, so we don't need this wrapper.
     include_rgb = "rgb" in args.obs_mode
     include_depth = "depth" in args.obs_mode
-    wrappers = [FlattenRGBDObservationWrapper] if include_rgb else []
+    wrappers = [FlattenRGBDObservationWrapper, SelectManiSkillCamerasWrapper] if include_rgb else []
     
     envs = make_eval_envs(
         env_id=args.env_id,

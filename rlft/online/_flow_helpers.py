@@ -34,6 +34,7 @@ def make_flow_train_envs(args):
         env_id, num_envs, sim_backend, obs_horizon
     """
     from mani_skill.utils.wrappers.flatten import FlattenRGBDObservationWrapper
+    from rlft.envs.camera_selection import SelectManiSkillCamerasWrapper
 
     env_kwargs = dict(
         obs_mode="rgbd" if "rgb" in args.obs_mode else "state",
@@ -43,7 +44,7 @@ def make_flow_train_envs(args):
     if args.max_episode_steps is not None:
         env_kwargs["max_episode_steps"] = args.max_episode_steps
 
-    wrappers = [FlattenRGBDObservationWrapper] if "rgb" in args.obs_mode else []
+    wrappers = [FlattenRGBDObservationWrapper, SelectManiSkillCamerasWrapper] if "rgb" in args.obs_mode else []
 
     return make_eval_envs(
         env_id=args.env_id,
@@ -64,6 +65,7 @@ def make_flow_eval_envs(args):
         env_id, num_eval_envs, sim_backend, obs_horizon
     """
     from mani_skill.utils.wrappers.flatten import FlattenRGBDObservationWrapper
+    from rlft.envs.camera_selection import SelectManiSkillCamerasWrapper
 
     env_kwargs = dict(
         control_mode=args.control_mode,
@@ -74,7 +76,7 @@ def make_flow_eval_envs(args):
     if args.max_episode_steps is not None:
         env_kwargs["max_episode_steps"] = args.max_episode_steps
 
-    wrappers = [FlattenRGBDObservationWrapper] if "rgb" in args.obs_mode else []
+    wrappers = [FlattenRGBDObservationWrapper, SelectManiSkillCamerasWrapper] if "rgb" in args.obs_mode else []
 
     return make_eval_envs(
         env_id=args.env_id,
