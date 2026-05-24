@@ -1042,6 +1042,9 @@ def main():
     
     # Training metrics accumulator
     training_metrics = defaultdict(list)
+    action_clip = float(os.environ.get("RLFT_ACTION_CLIP", "1.0"))
+    if action_clip < 1.0:
+        print(f"Clipping online action chunks to [-{action_clip}, {action_clip}] via RLFT_ACTION_CLIP")
     
     pbar = tqdm(total=args.total_timesteps, desc="Training")
     
@@ -1060,6 +1063,8 @@ def main():
                 action_chunk = np.random.uniform(-1, 1, (args.num_envs, args.act_horizon, action_dim))
             else:
                 action_chunk = agent.select_action(obs_features, deterministic=False).cpu().numpy()
+            if action_clip < 1.0:
+                action_chunk = np.clip(action_chunk, -action_clip, action_clip)
         
         # Execute action chunk
         chunk_collector.reset()
