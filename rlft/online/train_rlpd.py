@@ -972,7 +972,8 @@ def main():
     )
     
     # ========== Pre-training Evaluation (Baseline) ==========
-    if args.pretrain_path:
+    skip_pretrain_eval = os.environ.get("RLFT_SKIP_PRETRAIN_EVAL", "0") == "1"
+    if args.pretrain_path and not skip_pretrain_eval:
         print("\n" + "=" * 50)
         print("Evaluating pretrained model (baseline)...")
         print("=" * 50)
@@ -998,6 +999,8 @@ def main():
             wandb.log(pretrain_log)
         
         print("=" * 50 + "\n")
+    elif args.pretrain_path:
+        print("Skipping pretrained baseline evaluation via RLFT_SKIP_PRETRAIN_EVAL=1")
     
     # Training loop
     print("\n" + "=" * 50)
