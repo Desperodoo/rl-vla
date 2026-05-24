@@ -220,11 +220,18 @@ def load_shortcut_flow_policy(
     # ----- create visual_encoder (optional) -----
     visual_encoder = None
     if include_rgb and visual_encoder_class is not None:
+        in_channels = 3
+        visual_state = checkpoint.get("visual_encoder")
+        if visual_state is not None:
+            for value in visual_state.values():
+                if isinstance(value, torch.Tensor) and value.ndim == 4:
+                    in_channels = int(value.shape[1])
+                    break
         visual_encoder = visual_encoder_class(
-            in_channels=3, out_dim=visual_feature_dim, pool_feature_map=True,
+            in_channels=in_channels, out_dim=visual_feature_dim, pool_feature_map=True,
         ).to(device)
-        if "visual_encoder" in checkpoint:
-            visual_encoder.load_state_dict(checkpoint["visual_encoder"])
+        if visual_state is not None:
+            visual_encoder.load_state_dict(visual_state)
         visual_encoder.eval()
 
     # ----- wrap -----
