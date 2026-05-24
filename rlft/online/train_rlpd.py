@@ -298,7 +298,7 @@ class AgentWrapper:
                     rgb = torch.from_numpy(rgb).to(self.device)
                 rgb = rgb.contiguous()  # Ensure contiguous memory layout
                 rgb_flat = rgb.reshape(B * T, *rgb.shape[2:]).float() / 255.0
-                if rgb_flat.ndim == 4 and rgb_flat.shape[-1] == 3:
+                if rgb_flat.ndim == 4 and rgb_flat.shape[-1] in [1, 3, 4, 6, 9, 12]:
                     rgb_flat = rgb_flat.permute(0, 3, 1, 2).contiguous()
                 
                 # Handle depth if available
