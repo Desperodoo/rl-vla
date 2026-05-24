@@ -28,6 +28,7 @@ RLPD_BATCH_SIZE="${RLPD_BATCH_SIZE:-64}"
 RLPD_MAX_RETRIES="${RLPD_MAX_RETRIES:-1}"
 RLPD_OFFLINE_CACHE_SIZE="${RLPD_OFFLINE_CACHE_SIZE:-10000}"
 RLPD_NUM_DEMOS="${RLPD_NUM_DEMOS:-}"
+RLPD_NUM_SEED_STEPS="${RLPD_NUM_SEED_STEPS:-}"
 
 join_csv() {
     local IFS=,
@@ -48,11 +49,12 @@ status=0
 
 if (( ${#contains_rlpd[@]} > 0 )); then
     echo "[online_resilient] RLPD algorithms: ${contains_rlpd[*]}"
-    echo "[online_resilient] RLPD GPUs: ${RLPD_GPU_IDS}; envs=${RLPD_NUM_ENVS}/${RLPD_NUM_EVAL_ENVS}; batch=${RLPD_BATCH_SIZE}; cache=${RLPD_OFFLINE_CACHE_SIZE}; demos=${RLPD_NUM_DEMOS:-all}"
+    echo "[online_resilient] RLPD GPUs: ${RLPD_GPU_IDS}; envs=${RLPD_NUM_ENVS}/${RLPD_NUM_EVAL_ENVS}; batch=${RLPD_BATCH_SIZE}; cache=${RLPD_OFFLINE_CACHE_SIZE}; demos=${RLPD_NUM_DEMOS:-all}; seed_steps=${RLPD_NUM_SEED_STEPS:-default}"
     ALGORITHMS="$(join_csv "${contains_rlpd[@]}")" \
     GPU_IDS="${RLPD_GPU_IDS}" \
     RLFT_OFFLINE_CACHE_SIZE="${RLPD_OFFLINE_CACHE_SIZE}" \
     RLPD_NUM_DEMOS="${RLPD_NUM_DEMOS}" \
+    RLPD_NUM_SEED_STEPS="${RLPD_NUM_SEED_STEPS}" \
     NUM_ENVS="${RLPD_NUM_ENVS}" \
     NUM_EVAL_ENVS="${RLPD_NUM_EVAL_ENVS}" \
     NUM_EVAL_EPISODES="${RLPD_NUM_EVAL_EPISODES}" \

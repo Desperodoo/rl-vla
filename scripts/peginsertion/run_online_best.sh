@@ -129,6 +129,12 @@ num_demos_args_rlpd() {
     fi
 }
 
+num_seed_steps_args_rlpd() {
+    if [[ -n "${RLPD_NUM_SEED_STEPS:-}" ]]; then
+        printf '%q ' --num_seed_steps "${RLPD_NUM_SEED_STEPS}"
+    fi
+}
+
 track_args_online() {
     if [[ "${USE_WANDB}" == "true" ]]; then
         printf '%q ' --track --wandb_project "${WANDB_PROJECT}"
@@ -159,6 +165,7 @@ build_cmd() {
                 --online_ratio 0.5 --reward_scale 1.0 \
                 --seed "${SEED}" --exp_name "${EXP_NAME}/${run_key}/best"
             num_demos_args_rlpd
+            num_seed_steps_args_rlpd
             track_args_rlpd
             ;;
         awsc)
@@ -176,6 +183,7 @@ build_cmd() {
                 --awsc_advantage_mode per_state_v --awsc_num_inference_steps 8 \
                 --seed "${SEED}" --exp_name "${EXP_NAME}/${run_key}/best"
             num_demos_args_rlpd
+            num_seed_steps_args_rlpd
             track_args_rlpd
             ;;
         pld)
