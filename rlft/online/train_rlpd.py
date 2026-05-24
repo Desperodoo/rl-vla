@@ -699,8 +699,23 @@ def main():
     visual_feature_dim = 0
     
     if include_rgb:
+        visual_in_channels = 3
+        if hasattr(obs_space, "spaces") and "rgb" in obs_space.spaces:
+            visual_in_channels = int(obs_space["rgb"].shape[-1])
+        if args.pretrain_path:
+            try:
+                checkpoint = torch.load(args.pretrain_path, map_location="cpu")
+                visual_state = checkpoint.get("visual_encoder")
+                if visual_state is not None:
+                    for value in visual_state.values():
+                        if getattr(value, "ndim", 0) == 4:
+                            visual_in_channels = int(value.shape[1])
+                            break
+            except Exception as exc:
+                print(f"Warning: could not infer visual channels from checkpoint: {exc}")
+        print(f"Visual encoder input channels: {visual_in_channels}")
         visual_encoder = PlainConv(
-            in_channels=3,
+            in_channels=visual_in_channels,
             out_dim=args.visual_feature_dim,
             pool_feature_map=True,
         ).to(device)
