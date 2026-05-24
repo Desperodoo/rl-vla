@@ -853,6 +853,9 @@ def main():
     
     # Replay buffers
     rgb_shape = (128, 128, 3)
+    if include_rgb and hasattr(obs_space, "spaces") and "rgb" in obs_space.spaces:
+        rgb_shape = tuple(int(dim) for dim in obs_space["rgb"].shape[-3:])
+    print(f"Replay buffer RGB shape: {rgb_shape}")
     online_buffer = OnlineReplayBufferRaw(
         capacity=args.replay_buffer_capacity,
         num_envs=args.num_envs,
