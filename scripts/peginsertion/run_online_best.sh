@@ -123,6 +123,12 @@ track_args_rlpd() {
     fi
 }
 
+num_demos_args_rlpd() {
+    if [[ -n "${RLPD_NUM_DEMOS:-}" ]]; then
+        printf '%q ' --num_demos "${RLPD_NUM_DEMOS}"
+    fi
+}
+
 track_args_online() {
     if [[ "${USE_WANDB}" == "true" ]]; then
         printf '%q ' --track --wandb_project "${WANDB_PROJECT}"
@@ -152,6 +158,7 @@ build_cmd() {
                 --gamma 0.9 --tau 0.005 --init_temperature 1.0 --num_qs 10 --num_min_qs 2 \
                 --online_ratio 0.5 --reward_scale 1.0 \
                 --seed "${SEED}" --exp_name "${EXP_NAME}/${run_key}/best"
+            num_demos_args_rlpd
             track_args_rlpd
             ;;
         awsc)
@@ -168,6 +175,7 @@ build_cmd() {
                 --num_qs 10 --num_min_qs 2 --awsc_beta 50.0 --awsc_bc_weight 2.0 \
                 --awsc_advantage_mode per_state_v --awsc_num_inference_steps 8 \
                 --seed "${SEED}" --exp_name "${EXP_NAME}/${run_key}/best"
+            num_demos_args_rlpd
             track_args_rlpd
             ;;
         pld)
