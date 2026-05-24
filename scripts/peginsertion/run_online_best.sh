@@ -74,10 +74,10 @@ select_base_ckpt() {
     local ckpt=""
     ckpt="$(find "${ROOT}/runs/${EXP_NAME}/aw_shortcut_flow" -path '*/checkpoints/best_eval_success_once.pt' -type f 2>/dev/null | sort -r | head -1)"
     [[ -n "${ckpt}" ]] || ckpt="$(find "${ROOT}/runs/${EXP_NAME}/aw_shortcut_flow" -path '*/checkpoints/best_eval_success_at_end.pt' -type f 2>/dev/null | sort -r | head -1)"
-    [[ -n "${ckpt}" ]] || ckpt="$(find "${ROOT}/runs/${EXP_NAME}/aw_shortcut_flow" -path '*/checkpoints/[0-9]*.pt' -type f 2>/dev/null | sort -r | head -1)"
     [[ -n "${ckpt}" ]] || ckpt="$(find "${ROOT}/runs/${EXP_NAME}/shortcut_flow" -path '*/checkpoints/best_eval_success_once.pt' -type f 2>/dev/null | sort -r | head -1)"
     [[ -n "${ckpt}" ]] || ckpt="$(find "${ROOT}/runs/${EXP_NAME}/shortcut_flow" -path '*/checkpoints/best_eval_success_at_end.pt' -type f 2>/dev/null | sort -r | head -1)"
     [[ -n "${ckpt}" ]] || ckpt="$(find "${ROOT}/runs/${EXP_NAME}/shortcut_flow" -path '*/checkpoints/[0-9]*.pt' -type f 2>/dev/null | sort -r | head -1)"
+    [[ -n "${ckpt}" ]] || ckpt="$(find "${ROOT}/runs/${EXP_NAME}/aw_shortcut_flow" -path '*/checkpoints/[0-9]*.pt' -type f 2>/dev/null | sort -r | head -1)"
 
     echo "${ckpt}"
 }
