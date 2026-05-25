@@ -188,13 +188,16 @@ class ManiSkillDataset(Dataset):
         print("Obs/action pre-processing done, computing slice indices...")
         
         # Fit action normalizer if provided
-        if self.action_normalizer is not None:
+        if self.action_normalizer is not None and getattr(self.action_normalizer, "stats", None) is None:
             all_actions = np.concatenate([
                 raw_data[traj_key]["actions"] for traj_key in traj_keys
             ], axis=0)
             self.action_normalizer.fit(all_actions)
             print(f"Action normalizer fitted with {len(all_actions)} samples, mode: {self.action_normalizer.mode}")
-            
+        elif self.action_normalizer is not None:
+            print(f"Action normalizer already loaded, using mode: {self.action_normalizer.mode}")
+
+        if self.action_normalizer is not None:
             # Normalize stored actions
             for i in range(len(trajectories["actions"])):
                 actions_np = trajectories["actions"][i].cpu().numpy()
@@ -399,13 +402,16 @@ class OfflineRLDataset(Dataset):
         print("Obs/action pre-processing done, computing slice indices...")
         
         # Fit action normalizer if provided
-        if self.action_normalizer is not None:
+        if self.action_normalizer is not None and getattr(self.action_normalizer, "stats", None) is None:
             all_actions = np.concatenate([
                 raw_data[traj_key]["actions"] for traj_key in traj_keys
             ], axis=0)
             self.action_normalizer.fit(all_actions)
             print(f"Action normalizer fitted with {len(all_actions)} samples, mode: {self.action_normalizer.mode}")
-            
+        elif self.action_normalizer is not None:
+            print(f"Action normalizer already loaded, using mode: {self.action_normalizer.mode}")
+
+        if self.action_normalizer is not None:
             # Normalize stored actions
             for i in range(len(trajectories["actions"])):
                 actions_np = trajectories["actions"][i].cpu().numpy()

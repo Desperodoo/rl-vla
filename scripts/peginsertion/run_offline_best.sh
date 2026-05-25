@@ -13,7 +13,15 @@ EXP_NAME="${EXP_NAME:-peginsertion_best1}"
 SEED="${SEED:-42}"
 CONDA_ENV="${CONDA_ENV:-rlft_ms3}"
 
-DEMO_PATH="${DEMO_PATH:-${HOME}/.maniskill/demos/${ENV_ID}/rl/trajectory.${OBS_MODE}.${CONTROL_MODE}.${SIM_BACKEND}.h5}"
+DEFAULT_DEMO_PATH="${HOME}/.maniskill/demos/${ENV_ID}/rl/trajectory.${OBS_MODE}.${CONTROL_MODE}.${SIM_BACKEND}.h5"
+SUCCESS_DEMO_PATH="${HOME}/.maniskill/demos/${ENV_ID}/rl/trajectory.${OBS_MODE}.${CONTROL_MODE}.success.h5"
+if [[ -z "${DEMO_PATH:-}" ]]; then
+    if [[ -f "${SUCCESS_DEMO_PATH}" ]]; then
+        DEMO_PATH="${SUCCESS_DEMO_PATH}"
+    else
+        DEMO_PATH="${DEFAULT_DEMO_PATH}"
+    fi
+fi
 TOTAL_ITERS="${TOTAL_ITERS:-50000}"
 BATCH_SIZE="${BATCH_SIZE:-256}"
 NUM_EVAL_EPISODES="${NUM_EVAL_EPISODES:-100}"
@@ -27,6 +35,8 @@ USE_WANDB="${USE_WANDB:-true}"
 WANDB_PROJECT="${WANDB_PROJECT:-${EXP_NAME}}"
 GPU_IDS="${GPU_IDS:-1,5}"
 FORCE="${FORCE:-0}"
+INIT_EXP_NAME="${INIT_EXP_NAME:-}"
+INIT_CHECKPOINT="${INIT_CHECKPOINT:-}"
 
 DEFAULT_ALGORITHMS=(
     diffusion_policy
@@ -80,6 +90,23 @@ actual_dir_for() {
     find "${parent}" -maxdepth 1 -type d -name 'best__*' 2>/dev/null | sort -r | head -1
 }
 
+select_init_ckpt_for() {
+    local algo=$1
+    if [[ -n "${INIT_CHECKPOINT}" ]]; then
+        echo "${INIT_CHECKPOINT}"
+        return
+    fi
+    if [[ -n "${INIT_EXP_NAME}" ]]; then
+        local parent="${ROOT}/runs/${INIT_EXP_NAME}/${algo}"
+        local ckpt=""
+        ckpt="$(find "${parent}" -path '*/checkpoints/best_eval_success_once.pt' -type f 2>/dev/null | sort -r | head -1)"
+        [[ -n "${ckpt}" ]] || ckpt="$(find "${parent}" -path '*/checkpoints/best_eval_success_at_end.pt' -type f 2>/dev/null | sort -r | head -1)"
+        [[ -n "${ckpt}" ]] || ckpt="$(find "${parent}" -path '*/checkpoints/final.pt' -type f 2>/dev/null | sort -r | head -1)"
+        [[ -n "${ckpt}" ]] || ckpt="$(find "${parent}" -path '*/checkpoints/[0-9]*.pt' -type f 2>/dev/null | sort -r | head -1)"
+        echo "${ckpt}"
+    fi
+}
+
 is_successful() {
     local dir=$1
     [[ -n "${dir}" ]] || return 1
@@ -94,6 +121,8 @@ build_cmd() {
     local algo=$2
     local track_arg="--track"
     [[ "${USE_WANDB}" == "true" ]] || track_arg="--no-track"
+    local init_ckpt=""
+    init_ckpt="$(select_init_ckpt_for "${algo}")"
 
     local cmd=(
         env "CUDA_VISIBLE_DEVICES=${gpu}"
@@ -116,6 +145,9 @@ build_cmd() {
         --wandb_project_name "${WANDB_PROJECT}"
         "${track_arg}"
     )
+    if [[ -n "${init_ckpt}" ]]; then
+        cmd+=(--init_checkpoint "${init_ckpt}")
+    fi
 
     printf '%q ' "${cmd[@]}"
 }

@@ -69,6 +69,7 @@ class Args:
     # Environment settings
     env_id: str = "LiftPegUpright-v1"
     demo_path: str = "~/.maniskill/demos/LiftPegUpright-v1/rl/trajectory.rgb.pd_ee_delta_pose.physx_cuda.h5"
+    init_checkpoint: Optional[str] = None
     num_demos: Optional[int] = None
     max_episode_steps: Optional[int] = None
     control_mode: str = "pd_ee_delta_pose"
@@ -846,6 +847,22 @@ def main():
     
     # Create action normalizer if needed
     action_normalizer = ActionNormalizer(mode=args.action_norm_mode) if args.normalize_actions else None
+    init_checkpoint_data = None
+    if args.init_checkpoint is not None:
+        init_checkpoint_data = torch.load(os.path.expanduser(args.init_checkpoint), map_location=device)
+        print(f"Loaded warm-start checkpoint from {args.init_checkpoint}")
+        if action_normalizer is not None and init_checkpoint_data.get("action_normalizer") is not None:
+            action_normalizer = ActionNormalizer.from_checkpoint(init_checkpoint_data["action_normalizer"])
+            print(f"Loaded action normalizer from checkpoint (mode={action_normalizer.mode})")
+    if init_checkpoint_data is not None:
+        agent.load_state_dict(init_checkpoint_data["agent"], strict=True)
+        print("Loaded agent weights from checkpoint")
+        if "ema_agent" in init_checkpoint_data:
+            ema_agent.load_state_dict(init_checkpoint_data["ema_agent"], strict=True)
+            print("Loaded EMA weights from checkpoint")
+        if visual_encoder is not None and "visual_encoder" in init_checkpoint_data:
+            visual_encoder.load_state_dict(init_checkpoint_data["visual_encoder"], strict=True)
+            print("Loaded visual encoder from checkpoint")
     
     # Create dataset and dataloader
     obs_process_fn = create_obs_process_fn(args.env_id, output_format="NCHW")

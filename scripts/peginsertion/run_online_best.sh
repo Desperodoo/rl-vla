@@ -14,7 +14,15 @@ EXP_NAME="${EXP_NAME:-peginsertion_best1}"
 SEED="${SEED:-42}"
 CONDA_ENV="${CONDA_ENV:-rlft_ms3}"
 
-DEMO_PATH="${DEMO_PATH:-${HOME}/.maniskill/demos/${ENV_ID}/rl/trajectory.${OBS_MODE}.${CONTROL_MODE}.${SIM_BACKEND}.h5}"
+DEFAULT_DEMO_PATH="${HOME}/.maniskill/demos/${ENV_ID}/rl/trajectory.${OBS_MODE}.${CONTROL_MODE}.${SIM_BACKEND}.h5"
+SUCCESS_DEMO_PATH="${HOME}/.maniskill/demos/${ENV_ID}/rl/trajectory.${OBS_MODE}.${CONTROL_MODE}.success.h5"
+if [[ -z "${DEMO_PATH:-}" ]]; then
+    if [[ -f "${SUCCESS_DEMO_PATH}" ]]; then
+        DEMO_PATH="${SUCCESS_DEMO_PATH}"
+    else
+        DEMO_PATH="${DEFAULT_DEMO_PATH}"
+    fi
+fi
 GPU_IDS="${GPU_IDS:-1,5}"
 USE_WANDB="${USE_WANDB:-true}"
 WANDB_PROJECT="${WANDB_PROJECT:-${EXP_NAME}-online}"
