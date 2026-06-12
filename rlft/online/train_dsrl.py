@@ -145,9 +145,9 @@ class Args:
     """Task instruction for the ACP Gemma encoder."""
 
     # ----- critic stabilization -----
-    q_target_clip: float = 20.0
+    q_target_clip: float = 0.0
     """Clip TD target to [-clip, +clip]. 0 = no clipping.
-    v5 validated: clip=20 fixes DSRL critic instability (loss 1900→4-37)."""
+    Default qclip0 restores the historical DSRL sim baseline."""
 
     # ----- logging / eval / saving -----
     log_freq: int = 100
